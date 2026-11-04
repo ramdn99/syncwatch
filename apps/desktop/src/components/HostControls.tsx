@@ -10,9 +10,10 @@ export interface HostControlsProps {
   mediaKey: string;
   onSelectTrack: (kind: 'audio' | 'sub', sel: TrackSelection) => void;
   onAddTrack: (kind: 'audio' | 'sub') => void;
+  onChangeSource: () => void;
 }
 
-export function HostControls({ isHost, tracks, mediaKey, onSelectTrack, onAddTrack }: HostControlsProps) {
+export function HostControls({ isHost, tracks, mediaKey, onSelectTrack, onAddTrack, onChangeSource }: HostControlsProps) {
   const [preset, setPreset] = useState<Preset>('everyone');
   const [waitForEveryone, setWaitForEveryone] = useState(false);
   return (
@@ -45,11 +46,10 @@ export function HostControls({ isHost, tracks, mediaKey, onSelectTrack, onAddTra
           <button
             type="button"
             className="w-full rounded-md border border-border bg-elevated px-3 py-2 text-left hover:border-accent"
-            title="Available from Milestone 3"
-            disabled
+            onClick={onChangeSource}
           >
             <span className="font-medium">Change source...</span>
-            <span className="block text-xs text-muted">Local file or torrent magnet (coming soon)</span>
+            <span className="block text-xs text-muted">Local file or torrent magnet</span>
           </button>
         </>
       ) : (

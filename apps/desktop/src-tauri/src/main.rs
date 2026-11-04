@@ -2,7 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod connection;
 mod logging;
+mod media;
 mod native;
 mod paths;
 #[cfg(test)]

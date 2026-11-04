@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "crates/protocol",
+  "crates/ice-config",
   "crates/sync-core",
   "crates/player",
   "crates/syncwatch-sim",

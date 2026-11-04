@@ -57,6 +57,18 @@ Host + N members (one muted in chat, one without the file) plus a late joiner. T
 play, seek, speed change, chat and an external subtitle. The run fails above 200 ms steady-state
 divergence or on any protocol violation.
 
+## 4c. Live connection check (your own Metered account)
+
+Reads `.env.local` and `.env.ice.local` and prints only transport labels, OK/FAIL and latency. Every
+TURN allocation is released immediately (no relayed data). Keep runs rare; it uses your quota.
+
+```
+cargo run -p syncwatch-ice-config --example live_probe
+cargo test -p syncwatch-ice-config -- --ignored keyring
+```
+
+The second command touches the real Windows Credential Manager (a throwaway entry it deletes).
+
 ## 5. Run the app (development)
 
 ```
@@ -71,6 +83,7 @@ Development environment variables:
 | `SYNCWATCH_DEV_MEDIA` | Debug builds: open this file once the UI is ready |
 | `SYNCWATCH_FORCE_BUNDLED_VULKAN=1` | Skip the system `vulkan-1.dll` and load `<exe>\vulkan\vulkan-1.dll` |
 | `SYNCWATCH_DEV_LAYOUT_PROBE=1` | Write `%LOCALAPPDATA%\SyncWatch\dev\layout-probe.json` after every video placement |
+| `SYNCWATCH_DEV_BYPASS_CONNECTION=1` | Debug builds only: allow Create/Join without a verified connection (release builds have no bypass) |
 | `SYNCWATCH_LOG` | App log level (`trace`/`debug`/`info`/`warn`/`error`). Third-party crates stay at `warn` |
 
 Logs go to `%LOCALAPPDATA%\SyncWatch\logs\syncwatch.log` (in portable mode: `<exe>\data\logs`).

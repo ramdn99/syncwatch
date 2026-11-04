@@ -17,6 +17,9 @@ tauri-build.workspace = true
 tauri.workspace = true
 tauri-plugin-dialog.workspace = true
 syncwatch-player.workspace = true
+syncwatch-protocol.workspace = true
+syncwatch-ice-config = { path = "../../../crates/ice-config" }
+blake3.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

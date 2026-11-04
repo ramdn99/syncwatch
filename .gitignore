@@ -43,3 +43,6 @@ desktop.ini
 # fonts mirrored by fetch-third-party.ps1
 apps/desktop/public/fonts/
 
+# local graphify knowledge graph and Claude Code hooks (not committed)
+graphify-out/
+.claude/settings.json

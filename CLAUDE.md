@@ -65,6 +65,7 @@ cargo test --workspace
 pnpm --dir apps/desktop tauri dev
 cargo run --release -p syncwatch-sim -- --seed 7
 cargo run --release -p syncwatch-sim -- --latency-ms 150 --jitter-ms 60 --loss 0.2
+cargo run -p syncwatch-ice-config --example live_probe   (real Metered account; prints OK/FAIL + latency only)
 pwsh -NoProfile -File scripts/verify-imports.ps1
 pwsh -NoProfile -File scripts/secret-scan.ps1 -Mode All
 ```
@@ -74,6 +75,8 @@ pwsh -NoProfile -File scripts/secret-scan.ps1 -Mode All
 - Run tests in the default (debug) profile: overflow checks caught a real bug that release
   builds hid. sync-core integration tests use the deterministic `sim` World (FakeNet, SimPlayer).
 - Wire-format or sync changes need a test in `crates/sync-core/tests` (sync, tracks, chat, media).
+- Connection tests use the in-process fake TURN server (`crates/ice-config/tests`); live Metered runs
+  only via `live_probe`, kept rare, output secret-scanned before showing it. TLS = rustls + ring (ADR 0004).
 
 ## Conventions
 - Static MSVC CRT (`+crt-static`, `.cargo/config.toml`). rustls only: `cargo tree -i openssl` and

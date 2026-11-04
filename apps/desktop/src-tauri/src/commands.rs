@@ -181,9 +181,13 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
         dir.join("layout-probe.json")
     });
 
+    let conn_paths = paths.clone();
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
+            syncwatch_ice_config::install_crypto_provider();
+            app.manage(crate::connection::ConnectionManager::new(&conn_paths));
+            crate::connection::spawn_background_retest(app.handle().clone());
             let window = app
                 .get_webview_window("main")
                 .ok_or("main window missing from tauri.conf.json")?;
@@ -230,6 +234,16 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             player_set_mute,
             player_select_track,
             player_add_external,
+            crate::connection::connection_status,
+            crate::connection::connection_split_url,
+            crate::connection::connection_test_api_key,
+            crate::connection::connection_test_ice,
+            crate::connection::connection_retest,
+            crate::connection::connection_remove,
+            crate::connection::connection_set_relay_only,
+            crate::connection::open_help_link,
+            crate::media::magnet_inspect,
+            crate::media::prepare_change_media,
         ])
         .run(tauri::generate_context!());
 
