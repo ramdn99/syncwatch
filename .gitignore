@@ -31,10 +31,15 @@ portable.flag
 *.avi
 *.mov
 *.m4v
-*.ts
+*.m2ts
+# (no *.ts: that would ignore TypeScript sources)
 
 # --- editor / OS ---
 .vscode/
 .idea/
 Thumbs.db
 desktop.ini
+
+# fonts mirrored by fetch-third-party.ps1
+apps/desktop/public/fonts/
+

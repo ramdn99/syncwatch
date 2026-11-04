@@ -1,0 +1,56 @@
+{
+  "$comment": "Pinned third-party artifacts. All SHA-256 values are upper-case hex. fetch-third-party.ps1 downloads into third_party/cache (git-ignored) and verifies every hash.",
+  "libmpv": {
+    "$comment": "Read-only check of the developer's existing LIBMPV_DIR. Never written to. See docs/libmpv-build.md.",
+    "build": "shinchiro mpv-winbuild-cmake 20261101",
+    "mpv_version": "v0.41.0-1374-g48fca90e8",
+    "license": "GPL-2.0-or-later (build includes GPL components)",
+    "archive_url": "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261101/mpv-dev-x86_64-20261101-git-48fca90e8c.7z",
+    "archive_sha256": "30D3F9FA121CE24638610A9AE52F8957743F9DEA416DD37DC4FF7E43589EF843",
+    "files": {
+      "libmpv-2.dll": "F40293DC5F4012F3F7BCC79DE2B9BFB66309B87DBD33A47EE49EBFF716EB8154",
+      "libmpv.dll.a": "BEF1B89F534BC86B33135E1F04FA2D5064B9D48B5DE8BC9866665BBF43DEF793",
+      "include/mpv/client.h": "3DA9B8C61C3FB4E2D76BD248CEBF72F3EE830331411B71A76ADBD5E05660CC50"
+    },
+    "hand_generated": ["mpv.def", "mpv.lib", "mpv.exp"]
+  },
+  "downloads": [
+    {
+      "id": "vulkan-runtime",
+      "url": "https://sdk.lunarg.com/sdk/download/1.4.363.0/windows/VulkanRT-X64-1.4.363.0-Components.zip",
+      "sha256": "A25A927AA8B9F0371048F1861CF88AC3B9BC9B1FB332C42D897C8AB32695769A",
+      "kind": "zip",
+      "license": "Apache-2.0 AND MIT",
+      "authenticode_signer": "LunarG, Inc.",
+      "extract": [
+        { "from": "VulkanRT-X64-1.4.363.0-Components/x64/vulkan-1.dll", "to": "vulkan/vulkan-1.dll", "sha256": "E1FCFC9489BEEFA6A6D9D11D6C7517F6A2B7F16E0D3FB8F4103BEE0210F314A3" },
+        { "from": "VulkanRT-X64-1.4.363.0-Components/VulkanRT-License.txt", "to": "licenses/Vulkan-Runtime-LICENSE.txt", "sha256": "404DEB98DABF3E54BF9070D59676B31D69A3DA2F9F6E56BDF09AD315C04C718C" }
+      ]
+    },
+    {
+      "id": "space-grotesk",
+      "url": "https://github.com/floriankarsten/space-grotesk/releases/download/2.0.0/SpaceGrotesk-2.0.0.zip",
+      "sha256": "53B415577D4139248555300710BEA0D268C7A5BE67B93DE53B716A9736CABFFD",
+      "kind": "zip",
+      "license": "OFL-1.1",
+      "extract": [
+        { "from": "SpaceGrotesk-2.0.0/ttf/static/SpaceGrotesk-Bold.ttf", "to": "fonts/SpaceGrotesk-Bold.ttf", "sha256": "7209BBB75FC0F5C546A5F5773B0DB74FFC6ABF04C2148C1105CACE5765A96BDB" },
+        { "from": "SpaceGrotesk-2.0.0/woff2/static/SpaceGrotesk-Bold.woff2", "to": "fonts/SpaceGrotesk-Bold.woff2", "sha256": "06D705CEBBAB916F0C0FE82B6C6F4CAE06AA07FD6F5EE078421206040326EF63" },
+        { "from": "SpaceGrotesk-2.0.0/woff2/static/SpaceGrotesk-Medium.woff2", "to": "fonts/SpaceGrotesk-Medium.woff2", "sha256": "F20A85BE4C8A74DDAD94D46FCCE503666498855E5A87755D75CD728D801BBE58" },
+        { "from": "SpaceGrotesk-2.0.0/woff2/static/SpaceGrotesk-Regular.woff2", "to": "fonts/SpaceGrotesk-Regular.woff2", "sha256": "C6620E3D49A9F9DBA3BE3AA93C89D6D5A51096CB1C616D2691EDB630551D5DA5" },
+        { "from": "SpaceGrotesk-2.0.0/OFL.txt", "to": "licenses/SpaceGrotesk-OFL.txt", "sha256": "564CE565C371C5E5BBF286006565A7C9AA55A9F56E7CA58D56E05D649DD61A72" }
+      ]
+    },
+    { "id": "inter", "url": "https://raw.githubusercontent.com/rsms/inter/v4.1/docs/font-files/InterVariable.woff2", "sha256": "693B77D4F32EE9B8BFC995589B5FAD5E99ADF2832738661F5402F9978429A8E3", "kind": "file", "to": "fonts/InterVariable.woff2", "license": "OFL-1.1" },
+    { "id": "inter-license", "url": "https://raw.githubusercontent.com/rsms/inter/v4.1/LICENSE.txt", "sha256": "262481E844521B326F5ECD053E59B98C8B2DA78C8EE1BDBB6E8174305E54935A", "kind": "file", "to": "licenses/Inter-OFL.txt", "license": "OFL-1.1" },
+    { "id": "noto-sans-regular", "url": "https://raw.githubusercontent.com/notofonts/notofonts.github.io/28b15b4b43b7bed62b5cf6e6b0b5ff5846270535/fonts/NotoSans/hinted/ttf/NotoSans-Regular.ttf", "sha256": "478C558EA716033CD60C03438F628DFA75694DCF6B5F6D505A2F05FD2B4F3823", "kind": "file", "to": "fonts/NotoSans-Regular.ttf", "license": "OFL-1.1" },
+    { "id": "noto-sans-bold", "url": "https://raw.githubusercontent.com/notofonts/notofonts.github.io/28b15b4b43b7bed62b5cf6e6b0b5ff5846270535/fonts/NotoSans/hinted/ttf/NotoSans-Bold.ttf", "sha256": "1DF075A380FC7CB898ACF64C1F7B3B4DD780DE3CAA860178BF929DE35817A913", "kind": "file", "to": "fonts/NotoSans-Bold.ttf", "license": "OFL-1.1" },
+    { "id": "noto-sans-italic", "url": "https://raw.githubusercontent.com/notofonts/notofonts.github.io/28b15b4b43b7bed62b5cf6e6b0b5ff5846270535/fonts/NotoSans/hinted/ttf/NotoSans-Italic.ttf", "sha256": "467E3F89EECA4108BB8710A2B9E0CF2281AC56D5B0609211A83776D0505EECB5", "kind": "file", "to": "fonts/NotoSans-Italic.ttf", "license": "OFL-1.1" },
+    { "id": "noto-sans-bolditalic", "url": "https://raw.githubusercontent.com/notofonts/notofonts.github.io/28b15b4b43b7bed62b5cf6e6b0b5ff5846270535/fonts/NotoSans/hinted/ttf/NotoSans-BoldItalic.ttf", "sha256": "1B602A9D6353BE42C91DF097A4857B69FA2696F26703D7A33B54A15D87C2622C", "kind": "file", "to": "fonts/NotoSans-BoldItalic.ttf", "license": "OFL-1.1" },
+    { "id": "noto-sans-license", "url": "https://raw.githubusercontent.com/notofonts/latin-greek-cyrillic/NotoSans-v2.015/OFL.txt", "sha256": "CEE9892F9F0CC8FE882C9E9537EE6A89621D86EE7CEAF70B02E2B2B1C25C061A", "kind": "file", "to": "licenses/NotoSans-OFL.txt", "license": "OFL-1.1" }
+  ],
+  "gitleaks": {
+    "image": "zricethezav/gitleaks:v8.28.0",
+    "digest": "sha256:cdbb7c955abce02001a9f6c9f602fb195b7fadc1e812065883f695d1eeaba854"
+  }
+}

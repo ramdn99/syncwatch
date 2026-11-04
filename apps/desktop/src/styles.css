@@ -1,0 +1,99 @@
+@import 'tailwindcss';
+
+/* Fonts are bundled locally (OFL) by scripts/fetch-third-party.ps1 into public/fonts. */
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/InterVariable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('/fonts/SpaceGrotesk-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('/fonts/SpaceGrotesk-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('/fonts/SpaceGrotesk-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-display: block;
+}
+
+@theme {
+  --color-bg: #0b0b0d;
+  --color-surface: #141417;
+  --color-elevated: #1c1c21;
+  --color-border: #2a2a31;
+  --color-text: #f2f2f4;
+  --color-muted: #9a9aa5;
+  --color-disabled: #5c5c66;
+  --color-accent: #e8a33d;
+  --color-accent-hover: #f0b25a;
+  --color-accent-pressed: #c98a28;
+  --color-on-accent: #141414;
+  --color-success: #4cc38a;
+  --color-warning: #e8a33d;
+  --color-danger: #f26b6b;
+  --color-info: #6aa8f7;
+  --font-sans: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --font-brand: 'Space Grotesk', 'Inter', 'Segoe UI', system-ui, sans-serif;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+/* The page itself is transparent: only the CENTER column stays see-through so the mpv window
+   underneath shows. Every other region paints an opaque surface. */
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  overflow: hidden;
+  user-select: none;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.video-hole {
+  background: transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.scrim {
+  background: linear-gradient(to top, rgb(0 0 0 / 0.78), rgb(0 0 0 / 0.35) 60%, transparent);
+}
+
+.chat-overlay-line {
+  transition: opacity 600ms ease;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
