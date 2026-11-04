@@ -1,0 +1,3 @@
+#!/bin/sh
+# SyncWatch: full-history secret scan before every push.
+exec pwsh -NoProfile -File "$(git rev-parse --show-toplevel)/scripts/secret-scan.ps1" -Mode History

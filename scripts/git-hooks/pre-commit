@@ -1,0 +1,4 @@
+#!/bin/sh
+# SyncWatch: secret scan of staged changes before every commit.
+# Enable once per clone:  git config core.hooksPath scripts/git-hooks
+exec pwsh -NoProfile -File "$(git rev-parse --show-toplevel)/scripts/secret-scan.ps1" -Mode Staged
