@@ -23,7 +23,23 @@ impl AppPaths {
             .unwrap_or_else(|| PathBuf::from("."));
         let portable = exe_dir.join("portable.flag").is_file();
         let local = directories::BaseDirs::new().map(|b| b.data_local_dir().to_path_buf());
-        Self::from_parts(exe_dir, portable, local)
+        let mut p = Self::from_parts(exe_dir, portable, local);
+        // Debug builds: SYNCWATCH_DEV_IDENTITY=a|b gives each dev instance its own data folder.
+        if cfg!(debug_assertions)
+            && let Ok(id) = std::env::var("SYNCWATCH_DEV_IDENTITY")
+            && !id.is_empty()
+            && id.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            let root = p.root.with_file_name(format!("{}-dev-{id}", APP_FOLDER));
+            p = Self {
+                config: root.join("config"),
+                logs: root.join("logs"),
+                cache: root.join("cache"),
+                root,
+                ..p
+            };
+        }
+        p
     }
 
     /// Pure constructor, used by tests.

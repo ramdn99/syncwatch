@@ -3,9 +3,11 @@ resolver = "3"
 members = [
   "crates/protocol",
   "crates/ice-config",
+  "crates/net",
   "crates/sync-core",
   "crates/player",
   "crates/syncwatch-sim",
+  "crates/signaling-server",
   "apps/desktop/src-tauri",
 ]
 

@@ -67,6 +67,9 @@ cargo run -p syncwatch-ice-config --example live_probe
 cargo test -p syncwatch-ice-config -- --ignored keyring
 ```
 
+The relay-only network lab with `-Ice metered` (section 5b) is the end-to-end check through your
+relay. It reads the static ICE list (no API request) and also uses quota.
+
 The second command touches the real Windows Credential Manager (a throwaway entry it deletes).
 
 ## 5. Run the app (development)
@@ -85,8 +88,45 @@ Development environment variables:
 | `SYNCWATCH_DEV_LAYOUT_PROBE=1` | Write `%LOCALAPPDATA%\SyncWatch\dev\layout-probe.json` after every video placement |
 | `SYNCWATCH_DEV_BYPASS_CONNECTION=1` | Debug builds only: allow Create/Join without a verified connection (release builds have no bypass) |
 | `SYNCWATCH_LOG` | App log level (`trace`/`debug`/`info`/`warn`/`error`). Third-party crates stay at `warn` |
+| `SYNCWATCH_SIGNALING_URL` | Signaling server for this instance (default `wss://signal.example.invalid/ws`, a placeholder until deployment). `ws://` is accepted only for localhost. The URL is logged at startup |
+| `SYNCWATCH_DEV_IDENTITY=a` | Debug builds: use `%LOCALAPPDATA%\SyncWatch-dev-a` as the data folder, so two instances can run side by side |
 
 Logs go to `%LOCALAPPDATA%\SyncWatch\logs\syncwatch.log` (in portable mode: `<exe>\data\logs`).
+
+## 5b. Signaling server and network lab
+
+Run the signaling server locally:
+
+```
+cargo run -p syncwatch-signaling
+```
+
+It listens on `0.0.0.0:8787` (`SYNCWATCH_SIGNALING_BIND` changes that). Docker and TLS
+deployment notes are in `deploy/README.md`.
+
+The network lab starts the signaling server, the Vite dev server and two app instances. They
+connect through the real WebView2 bridge, write measurements and are stopped again. It never
+moves the mouse or presses keys. Results are printed and kept in `%TEMP%\syncwatch-netlab-<pid>`.
+
+```
+pwsh -NoProfile -File scripts/dev/net-lab.ps1 -Ice none -Seconds 25 -MB 256 -BenchMB 256 -Release
+pwsh -NoProfile -File scripts/dev/net-lab.ps1 -Ice coturn -Seconds 25 -MB 64 -Release
+pwsh -NoProfile -File scripts/dev/net-lab.ps1 -Ice none -Seconds 45 -MB 0 -DropAt 10 -Release
+pwsh -NoProfile -File scripts/dev/net-lab.ps1 -Ice none -Seconds 40 -MB 0 -FreezeAt 10 -Release
+pwsh -NoProfile -File scripts/dev/net-lab.ps1 -Ice coturn -Seconds 780 -MB 16 -Minimized -Release
+pwsh -NoProfile -File scripts/dev/net-lab.ps1 -Ice metered -Seconds 10 -MB 1 -Release
+```
+
+| Option | Meaning |
+|---|---|
+| `-Ice none` | host candidates only (direct, local) |
+| `-Ice coturn` | relay-only through the local coturn container (Docker Desktop must be running; no quota) |
+| `-Ice metered` | relay-only through your Metered account, using the ICE list in `.env.ice.local` (uses quota: keep it short) |
+| `-DropAt N` | member stops forwarding traffic N s after connecting (watchdog: interrupt at 4 s, restart at 10 s) |
+| `-FreezeAt N` | member's bridge page blocks its event loop N s after connecting (watchdog: page rebuilt after 5 s) |
+| `-Minimized` | both windows minimized for the whole run (background-throttling check) |
+| `-BenchMB N` | also measure raw data-channel speed inside one bridge page (no IPC) |
+| `-Release` | optimized build (debug assertions stay on so the dev-only lab code is included) |
 
 ## 6. Secret scan
 

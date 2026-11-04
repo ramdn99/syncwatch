@@ -16,6 +16,10 @@ export default defineConfig({
     target: 'es2022',
     sourcemap: false,
     assetsInlineLimit: 0,
+    rollupOptions: {
+      // Main UI and the hidden WebRTC bridge page.
+      input: { main: 'index.html', bridge: 'bridge.html' },
+    },
   },
   test: {
     environment: 'jsdom',

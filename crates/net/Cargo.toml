@@ -1,0 +1,26 @@
+[package]
+name = "syncwatch-net"
+description = "SyncWatch networking: PeerTransport trait, bridge IPC framing, watchdog, signaling client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+syncwatch-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { version = "1.53.3", features = ["net", "time", "rt", "macros", "sync"] }
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "__rustls-tls"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-platform-verifier = "0.7.1"
+
+[dev-dependencies]
+tokio = { version = "1.53.3", features = ["net", "time", "rt", "rt-multi-thread", "macros", "sync"] }
+syncwatch-signaling = { path = "../signaling-server" }
+
+[lints]
+workspace = true

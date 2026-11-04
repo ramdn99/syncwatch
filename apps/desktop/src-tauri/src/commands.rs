@@ -188,6 +188,13 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             syncwatch_ice_config::install_crypto_provider();
             app.manage(crate::connection::ConnectionManager::new(&conn_paths));
             crate::connection::spawn_background_retest(app.handle().clone());
+            tracing::info!(signaling_url = %syncwatch_net::signaling::configured_url(), "signaling server for this instance");
+            let (bridge, events) = crate::bridge::Bridge::start(app.handle())?;
+            app.manage(Arc::clone(&bridge));
+            if let Some(mut events) = crate::netlab::maybe_start(app.handle(), bridge, events) {
+                // Rooms (Milestone 5) consume transport events; until then just drain them.
+                tauri::async_runtime::spawn(async move { while events.recv().await.is_some() {} });
+            }
             let window = app
                 .get_webview_window("main")
                 .ok_or("main window missing from tauri.conf.json")?;
@@ -244,6 +251,8 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             crate::connection::open_help_link,
             crate::media::magnet_inspect,
             crate::media::prepare_change_media,
+            crate::bridge::bridge_attach,
+            crate::bridge::bridge_in,
         ])
         .run(tauri::generate_context!());
 

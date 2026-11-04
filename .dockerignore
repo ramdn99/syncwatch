@@ -1,0 +1,13 @@
+# Keep secrets, media and build output out of every Docker build context.
+.env*
+*.env
+target/
+**/node_modules/
+apps/desktop/dist/
+apps/desktop/public/fonts/
+third_party/cache/
+graphify-out/
+.claude/
+.git/
+*.mkv
+*.mp4

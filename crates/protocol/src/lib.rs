@@ -12,6 +12,7 @@ pub mod magnet;
 pub mod media;
 pub mod messages;
 pub mod permissions;
+pub mod signaling;
 pub mod tracks;
 
 pub use ids::*;

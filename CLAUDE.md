@@ -36,8 +36,10 @@ section 1 are final: do not re-open or re-ask them. Significant decisions go in 
 crates/protocol        versioned postcard protocol enum, no I/O (M2)
 crates/sync-core       pure deterministic state machine (Event, Clock) -> Vec<Effect>; SimClock, FakeNet (M2)
 crates/ice-config      Metered fetch/parse/validate, STUN/TURN connection test (M3)
-crates/net             PeerTransport trait, hidden WebView2 "bridge" with WebRTC data channels, handshake,
-                       priority scheduler, watchdog. NO webrtc-rs (it has no TURN over TCP/TLS) (M4)
+crates/net             PeerTransport trait, bridge IPC framing (binary, batched), SDP fingerprints, watchdog,
+                       signaling client (rustls+ring). NO webrtc-rs (it has no TURN over TCP/TLS) (M4).
+                       The bridge itself (hidden WebView2 window) is apps/desktop/src-tauri/src/bridge.rs
+                       + apps/desktop/src/bridge/bridge.ts (WebRTC plumbing only, no timers)
 crates/player          Player trait; libmpv implementation (libmpv2 crate) and a mock (M1)
 crates/torrent         pure PiecePolicy + in-process librqbit adapter (M7)
 crates/signaling-server axum WebSocket server, :8787 /ws, /healthz (M4)
@@ -66,6 +68,9 @@ pnpm --dir apps/desktop tauri dev
 cargo run --release -p syncwatch-sim -- --seed 7
 cargo run --release -p syncwatch-sim -- --latency-ms 150 --jitter-ms 60 --loss 0.2
 cargo run -p syncwatch-ice-config --example live_probe   (real Metered account; prints OK/FAIL + latency only)
+cargo run -p syncwatch-signaling
+pwsh -NoProfile -File scripts/dev/net-lab.ps1 -Ice none -Seconds 25 -MB 64 -Release   (two instances, no input simulation)
+docker compose -f deploy/compose.dev.yml up -d --build   (signaling + local coturn; always down afterwards)
 pwsh -NoProfile -File scripts/verify-imports.ps1
 pwsh -NoProfile -File scripts/secret-scan.ps1 -Mode All
 ```
@@ -76,7 +81,12 @@ pwsh -NoProfile -File scripts/secret-scan.ps1 -Mode All
   builds hid. sync-core integration tests use the deterministic `sim` World (FakeNet, SimPlayer).
 - Wire-format or sync changes need a test in `crates/sync-core/tests` (sync, tracks, chat, media).
 - Connection tests use the in-process fake TURN server (`crates/ice-config/tests`); live Metered runs
-  only via `live_probe`, kept rare, output secret-scanned before showing it. TLS = rustls + ring (ADR 0004).
+  only via `live_probe` or `net-lab.ps1 -Ice metered`, kept rare and short, output secret-scanned before showing it.
+  TLS = rustls + ring (ADR 0004).
+- Network behaviour (connect time, throughput, watchdog, minimized gaps) is measured with `scripts/dev/net-lab.ps1`;
+  numbers and design live in ADR 0005. Prefer `-Ice coturn` (local, free) over `-Ice metered`.
+- All webviews must use the same `additionalBrowserArgs` (WebView2 shares one browser process); a test checks
+  `bridge::BROWSER_ARGS` against tauri.conf.json.
 
 ## Conventions
 - Static MSVC CRT (`+crt-static`, `.cargo/config.toml`). rustls only: `cargo tree -i openssl` and
@@ -103,3 +113,4 @@ workspace · 9 Sync, tracks and chat design · 10 Torrents · 11 Security and pr
 14 Milestones · 15 Start now
 Milestones: 1 spike/foundation · 2 protocol+sync-core+sim · 3 ice-config + setup UI · 4 signaling + bridge ·
 5 rooms · 6 real-player sync, tracks, chat timestamps, succession · 7 torrents · 8 polish · 9 packaging + clean VM.
+

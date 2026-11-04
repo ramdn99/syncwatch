@@ -1,0 +1,27 @@
+[package]
+name = "syncwatch-signaling"
+description = "SyncWatch signaling server: routes WebRTC offers/answers/candidates between a room host and its members"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "syncwatch-signaling"
+path = "src/main.rs"
+
+[dependencies]
+syncwatch-protocol.workspace = true
+axum = { version = "=0.8.9", default-features = false, features = ["ws", "http1", "tokio", "query"] }
+tokio = { version = "1.53.3", features = ["net", "time", "rt", "rt-multi-thread", "macros", "sync", "signal"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+getrandom = "0.4.3"
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect"] }
+
+[lints]
+workspace = true

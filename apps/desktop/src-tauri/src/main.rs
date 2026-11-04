@@ -1,11 +1,13 @@
 // No console window in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod bridge;
 mod commands;
 mod connection;
 mod logging;
 mod media;
 mod native;
+mod netlab;
 mod paths;
 #[cfg(test)]
 mod secrets_for_tests;
