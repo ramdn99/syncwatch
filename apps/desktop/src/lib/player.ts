@@ -60,6 +60,8 @@ export const player = {
   open: (path: string) => call('player_open', { path }),
   setPaused: (paused: boolean) => call('player_set_paused', { paused }),
   seek: (seconds: number) => call('player_seek', { seconds: Math.max(0, seconds) }),
+  /** Relative to the player's current position (rapid key repeats accumulate correctly). */
+  seekBy: (delta: number) => call('player_seek_relative', { delta }),
   setVolume: (volume: number) => call('player_set_volume', { volume }),
   setMute: (mute: boolean) => call('player_set_mute', { mute }),
   selectTrack: (kind: TrackKind, selection: TrackSelection) => call('player_select_track', { kind, selection }),

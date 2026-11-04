@@ -212,10 +212,10 @@ export function App() {
           void run(player.setPaused(!s.paused));
           break;
         case 'seekBack':
-          void run(player.seek((s.timePos ?? 0) - 5));
+          void run(player.seekBy(-5));
           break;
         case 'seekForward':
-          void run(player.seek((s.timePos ?? 0) + 5));
+          void run(player.seekBy(5));
           break;
         case 'volumeUp':
           void run(player.setVolume(Math.min(100, s.volume + 5)));

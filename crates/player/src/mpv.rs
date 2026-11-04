@@ -315,6 +315,15 @@ impl Player for MpvPlayer {
             .command("seek", &[&t, "absolute+exact"])
             .map_err(cmd_err)
     }
+    fn seek_relative(&self, delta: f64) -> Result<()> {
+        if !delta.is_finite() {
+            return Err(PlayerError::Command("seek offset is not a number".into()));
+        }
+        let d = format!("{delta:+.3}");
+        self.mpv
+            .command("seek", &[&d, "relative+exact"])
+            .map_err(cmd_err)
+    }
     fn set_speed(&self, speed: f64) -> Result<()> {
         self.mpv
             .set_property("speed", speed.clamp(0.25, 4.0))

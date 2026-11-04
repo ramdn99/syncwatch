@@ -120,6 +120,11 @@ fn player_seek(state: State<'_, AppState>, seconds: f64) -> CmdResult<()> {
 }
 
 #[tauri::command]
+fn player_seek_relative(state: State<'_, AppState>, delta: f64) -> CmdResult<()> {
+    state.player.seek_relative(delta).map_err(friendly)
+}
+
+#[tauri::command]
 fn player_set_volume(state: State<'_, AppState>, volume: f64) -> CmdResult<()> {
     state.player.set_volume(volume).map_err(friendly)
 }
@@ -220,6 +225,7 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             player_open,
             player_set_paused,
             player_seek,
+            player_seek_relative,
             player_set_volume,
             player_set_mute,
             player_select_track,

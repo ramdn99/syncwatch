@@ -103,6 +103,8 @@ mod imp {
         columns: Vec<Rect>,
         fullscreen: bool,
         seq: u64,
+        /// Last inputs to `decide` (dev probe diagnostics).
+        last_inputs: (bool, bool, bool),
     }
 
     /// Owns the video HWND and keeps it aligned under the main window.
@@ -273,7 +275,8 @@ mod imp {
                 )
             };
             let (wanted, center) = {
-                let g = self.lock();
+                let mut g = self.lock();
+                g.last_inputs = (visible, minimized, g.wanted);
                 (g.wanted, g.center)
             };
             match decide(visible, minimized, wanted, center, origin) {
@@ -342,6 +345,7 @@ mod imp {
                     "actual": actual,
                     "columns": g.columns.iter().map(|c| c.offset(origin.0, origin.1)).collect::<Vec<_>>(),
                     "fullscreen": g.fullscreen,
+                    "inputs": { "mainVisible": g.last_inputs.0, "mainMinimized": g.last_inputs.1, "wanted": g.last_inputs.2, "center": g.center },
                 })
             };
             let tmp = path.with_extension("tmp");

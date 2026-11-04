@@ -13,6 +13,7 @@ pub enum MockCall {
     Load(String),
     SetPaused(bool),
     Seek(f64),
+    SeekRelative(f64),
     SetSpeed(f64),
     SetVolume(f64),
     SetMute(bool),
@@ -100,6 +101,16 @@ impl Player for MockPlayer {
     fn seek(&self, seconds: f64) -> Result<()> {
         self.record(MockCall::Seek(seconds));
         self.lock().state.time_pos = Some(seconds);
+        self.emit_state();
+        Ok(())
+    }
+    fn seek_relative(&self, delta: f64) -> Result<()> {
+        self.record(MockCall::SeekRelative(delta));
+        {
+            let mut g = self.lock();
+            let pos = g.state.time_pos.unwrap_or(0.0);
+            g.state.time_pos = Some((pos + delta).max(0.0));
+        }
         self.emit_state();
         Ok(())
     }

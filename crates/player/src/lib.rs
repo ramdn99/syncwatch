@@ -84,6 +84,9 @@ pub trait Player: Send + Sync {
     fn set_paused(&self, paused: bool) -> Result<()>;
     /// Absolute seek in seconds.
     fn seek(&self, seconds: f64) -> Result<()>;
+    /// Relative seek in seconds, applied by the player against its CURRENT position (so rapid
+    /// key repeats accumulate instead of all starting from a stale UI position).
+    fn seek_relative(&self, delta: f64) -> Result<()>;
     fn set_speed(&self, speed: f64) -> Result<()>;
     fn set_volume(&self, volume: f64) -> Result<()>;
     fn set_mute(&self, mute: bool) -> Result<()>;
