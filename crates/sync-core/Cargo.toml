@@ -1,0 +1,25 @@
+[package]
+name = "syncwatch-sync-core"
+description = "SyncWatch pure deterministic room state machine: (Event, Clock) -> Vec<Effect>"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["sim"]
+# SimClock, FakeNet, SimPlayer and the World harness (used by tests and syncwatch-sim).
+sim = ["dep:rand", "dep:rand_chacha"]
+
+[dependencies]
+syncwatch-protocol.workspace = true
+unicode-segmentation.workspace = true
+blake3.workspace = true
+rand = { workspace = true, optional = true }
+rand_chacha = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

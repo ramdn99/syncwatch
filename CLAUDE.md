@@ -63,10 +63,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo test --workspace
 pnpm --dir apps/desktop tauri dev
+cargo run --release -p syncwatch-sim -- --seed 7
+cargo run --release -p syncwatch-sim -- --latency-ms 150 --jitter-ms 60 --loss 0.2
 pwsh -NoProfile -File scripts/verify-imports.ps1
 pwsh -NoProfile -File scripts/secret-scan.ps1 -Mode All
 ```
 `scripts/build-release.ps1` (M9) is the only supported release build path.
+
+## Testing notes
+- Run tests in the default (debug) profile: overflow checks caught a real bug that release
+  builds hid. sync-core integration tests use the deterministic `sim` World (FakeNet, SimPlayer).
+- Wire-format or sync changes need a test in `crates/sync-core/tests` (sync, tracks, chat, media).
 
 ## Conventions
 - Static MSVC CRT (`+crt-static`, `.cargo/config.toml`). rustls only: `cargo tree -i openssl` and

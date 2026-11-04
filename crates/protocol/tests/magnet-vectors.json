@@ -1,0 +1,46 @@
+{
+  "$comment": "Shared magnet test vectors: the Rust parser (authoritative) and the TypeScript mirror must agree on every case.",
+  "valid": [
+    {
+      "input": "magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a&dn=Example+Movie+%282024%29.mkv&tr=udp%3A%2F%2Ftracker.example.invalid%3A1337",
+      "infohash": "c12fe1c06bba254a9dc9f519b335aa7c1367a88a",
+      "dn": "Example Movie (2024).mkv",
+      "trackers": ["udp://tracker.example.invalid:1337"]
+    },
+    {
+      "input": "MAGNET:?xt=urn:btih:C12FE1C06BBA254A9DC9F519B335AA7C1367A88A",
+      "infohash": "c12fe1c06bba254a9dc9f519b335aa7c1367a88a",
+      "dn": null,
+      "trackers": []
+    },
+    {
+      "input": "magnet:?xt=urn:btih:YEX6DQDLXISUVHOJ6UM3GNNKPQJWPKEK&dn=base32",
+      "infohash": "c12fe1c06bba254a9dc9f519b335aa7c1367a88a",
+      "dn": "base32",
+      "trackers": []
+    },
+    {
+      "input": "  magnet:?dn=first&xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=a&tr=a&x.pe=1.2.3.4:5  ",
+      "infohash": "0123456789abcdef0123456789abcdef01234567",
+      "dn": "first",
+      "trackers": ["a"]
+    },
+    {
+      "input": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&xt=urn:btmh:1220aaaa&dn=hybrid",
+      "infohash": "0123456789abcdef0123456789abcdef01234567",
+      "dn": "hybrid",
+      "trackers": []
+    }
+  ],
+  "invalid": [
+    { "input": "", "error": "NotMagnet" },
+    { "input": "https://example.invalid/file.torrent", "error": "NotMagnet" },
+    { "input": "magnet:?dn=no-hash", "error": "NoInfohash" },
+    { "input": "magnet:?xt=urn:btih:1234", "error": "BadInfohash" },
+    { "input": "magnet:?xt=urn:btih:zz2fe1c06bba254a9dc9f519b335aa7c1367a88a", "error": "BadInfohash" },
+    { "input": "magnet:?xt=urn:btih:YEX6DQDLXISUVHOJ6UM3GNNKPQJWPKE1", "error": "BadInfohash" },
+    { "input": "magnet:?xt=urn:btmh:1220aaaa", "error": "V2Only" },
+    { "input": "magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a&xt=urn:btih:0123456789abcdef0123456789abcdef01234567", "error": "ConflictingInfohash" },
+    { "input": "magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a&dn=%ZZ", "error": "BadEncoding" }
+  ]
+}

@@ -46,6 +46,17 @@ pwsh -NoProfile -File scripts/verify-imports.ps1
 pwsh -NoProfile -File scripts/tests/verify-imports.tests.ps1
 ```
 
+## 4b. Sync simulator
+
+```
+cargo run --release -p syncwatch-sim -- --seed 7
+cargo run --release -p syncwatch-sim -- --latency-ms 150 --jitter-ms 60 --loss 0.2
+```
+
+Host + N members (one muted in chat, one without the file) plus a late joiner. The scenario covers
+play, seek, speed change, chat and an external subtitle. The run fails above 200 ms steady-state
+divergence or on any protocol violation.
+
 ## 5. Run the app (development)
 
 ```
