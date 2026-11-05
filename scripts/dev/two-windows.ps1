@@ -33,6 +33,8 @@ param(
     [switch]$AutoRoom,
     [string]$Password = '',
     [int]$Soak = 0,
+    # Scripted end-to-end check between the two windows (debug builds): 'chat'.
+    [ValidateSet('', 'chat')][string]$Scenario = '',
     [switch]$Docker,
     # Stop a stale Vite/node process of THIS repo that still holds port 1420.
     [switch]$FreePort,
@@ -46,7 +48,7 @@ Set-Location $root
 if (Test-Path 'D:\Rust\cargo\bin') { $env:Path = "D:\Rust\cargo\bin;$env:Path" }
 if (-not $env:RUSTUP_HOME) { $env:RUSTUP_HOME = 'D:\Rust\rustup'; $env:CARGO_HOME = 'D:\Rust\cargo' }
 if (-not $env:LIBMPV_DIR) { $env:LIBMPV_DIR = 'D:\libs\mpv' }
-if ($Soak -gt 0) { $AutoRoom = $true }
+if ($Soak -gt 0 -or $Scenario) { $AutoRoom = $true }
 
 function Port-Busy([int]$port) {
     $c = [Net.Sockets.TcpClient]::new()
@@ -118,6 +120,8 @@ try {
         $env:SYNCWATCH_DEV_AUTOROOM = $(if ($AutoRoom) { if ($who -eq 'a') { 'host' } else { 'join' } } else { '' })
         $env:SYNCWATCH_DEV_SOAK_FILE = $(if ($Soak -gt 0) { Join-Path $work "soak-$who.json" } else { '' })
         $env:SYNCWATCH_DEV_MINIMIZE = $(if ($Soak -gt 0 -and $who -eq 'b') { '1' } else { '' })
+        $env:SYNCWATCH_DEV_SCENARIO = $Scenario
+        $env:SYNCWATCH_DEV_SCENARIO_FILE = $(if ($Scenario) { Join-Path $work "scenario-$who.txt" } else { '' })
         $p = Start-Process target\debug\syncwatch.exe -PassThru
         $started += $p
         $apps += $p
@@ -125,7 +129,15 @@ try {
         Start-Sleep -Seconds 3
     }
 
-    if ($Soak -gt 0) {
+    if ($Scenario) {
+        Write-Host "Scenario '$Scenario' running in both windows (no mouse or keyboard input)..."
+        $end = (Get-Date).AddMinutes(4)
+        while ((Get-Date) -lt $end) {
+            $done = @('a', 'b') | Where-Object { $p = Join-Path $work "scenario-$_.txt"; (Test-Path $p) -and ((Get-Content $p) -contains 'DONE') }
+            if ($done.Count -eq 2) { break }
+            Start-Sleep -Seconds 1
+        }
+    } elseif ($Soak -gt 0) {
         Write-Host "Soak test: $Soak s with window b minimized. Do not close the windows."
         $end = (Get-Date).AddSeconds($Soak + 15)
         while ((Get-Date) -lt $end -and -not ($apps | Where-Object HasExited)) { Start-Sleep -Seconds 5 }
@@ -139,6 +151,21 @@ finally {
     foreach ($svc in $compose) { docker compose -f deploy/compose.dev.yml rm -sf $svc *> $null }
     Start-Sleep -Seconds 1
     foreach ($port in 1420, 8787) { if (Port-Busy $port) { Write-Host "WARN: port $port is still in use." -ForegroundColor Yellow } }
+}
+
+if ($Scenario) {
+    $fail = $false
+    foreach ($who in 'a', 'b') {
+        $p = Join-Path $work "scenario-$who.txt"
+        Write-Host "=== window $who"
+        if (-not (Test-Path $p)) { Write-Host 'no result' -ForegroundColor Red; $fail = $true; continue }
+        $lines = Get-Content $p
+        foreach ($l in $lines) {
+            if ($l -like 'PASS*') { Write-Host $l -ForegroundColor Green } elseif ($l -like 'FAIL*') { Write-Host $l -ForegroundColor Red; $fail = $true } else { Write-Host $l }
+        }
+        if ($lines -notcontains 'DONE') { Write-Host 'did not finish' -ForegroundColor Red; $fail = $true }
+    }
+    if ($fail) { exit 1 }
 }
 
 if ($Soak -gt 0) {

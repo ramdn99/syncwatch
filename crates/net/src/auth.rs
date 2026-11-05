@@ -545,6 +545,8 @@ pub enum MemberStep {
         host: Identity,
         words: VerificationWords,
         send: Vec<AuthMsg>,
+        /// The member typed a password but the room has none: it was not used.
+        password_ignored: bool,
     },
     /// The host refused. With `retry_after_ms > 0` another password may be tried on this
     /// connection after that delay; otherwise the connection is over.
@@ -740,10 +742,12 @@ impl MemberAuth {
                     return self.fail("host failed to authenticate");
                 }
                 self.state = MemberState::Done;
+                let password_required = self.host.is_some_and(|(_, _, r)| r);
                 MemberStep::Authenticated {
                     host: host_id,
                     words: words_for(&t),
                     send: Vec::new(),
+                    password_ignored: !password_required && self.password.is_some(),
                 }
             }
             (

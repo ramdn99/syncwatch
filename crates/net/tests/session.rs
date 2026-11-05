@@ -832,3 +832,116 @@ fn joining_a_local_file_room_shows_choose_my_file_once_without_any_permission() 
     assert!(w.in_room(m));
     assert_eq!(panels(&w), 1, "not shown again after a reconnect");
 }
+
+#[test]
+fn a_typed_password_for_an_open_room_is_ignored_with_a_notice_once() {
+    let mut w = World::new();
+    let _h = w.host("Hana", 1, None);
+    let m = w.join("Mo", 2, Some("random"));
+    w.run_for(500_000);
+    assert!(w.in_room(m), "joining still works");
+    let notices = |w: &World| {
+        w.nodes[m]
+            .ui
+            .iter()
+            .filter(|u| matches!(u, RoomUi::PasswordIgnored))
+            .count()
+    };
+    assert_eq!(notices(&w), 1);
+    // A reconnect does not repeat it.
+    let link = w.host_link_of(m);
+    w.input(
+        m,
+        Input::Transport(TransportEvent::Closed {
+            peer: link,
+            reason: "test".into(),
+        }),
+    );
+    w.settle();
+    w.run_for(1_000_000);
+    assert!(w.in_room(m));
+    assert_eq!(notices(&w), 1);
+    // No notice when no password was typed.
+    let quiet = w.join("Q", 7, None);
+    w.run_for(300_000);
+    assert_eq!(
+        w.nodes[quiet]
+            .ui
+            .iter()
+            .filter(|u| matches!(u, RoomUi::PasswordIgnored))
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn members_see_their_own_permissions_live() {
+    let mut w = World::new();
+    let h = w.host("Hana", 1, None);
+    let m = w.join("Mo", 2, None);
+    w.run_for(300_000);
+    let mine = |w: &World| {
+        w.nodes[m].ui.iter().rev().find_map(|u| match u {
+            RoomUi::Core(UiEvent::Permissions(p)) => Some(*p),
+            _ => None,
+        })
+    };
+    assert_eq!(
+        mine(&w),
+        Some(Permissions::ALL),
+        "initial permissions arrive with the welcome"
+    );
+    let mid = w.members(h).into_iter().find(|i| !i.is_host).unwrap().id;
+    let mut p = Permissions::ALL;
+    p.can_seek = false;
+    p.can_chat = false;
+    w.ui_action(
+        h,
+        UiAction::SetPermissions {
+            member: mid,
+            permissions: p,
+        },
+    );
+    w.run_for(200_000);
+    assert_eq!(mine(&w), Some(p), "live update");
+    w.ui_action(
+        h,
+        UiAction::ApplyPreset {
+            preset: Preset::OnlyMe,
+            custom: Permissions::CHAT_ONLY,
+        },
+    );
+    w.run_for(200_000);
+    assert_eq!(mine(&w), Some(Permissions::CHAT_ONLY));
+}
+
+#[test]
+fn the_host_records_rejections_per_member_for_diagnostics() {
+    let mut w = World::new();
+    let h = w.host("Hana", 1, None);
+    let m = w.join("Mo", 2, None);
+    w.run_for(300_000);
+    let mid = w.members(h).into_iter().find(|i| !i.is_host).unwrap().id;
+    w.ui_action(
+        h,
+        UiAction::SetChatConfig(ChatConfig {
+            enabled: false,
+            hidden_from_members: false,
+            slow_mode_secs: 0,
+        }),
+    );
+    w.run_for(200_000);
+    chat(&mut w, m, "nope");
+    let rec: Vec<(Option<MemberId>, String)> = w.nodes[h]
+        .ui
+        .iter()
+        .filter_map(|u| match u {
+            RoomUi::Rejected { member, what } => Some((*member, what.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rec,
+        vec![(Some(mid), "chat message refused: Disabled".to_owned())]
+    );
+}

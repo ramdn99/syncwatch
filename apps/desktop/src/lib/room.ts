@@ -69,12 +69,30 @@ export interface RoomState {
   hostWords: [string, string, string, string] | null;
   hostLink: LinkState | null;
   needPassword: { wrong: boolean; retryAfterMs: number } | null;
-  missingFile: { name: string; size: number; durationMs: number | null; seq: number } | null;
-  fileStatus: 'verified' | 'mismatch' | null;
+  missingFile: { name: string; size: number; durationMs: number | null; seq: number; panelOpen: boolean } | null;
+  fileStatus: 'verifying' | 'verified' | 'mismatch' | null;
   mediaTitle: string | null;
   toasts: string[];
   ended: EndReason | null;
+  passwordIgnored: boolean;
+  diag: RoomDiag;
 }
+
+export interface RoomDiag {
+  signalingHost: string;
+  signalingConnected: boolean;
+  signalingReconnects: number;
+  events: { t: number; text: string }[];
+  rejected: { member: number | null; who: string; what: string; count: number }[];
+}
+
+export interface EntryOutcome {
+  status: 'inRoom' | 'needPassword' | 'pending' | 'ended';
+  passwordIgnored: boolean;
+  ended: EndReason | null;
+}
+
+export const PASSWORD_IGNORED_TEXT = 'This room has no password, so the one you typed was ignored.';
 
 const NO_PERMS: Perms = { canPlayPause: false, canSeek: false, canChangeMedia: false, canChangeSpeed: false, canChat: false };
 
@@ -98,6 +116,8 @@ export const EMPTY_ROOM: RoomState = {
   mediaTitle: null,
   toasts: [],
   ended: null,
+  passwordIgnored: false,
+  diag: { signalingHost: '', signalingConnected: false, signalingReconnects: 0, events: [], rejected: [] },
 };
 
 export type RoomAction =
@@ -113,18 +133,49 @@ export type RoomAction =
   | { type: 'clearChat' }
   | { type: 'chatConfig'; enabled: boolean; hiddenFromMembers: boolean; slowModeSecs: number }
   | { type: 'localMute'; member: number; muted: boolean }
-  | { type: 'waitForEveryone'; on: boolean };
+  | { type: 'waitForEveryone'; on: boolean }
+  | { type: 'proceedWithMismatch' };
+
+/**
+ * One example of EVERY room action, exactly as the UI sends it. The Record type makes the
+ * compiler insist on a complete list. room.contract.test.ts writes these to
+ * room-actions.fixture.json, and the Rust test oom_actions_contract deserializes that file
+ * with the real command argument type, so a field-name mismatch fails both test suites.
+ */
+export const ROOM_ACTION_EXAMPLES: { [K in RoomAction['type']]: Extract<RoomAction, { type: K }> } = {
+  chat: { type: 'chat', clientId: 7, text: 'hello' },
+  setPermissions: {
+    type: 'setPermissions',
+    member: 2,
+    permissions: { canPlayPause: true, canSeek: false, canChangeMedia: false, canChangeSpeed: true, canChat: true },
+  },
+  preset: { type: 'preset', preset: 'onlyMe' },
+  kick: { type: 'kick', member: 2 },
+  ban: { type: 'ban', member: 2 },
+  lock: { type: 'lock', locked: true },
+  makeHost: { type: 'makeHost', member: 2 },
+  muteChat: { type: 'muteChat', member: 2, muted: true },
+  deleteChat: { type: 'deleteChat', id: 41 },
+  clearChat: { type: 'clearChat' },
+  chatConfig: { type: 'chatConfig', enabled: false, hiddenFromMembers: true, slowModeSecs: 10 },
+  localMute: { type: 'localMute', member: 2, muted: true },
+  waitForEveryone: { type: 'waitForEveryone', on: true },
+  proceedWithMismatch: { type: 'proceedWithMismatch' },
+};
+
+/** The arguments object passed to invoke('room_action', ...). */
+export const roomActionArgs = (action: RoomAction) => ({ action });
 
 const call = <T>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
   inTauri() ? invoke<T>(cmd, args) : Promise.reject(new Error('Rooms need the desktop app.'));
 
 export const room = {
-  create: (name: string, password: string | null) => call<void>('room_create', { name, password }),
-  join: (name: string, code: string, password: string | null) => call<void>('room_join', { name, code, password }),
+  create: (name: string, password: string | null) => call<EntryOutcome>('room_create', { name, password }),
+  join: (name: string, code: string, password: string | null) => call<EntryOutcome>('room_join', { name, code, password }),
   state: () => (inTauri() ? invoke<RoomState>('room_state') : Promise.resolve(EMPTY_ROOM)),
   leave: () => call<void>('room_leave'),
   password: (password: string) => call<void>('room_password', { password }),
-  action: (action: RoomAction) => call<void>('room_action', { action }),
+  action: (action: RoomAction) => call<void>('room_action', roomActionArgs(action)),
   chooseFile: (path: string) => call<void>('room_choose_file', { path }),
   setLocalMedia: (path: string) => call<void>('room_set_local_media', { path }),
 };
@@ -196,4 +247,29 @@ export function saveName(n: string) {
   } catch {
     /* storage unavailable */
   }
+}
+
+const PERM_NAMES: [keyof Perms, string][] = [
+  ['canPlayPause', 'play and pause'],
+  ['canSeek', 'seek'],
+  ['canChangeSpeed', 'change speed'],
+  ['canChangeMedia', 'change the source'],
+  ['canChat', 'chat'],
+];
+
+/** "You can: chat, seek" summary of a member's own permissions. */
+export function permsSummary(p: Perms): string[] {
+  return PERM_NAMES.filter(([k]) => p[k]).map(([, name]) => name);
+}
+
+/**
+ * Turns a command error into a friendly message. Argument mismatches between the UI and the
+ * app ("invalid args ...") are internal bugs: the details go to the diagnostics view.
+ */
+export function friendlyError(e: unknown): { text: string; detail: string } {
+  const detail = String(e).replace(/^Error: /, '');
+  if (/invalid args|missing field|unknown field|unknown variant/i.test(detail)) {
+    return { text: 'SyncWatch could not do that because of an internal error. Details are in Diagnostics.', detail };
+  }
+  return { text: detail, detail };
 }

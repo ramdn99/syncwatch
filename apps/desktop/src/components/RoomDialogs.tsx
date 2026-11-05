@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { loadName, room, saveName } from '../lib/room';
+import { endText, friendlyError, loadName, PASSWORD_IGNORED_TEXT, room, saveName } from '../lib/room';
 
 /** Create or join a room: display name, (code), optional password. */
 export function RoomEntryDialog(props: { mode: 'create' | 'join'; onClose: () => void; onEntered: () => void }) {
@@ -8,6 +8,7 @@ export function RoomEntryDialog(props: { mode: 'create' | 'join'; onClose: () =>
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [ignoredNotice, setIgnoredNotice] = useState(false);
   const create = props.mode === 'create';
 
   const submit = async () => {
@@ -15,11 +16,19 @@ export function RoomEntryDialog(props: { mode: 'create' | 'join'; onClose: () =>
     setBusy(true);
     try {
       saveName(name.trim());
-      if (create) await room.create(name, password || null);
-      else await room.join(name, code, password || null);
+      const outcome = create ? await room.create(name, password || null) : await room.join(name, code, password || null);
+      if (outcome.status === 'ended') {
+        setError(endText(outcome.ended) ?? 'Could not join the room.');
+        return;
+      }
+      // Joining an open room with a password works; say that the password was not used.
+      if (outcome.passwordIgnored) {
+        setIgnoredNotice(true);
+        return;
+      }
       props.onEntered();
     } catch (e) {
-      setError(String(e).replace(/^Error: /, ''));
+      setError(friendlyError(e).text);
     } finally {
       setBusy(false);
     }
@@ -82,7 +91,15 @@ export function RoomEntryDialog(props: { mode: 'create' | 'join'; onClose: () =>
             {error}
           </p>
         )}
-        <div className="flex justify-end gap-2">
+        {ignoredNotice && (
+          <div role="status" className="space-y-2 rounded-md border border-info/40 bg-info/10 px-3 py-2 text-sm text-info">
+            <p>You joined the room. {PASSWORD_IGNORED_TEXT}</p>
+            <button type="button" className="rounded-md bg-accent px-3 py-1.5 font-semibold text-on-accent" onClick={props.onEntered}>
+              Continue to the room
+            </button>
+          </div>
+        )}
+        <div className="flex justify-end gap-2" hidden={ignoredNotice}>
           <button type="button" className="rounded-md px-4 py-2 text-muted hover:text-text" onClick={props.onClose}>
             Cancel
           </button>
@@ -157,7 +174,7 @@ const fmtDuration = (ms: number | null) => {
  */
 export function MissingFilePanel(props: {
   file: { name: string; size: number; durationMs: number | null };
-  status: 'verified' | 'mismatch' | null;
+  status: 'verifying' | 'verified' | 'mismatch' | null;
   verifying: boolean;
   onChoose: () => void;
   onClose: () => void;

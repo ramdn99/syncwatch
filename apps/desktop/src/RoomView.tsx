@@ -10,7 +10,8 @@ import { computeColumns, dragWidth, loadPrefs, savePrefs, toPhysical, type Layou
 import { app, inTauri, onPlayerEvent, player, type PlaybackState, type Rect, type Track } from './lib/player';
 import { mapKey } from './lib/shortcuts';
 import { MissingFilePanel, PasswordPrompt } from './components/RoomDialogs';
-import { EMPTY_ROOM, endText, formatCode, onRoomState, room, type RoomAction, type RoomState } from './lib/room';
+import { DiagnosticsDialog, type UiErrorEntry } from './components/Diagnostics';
+import { EMPTY_ROOM, endText, formatCode, friendlyError, onRoomState, PASSWORD_IGNORED_TEXT, room, type RoomAction, type RoomState } from './lib/room';
 import type { MockChatMessage } from './mock/data';
 
 const EMPTY_STATE: PlaybackState = {
@@ -41,7 +42,9 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
   const [rs, setRs] = useState<RoomState>(EMPTY_ROOM);
   const [toasts, setToasts] = useState<{ id: number; text: string }[]>([]);
   const [dismissedPanel, setDismissedPanel] = useState(0);
-  const [verifying, setVerifying] = useState(false);
+  const [diagOpen, setDiagOpen] = useState(false);
+  const [uiErrors, setUiErrors] = useState<UiErrorEntry[]>([]);
+  const [ignoredDismissed, setIgnoredDismissed] = useState(false);
   const [overlayInput, setOverlayInput] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [changeSource, setChangeSource] = useState<{ path?: string } | null>(null);
@@ -60,7 +63,6 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
     void room.state().then(setRs);
     return onRoomState((s) => {
       setRs(s);
-      if (s.fileStatus) setVerifying(false);
       if (s.toasts.length) {
         const now = Date.now();
         setToasts((t) => [...t, ...s.toasts.map((text, i) => ({ id: now + i, text }))].slice(-4));
@@ -94,8 +96,16 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
       })),
     [rs.chat],
   );
-  const act = (a: RoomAction) => void room.action(a).catch((e: unknown) => setError(String(e)));
-  const showPanel = rs.missingFile != null && rs.missingFile.seq !== dismissedPanel;
+  // Every failed command shows a friendly message and keeps the real error for Diagnostics.
+  const reportError = (e: unknown) => {
+    const f = friendlyError(e);
+    setError(f.text);
+    setUiErrors((l) => [...l.slice(-49), { at: Date.now(), text: f.detail }]);
+  };
+  const act = (a: RoomAction) => void room.action(a).catch(reportError);
+  const verifying = rs.fileStatus === 'verifying';
+  // Open until the member picks a file (Rust closes it for good), or dismissed with Later.
+  const showPanel = rs.missingFile != null && rs.missingFile.panelOpen && rs.missingFile.seq !== dismissedPanel;
   const leave = () => {
     if (rs.active) void room.leave().catch(() => onLeave());
     else onLeave();
@@ -187,7 +197,7 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
     [],
   );
 
-  const run = (p: Promise<unknown>) => p.catch((err: unknown) => setError(String(err)));
+  const run = (p: Promise<unknown>) => p.catch((err: unknown) => reportError(err));
 
   const toggleFullscreen = useCallback(
     (on?: boolean) => {
@@ -208,11 +218,7 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
       path = typeof p === 'string' ? p : null;
     }
     if (!path) return;
-    setVerifying(true);
-    void room.chooseFile(path).catch((e: unknown) => {
-      setVerifying(false);
-      setError(String(e));
-    });
+    void room.chooseFile(path).catch(reportError);
   };
 
   const openFile = async () => {
@@ -396,6 +402,11 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
               Verify with the host: <span className="font-brand text-text">{rs.hostWords.join(' ')}</span>
             </span>
           )}
+          {inRoom && (
+            <button type="button" className="rounded px-2 py-0.5 text-xs text-muted hover:bg-surface hover:text-text" onClick={() => setDiagOpen(true)}>
+              Diagnostics
+            </button>
+          )}
           <button type="button" className="rounded px-2 py-0.5 text-xs text-muted hover:bg-surface hover:text-text" onClick={leave}>
             {rs.active && rs.isHost ? 'Close room' : 'Leave'}
           </button>
@@ -420,6 +431,25 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
       {rs.active && rs.phase === 'reconnecting' && !rs.isHost && (
         <div role="status" className="bg-warning/15 px-3 py-1.5 text-sm text-warning">
           Connection interrupted. Reconnecting...
+        </div>
+      )}
+      {rs.active && rs.passwordIgnored && !ignoredDismissed && (
+        <div role="status" className="flex items-center gap-3 bg-info/15 px-3 py-1.5 text-sm text-info">
+          <span className="flex-1">{PASSWORD_IGNORED_TEXT}</span>
+          <button type="button" className="text-text underline" onClick={() => setIgnoredDismissed(true)}>
+            OK
+          </button>
+        </div>
+      )}
+      {rs.active && rs.fileStatus === 'mismatch' && (
+        <div role="alert" className="flex flex-wrap items-center gap-3 bg-warning/15 px-3 py-1.5 text-sm text-warning">
+          <span className="flex-1">Your file is not exactly the same as the host's. Playback stays in sync, but scenes may not line up.</span>
+          <button type="button" className="text-text underline" onClick={() => act({ type: 'proceedWithMismatch' })}>
+            Watch anyway
+          </button>
+          <button type="button" className="text-text underline" onClick={() => void chooseMyFile()}>
+            Choose a different file
+          </button>
         </div>
       )}
       {error && (
@@ -487,10 +517,7 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
                   mediaKey={mediaKey}
                   hasMissingFile={rs.missingFile != null}
                   onChangeSource={() => setChangeSource({})}
-                  onChooseFile={() => {
-                    setDismissedPanel(-1);
-                    void chooseMyFile();
-                  }}
+                  onChooseFile={() => void chooseMyFile()}
                   onSelectTrack={(k, s) => void run(player.selectTrack(k, s))}
                   onAddTrack={(k) => void addTrack(k)}
                   onAction={act}
@@ -523,6 +550,7 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
           </div>
         </div>
       )}
+      {diagOpen && <DiagnosticsDialog rs={rs} uiErrors={uiErrors} onClose={() => setDiagOpen(false)} />}
       {toasts.length > 0 && (
         <div className="pointer-events-none fixed bottom-4 right-4 z-40 space-y-2" aria-live="polite">
           {toasts.map((t) => (

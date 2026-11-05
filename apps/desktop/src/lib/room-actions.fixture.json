@@ -1,0 +1,96 @@
+[
+  {
+    "action": {
+      "type": "chat",
+      "clientId": 7,
+      "text": "hello"
+    }
+  },
+  {
+    "action": {
+      "type": "setPermissions",
+      "member": 2,
+      "permissions": {
+        "canPlayPause": true,
+        "canSeek": false,
+        "canChangeMedia": false,
+        "canChangeSpeed": true,
+        "canChat": true
+      }
+    }
+  },
+  {
+    "action": {
+      "type": "preset",
+      "preset": "onlyMe"
+    }
+  },
+  {
+    "action": {
+      "type": "kick",
+      "member": 2
+    }
+  },
+  {
+    "action": {
+      "type": "ban",
+      "member": 2
+    }
+  },
+  {
+    "action": {
+      "type": "lock",
+      "locked": true
+    }
+  },
+  {
+    "action": {
+      "type": "makeHost",
+      "member": 2
+    }
+  },
+  {
+    "action": {
+      "type": "muteChat",
+      "member": 2,
+      "muted": true
+    }
+  },
+  {
+    "action": {
+      "type": "deleteChat",
+      "id": 41
+    }
+  },
+  {
+    "action": {
+      "type": "clearChat"
+    }
+  },
+  {
+    "action": {
+      "type": "chatConfig",
+      "enabled": false,
+      "hiddenFromMembers": true,
+      "slowModeSecs": 10
+    }
+  },
+  {
+    "action": {
+      "type": "localMute",
+      "member": 2,
+      "muted": true
+    }
+  },
+  {
+    "action": {
+      "type": "waitForEveryone",
+      "on": true
+    }
+  },
+  {
+    "action": {
+      "type": "proceedWithMismatch"
+    }
+  }
+]

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { Track, TrackSelection } from '../lib/player';
-import type { RoomAction, RoomState } from '../lib/room';
+import { permsSummary, type RoomAction, type RoomState } from '../lib/room';
 import { TrackList } from './TrackList';
 
 type Preset = 'everyone' | 'onlyMe';
@@ -60,9 +60,7 @@ export function HostControls(p: HostControlsProps) {
           <span className="block text-xs text-muted">Local file or torrent magnet</span>
         </button>
       )}
-      {!isHost && (
-        <p className="rounded-md bg-elevated px-3 py-2 text-xs text-muted">The host controls tracks and permissions.</p>
-      )}
+      {!isHost && <MyPermissions perms={room.myPermissions} />}
       {p.hasMissingFile && (
         <button type="button" className="w-full rounded-md border border-border px-3 py-1.5 text-left text-sm hover:border-accent" onClick={p.onChooseFile}>
           Choose a different file...
@@ -128,6 +126,26 @@ export function HostControls(p: HostControlsProps) {
           </fieldset>
         </div>
       )}
+    </div>
+  );
+}
+
+/** A member's own current permissions, read-only, updated live when the host changes them. */
+export function MyPermissions({ perms }: { perms: RoomState['myPermissions'] }) {
+  const can = permsSummary(perms);
+  return (
+    <div className="rounded-md bg-elevated px-3 py-2 text-xs" aria-label="Your permissions" data-testid="my-permissions">
+      <p className="mb-1 text-muted">{can.length ? 'You can:' : 'You can only watch: the host controls playback.'}</p>
+      {can.length > 0 && (
+        <ul className="flex flex-wrap gap-1">
+          {can.map((c) => (
+            <li key={c} className="rounded bg-surface px-1.5 py-0.5 text-text">
+              {c}
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="mt-1 text-muted">Tracks and permissions are set by the host.</p>
     </div>
   );
 }

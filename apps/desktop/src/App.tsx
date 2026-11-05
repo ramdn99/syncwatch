@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { connection, EMPTY_STATUS, onConnectionStatus, type ConnectionStatus } from './lib/connection';
 import { app, inTauri } from './lib/player';
 import { RoomView } from './RoomView';
@@ -15,12 +15,21 @@ export function App() {
   const [view, setView] = useState<View>('home');
   const [loaded, setLoaded] = useState(!inTauri());
   const [entry, setEntry] = useState<'create' | 'join' | null>(null);
+  // While the Create/Join dialog is open it decides when to enter the room (it may show a
+  // notice first).
+  const entryOpen = useRef(false);
+  entryOpen.current = entry !== null;
+
+  // Debug builds: optional scripted two-window scenario (scripts/dev/two-windows.ps1 -Scenario).
+  useEffect(() => {
+    if (import.meta.env.DEV) void import('./dev/scenario').then((m) => m.maybeRunScenario());
+  }, []);
 
   // Already in a room (window reload, dev auto-room): show it.
   useEffect(() => {
     void room.state().then((s) => s.active && setView('room'));
     return onRoomState((s) => {
-      if (s.active) setView('room');
+      if (s.active && !entryOpen.current) setView('room');
     });
   }, []);
 

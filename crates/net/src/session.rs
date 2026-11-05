@@ -159,6 +159,13 @@ pub enum RoomUi {
         state: LinkState,
     },
     Error(String),
+    /// The member typed a password but the room has none (it was ignored). Once per join.
+    PasswordIgnored,
+    /// Host: something from member was refused (None: a joining link not yet a member).
+    Rejected {
+        member: Option<MemberId>,
+        what: String,
+    },
     Core(UiEvent),
 }
 
@@ -511,6 +518,23 @@ impl RoomSession {
                     }
                 }
                 Effect::SendTo(m, msg) => {
+                    // Rejections the host sends are recorded for the diagnostics view.
+                    let rejected = match &msg {
+                        Message::ChatRejected { reason, .. } => {
+                            Some(format!("chat message refused: {reason:?}"))
+                        }
+                        Message::Command(proto::Command::Notice(
+                            proto::Notice::RequestDenied { reason },
+                        )) => Some(format!("request refused: {reason:?}")),
+                        Message::Reject { reason } => Some(format!("join refused: {reason:?}")),
+                        _ => None,
+                    };
+                    if let Some(what) = rejected {
+                        out.push(Output::Ui(RoomUi::Rejected {
+                            member: Some(m),
+                            what,
+                        }));
+                    }
                     if let Some(id) = self.link_of_member(m) {
                         self.send_room(id, &msg, out);
                     }
@@ -536,6 +560,10 @@ impl RoomSession {
                 Effect::Player(c) => out.push(Output::Player(c)),
                 Effect::ProtocolViolation { from, what } => {
                     tracing::warn!(member = from.0, what, "protocol violation");
+                    out.push(Output::Ui(RoomUi::Rejected {
+                        member: Some(from),
+                        what: format!("protocol violation: {what}"),
+                    }));
                 }
                 Effect::Ui(ev) => {
                     match &ev {
@@ -1102,6 +1130,12 @@ impl RoomSession {
             HostStep::Reject { send, close } => {
                 for m in &send {
                     self.send_auth(peer, m, out);
+                    if let AuthMsg::Rejected { reason, .. } = m {
+                        out.push(Output::Ui(RoomUi::Rejected {
+                            member: None,
+                            what: format!("join attempt refused (link {peer}): {reason:?}"),
+                        }));
+                    }
                 }
                 if close && let Some(l) = self.links.get_mut(&peer) {
                     l.close_at.get_or_insert(now + FLUSH_US);
@@ -1184,7 +1218,15 @@ impl RoomSession {
                     retry_after_ms: 0,
                 }));
             }
-            MemberStep::Authenticated { host, words, .. } => {
+            MemberStep::Authenticated {
+                host,
+                words,
+                password_ignored,
+                ..
+            } => {
+                if password_ignored && !self.joined_once {
+                    out.push(Output::Ui(RoomUi::PasswordIgnored));
+                }
                 let pw_room = self.password.is_some();
                 let Some(l) = self.links.get_mut(&peer) else {
                     return;

@@ -139,6 +139,33 @@ Milestone 2 the sync-core machine (ADR 0003).
 | Room join, relay-only through Metered (fresh credentials per create/join) | both links relayed; member signaling connect to host authenticated about 1.45 s; 0 banners in a 30 s run. Quota: 2 API requests, at most 8 TURN allocations (4 TURN URLs x 2 peers), well under 1 MB relayed (handshake, keepalives). The script stops the windows forcibly, so those allocations expired on the server instead of being released |
 | In-process session tests (fake signaling and links) | 13 tests: join with and without password, missing/wrong/right password with throttling, MITM, kick and ban, lock, chat permission revoke, banner only on real interruption, restart keeps the seat, host transfer, password moves with the host, close room, leave frees the seat |
 
+## Findings from the first manual test (fixed)
+1. **Room actions with multi-word fields failed** (chat, chat settings, slow mode) with
+   `missing field client_id`. `#[serde(rename_all)]` on an enum renames only the variant names,
+   not the fields inside the variants. The enum now also uses `rename_all_fields = "camelCase"`
+   and `deny_unknown_fields`.
+   - Contract test: `room.contract.test.ts` writes one payload per action type, built from a
+     `Record` the compiler forces to be complete, to `room-actions.fixture.json`. The Rust test
+     `room_actions_contract` deserializes that file with the real command argument type and checks
+     that every variant is covered. With the old attribute it fails with the user's exact error.
+   - End to end: `two-windows.ps1 -Scenario chat` runs the actions through the real `invoke` path
+     in two app instances (22 checks).
+   - Failed commands show a friendly message. The raw error goes to the Diagnostics view.
+2. **An open room joined with a typed password** now tells the member it was ignored, in the
+   Join dialog and once in the room (`RoomUi::PasswordIgnored`, session test).
+3. **The "Choose my file" panel stayed open after a file was chosen.** The panel state now lives
+   in the Rust UI mirror (`panelOpen`). It closes as soon as a file is picked and stays closed
+   through verification, a mismatch and unrelated updates. Only a new media change opens it
+   again (mirror test). A mismatch shows a bar with "Watch anyway" and "Choose a different file".
+4. **Members see their own permissions** ("You can: ..."), updated live (session, mirror and
+   render tests).
+5. **Diagnostics view:**
+   - connection state (signaling host, connected, reconnects; links per member);
+   - recent room events;
+   - rejected requests per member, plus this window's own UI errors.
+
+   "Copy diagnostics" leaves out chat text, credentials and addresses.
+
 ## Security notes (feed the Milestone 9 threat model)
 - **Signaling compromise.** It cannot join or impersonate anyone in a password room without the
   password: one online guess per attempt, throttled. In rooms without a password, a MITM changes
