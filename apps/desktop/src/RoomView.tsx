@@ -9,7 +9,9 @@ import { VideoArea } from './components/VideoArea';
 import { computeColumns, dragWidth, loadPrefs, savePrefs, toPhysical, type LayoutPrefs } from './lib/layout';
 import { app, inTauri, onPlayerEvent, player, type PlaybackState, type Rect, type Track } from './lib/player';
 import { mapKey } from './lib/shortcuts';
-import { mockChat, mockMembers, type MockChatMessage } from './mock/data';
+import { MissingFilePanel, PasswordPrompt } from './components/RoomDialogs';
+import { EMPTY_ROOM, endText, formatCode, onRoomState, room, type RoomAction, type RoomState } from './lib/room';
+import type { MockChatMessage } from './mock/data';
 
 const EMPTY_STATE: PlaybackState = {
   paused: true,
@@ -36,7 +38,10 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
   const [state, setState] = useState<PlaybackState>(EMPTY_STATE);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [mediaKey, setMediaKey] = useState('none');
-  const [chat, setChat] = useState<MockChatMessage[]>(mockChat);
+  const [rs, setRs] = useState<RoomState>(EMPTY_ROOM);
+  const [toasts, setToasts] = useState<{ id: number; text: string }[]>([]);
+  const [dismissedPanel, setDismissedPanel] = useState(0);
+  const [verifying, setVerifying] = useState(false);
   const [overlayInput, setOverlayInput] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [changeSource, setChangeSource] = useState<{ path?: string } | null>(null);
@@ -47,6 +52,57 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
+  const panelOpenRef = useRef(false);
+  const chooseFileRef = useRef<((p: string) => void) | null>(null);
+
+  // --- room state (owned by Rust; pushed as snapshots) -----------------------------------
+  useEffect(() => {
+    void room.state().then(setRs);
+    return onRoomState((s) => {
+      setRs(s);
+      if (s.fileStatus) setVerifying(false);
+      if (s.toasts.length) {
+        const now = Date.now();
+        setToasts((t) => [...t, ...s.toasts.map((text, i) => ({ id: now + i, text }))].slice(-4));
+      }
+    });
+  }, []);
+  useEffect(() => {
+    if (toasts.length === 0) return;
+    const t = window.setTimeout(() => setToasts((x) => x.slice(1)), 5000);
+    return () => window.clearTimeout(t);
+  }, [toasts]);
+  // Leaving on purpose returns home right away.
+  useEffect(() => {
+    if (rs.ended?.kind === 'left') onLeave();
+  }, [rs.ended, onLeave]);
+
+  const inRoom = rs.active || rs.ended != null;
+  const isHost = inRoom ? rs.isHost : viewAsHost;
+  const chat: MockChatMessage[] = useMemo(
+    () =>
+      rs.chat.map((c, i) => ({
+        id: c.divider ? `d${i}` : String(c.id),
+        senderId: String(c.sender),
+        senderName: c.name,
+        isHost: c.isHost,
+        colorIndex: c.sender,
+        text: c.text,
+        wallTime: c.wallMs ? new Date(c.wallMs).toTimeString().slice(0, 5) : '',
+        mediaTimeMs: c.mediaTimeMs,
+        divider: c.divider ?? undefined,
+      })),
+    [rs.chat],
+  );
+  const act = (a: RoomAction) => void room.action(a).catch((e: unknown) => setError(String(e)));
+  const showPanel = rs.missingFile != null && rs.missingFile.seq !== dismissedPanel;
+  const leave = () => {
+    if (rs.active) void room.leave().catch(() => onLeave());
+    else onLeave();
+  };
+
+  panelOpenRef.current = showPanel;
+  chooseFileRef.current = (p: string) => void chooseMyFile(p);
 
   const cols = useMemo(() => computeColumns(winWidth, prefs, fullscreen), [winWidth, prefs, fullscreen]);
   useEffect(() => savePrefs(prefs), [prefs]);
@@ -143,8 +199,29 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
     [fullscreen],
   );
 
+  const chooseMyFile = async (dropped?: string) => {
+    if (!inTauri()) return;
+    let path = dropped ?? null;
+    if (!path) {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const p = await open({ multiple: false, directory: false, filters: [{ name: 'Video', extensions: VIDEO_EXT }, { name: 'All files', extensions: ['*'] }] });
+      path = typeof p === 'string' ? p : null;
+    }
+    if (!path) return;
+    setVerifying(true);
+    void room.chooseFile(path).catch((e: unknown) => {
+      setVerifying(false);
+      setError(String(e));
+    });
+  };
+
   const openFile = async () => {
     if (!inTauri()) return;
+    if (rs.active) {
+      // In a room, opening a file changes the room's source (confirmed in the dialog).
+      setChangeSource({});
+      return;
+    }
     const { open } = await import('@tauri-apps/plugin-dialog');
     const path = await open({ multiple: false, directory: false, filters: [{ name: 'Video', extensions: VIDEO_EXT }, { name: 'All files', extensions: ['*'] }] });
     if (typeof path === 'string') void run(player.open(path));
@@ -169,8 +246,11 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
         .onDragDropEvent((ev) => {
           if (ev.payload.type !== 'drop') return;
           const p = ev.payload.paths[0];
-          // Dropping a file changes the room's source: confirm in the dialog first.
-          if (p) setChangeSource((cur) => cur ?? { path: p });
+          if (!p) return;
+          // While the Choose-my-file panel is open, a dropped file is the member's own copy.
+          if (panelOpenRef.current) return void chooseFileRef.current?.(p);
+          // Otherwise dropping a file changes the room's source: confirm in the dialog first.
+          setChangeSource((cur) => cur ?? { path: p });
         })
         .then((u) => (un = u)),
     );
@@ -181,21 +261,16 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
   useEffect(() => () => void app.setLayout({ x: 0, y: 0, w: 0, h: 0 }, [], false), []);
 
   const sendChat = (text: string) => {
-    const t = stateRef.current;
-    setChat((c) => [
-      ...c,
-      {
-        id: `local-${Date.now()}`,
-        senderId: 'm1',
-        senderName: mockMembers[0]?.name ?? 'You',
-        isHost: viewAsHost,
-        colorIndex: 0,
-        text,
-        wallTime: new Date().toTimeString().slice(0, 5),
-        mediaTimeMs: t.fileLoaded && t.timePos != null ? Math.round(t.timePos * 1000) : null,
-      },
-    ]);
+    if (!rs.active) return setError('Chat works inside a room.');
+    act({ type: 'chat', clientId: Date.now() % 2_000_000_000, text });
   };
+  const chatDisabled = !rs.active
+    ? null
+    : !rs.chatConfig.enabled && !rs.isHost
+      ? 'The host turned chat off.'
+      : !rs.myPermissions.canChat && !rs.isHost
+        ? 'The host has not allowed you to chat.'
+        : null;
 
   const cycleTrack = (kind: 'audio' | 'sub') => {
     const list = tracks.filter((t) => t.kind === kind);
@@ -209,7 +284,7 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
   // --- shortcuts ------------------------------------------------------------------------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const action = mapKey(e, viewAsHost);
+      const action = mapKey(e, isHost);
       if (!action) return;
       e.preventDefault();
       const s = stateRef.current;
@@ -303,13 +378,28 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
       {!fullscreen && (
         <header className="flex h-10 shrink-0 items-center gap-4 border-b border-border bg-bg px-3">
           <img src={logoUrl} alt="SyncWatch" className="h-5" draggable={false} />
-          <span className="font-brand text-sm tracking-[0.2em] text-muted" title="Room code (mock)">
-            K7QM-4XRP
-          </span>
-          <button type="button" className="rounded px-2 py-0.5 text-xs text-muted hover:bg-surface hover:text-text" onClick={onLeave}>
-            Leave
+          {rs.roomCode && (
+            <button
+              type="button"
+              className="font-brand text-sm tracking-[0.2em] text-text hover:text-accent"
+              title="Room code: click to copy"
+              onClick={() => void navigator.clipboard?.writeText(formatCode(rs.roomCode))}
+            >
+              {formatCode(rs.roomCode)}
+            </button>
+          )}
+          {rs.active && rs.hasPassword && <span className="text-xs text-muted">Password protected</span>}
+          {rs.active && rs.locked && <span className="text-xs text-warning">Locked</span>}
+          {rs.active && rs.phase !== 'inRoom' && rs.phase !== 'reconnecting' && <span className="text-xs text-muted">Connecting to the room...</span>}
+          {rs.hostWords && !rs.isHost && (
+            <span className="text-xs text-muted" title="Read these words to the host: they must match what the host sees next to your name.">
+              Verify with the host: <span className="font-brand text-text">{rs.hostWords.join(' ')}</span>
+            </span>
+          )}
+          <button type="button" className="rounded px-2 py-0.5 text-xs text-muted hover:bg-surface hover:text-text" onClick={leave}>
+            {rs.active && rs.isHost ? 'Close room' : 'Leave'}
           </button>
-          {import.meta.env.DEV && (
+          {import.meta.env.DEV && !inRoom && (
             <div className="ml-auto flex items-center gap-2 text-xs text-muted" aria-label="Developer view switch">
               View as
               {(['host', 'member'] as const).map((v) => (
@@ -327,6 +417,11 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
           )}
         </header>
       )}
+      {rs.active && rs.phase === 'reconnecting' && !rs.isHost && (
+        <div role="status" className="bg-warning/15 px-3 py-1.5 text-sm text-warning">
+          Connection interrupted. Reconnecting...
+        </div>
+      )}
       {error && (
         <div role="alert" className="flex items-center gap-3 bg-danger/15 px-3 py-1.5 text-sm text-danger">
           <span className="flex-1">{error}</span>
@@ -339,7 +434,15 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
         {!fullscreen && cols.left > 0 && (
           <>
             <div ref={leftRef} style={{ width: cols.left }} className="h-full shrink-0" data-testid="col-left">
-              <ChatPanel ref={chatInputRef} messages={chat} onCollapse={() => setPrefs((p) => ({ ...p, leftCollapsed: true }))} onChipClick={(s) => void run(player.seek(s))} onSend={sendChat} />
+              <ChatPanel
+                ref={chatInputRef}
+                messages={chat}
+                onCollapse={() => setPrefs((p) => ({ ...p, leftCollapsed: true }))}
+                onChipClick={(s) => void run(player.seek(s))}
+                onSend={sendChat}
+                onDelete={rs.active && rs.isHost ? (id) => act({ type: 'deleteChat', id: Number(id) }) : undefined}
+                disabledReason={chatDisabled}
+              />
             </div>
             <div className="w-1 shrink-0 cursor-col-resize bg-border hover:bg-accent" role="separator" aria-orientation="vertical" aria-label="Resize chat" onPointerDown={startDrag('left')} data-testid="resizer-left" />
           </>
@@ -357,6 +460,15 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
           onToggleFullscreen={() => toggleFullscreen()}
           onOpenFile={() => void openFile()}
         >
+          {showPanel && rs.missingFile && (
+            <MissingFilePanel
+              file={rs.missingFile}
+              status={rs.fileStatus}
+              verifying={verifying}
+              onChoose={() => void chooseMyFile()}
+              onClose={() => setDismissedPanel(rs.missingFile?.seq ?? 0)}
+            />
+          )}
           {fullscreen && <ChatOverlay messages={chat} inputOpen={overlayInput} onCloseInput={() => setOverlayInput(false)} onSend={sendChat} />}
         </VideoArea>
         {!fullscreen && cols.right === 0 && <CollapsedRail side="right" label="Show members (])" onClick={() => setPrefs((p) => ({ ...p, rightCollapsed: false }))} />}
@@ -364,11 +476,25 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
           <>
             <div className="w-1 shrink-0 cursor-col-resize bg-border hover:bg-accent" role="separator" aria-orientation="vertical" aria-label="Resize members" onPointerDown={startDrag('right')} data-testid="resizer-right" />
             <div ref={rightRef} style={{ width: cols.right }} className="flex h-full shrink-0 flex-col overflow-y-auto bg-surface" data-testid="col-right">
-              <Section title="Members" count={mockMembers.length} collapsed={prefs.membersCollapsed} onToggle={() => setPrefs((p) => ({ ...p, membersCollapsed: !p.membersCollapsed }))} onCollapseColumn={() => setPrefs((p) => ({ ...p, rightCollapsed: true }))}>
-                <MembersPanel members={mockMembers} viewerIsHost={viewAsHost} />
+              <Section title="Members" count={rs.members.length} collapsed={prefs.membersCollapsed} onToggle={() => setPrefs((p) => ({ ...p, membersCollapsed: !p.membersCollapsed }))} onCollapseColumn={() => setPrefs((p) => ({ ...p, rightCollapsed: true }))}>
+                <MembersPanel members={rs.members} viewerIsHost={isHost} onAction={act} />
               </Section>
-              <Section title={viewAsHost ? 'Host controls' : 'Room'} collapsed={prefs.hostCollapsed} onToggle={() => setPrefs((p) => ({ ...p, hostCollapsed: !p.hostCollapsed }))}>
-                <HostControls isHost={viewAsHost} tracks={tracks} mediaKey={mediaKey} onChangeSource={() => setChangeSource({})} onSelectTrack={(k, s) => void run(player.selectTrack(k, s))} onAddTrack={(k) => void addTrack(k)} />
+              <Section title={isHost ? 'Host controls' : 'Room'} collapsed={prefs.hostCollapsed} onToggle={() => setPrefs((p) => ({ ...p, hostCollapsed: !p.hostCollapsed }))}>
+                <HostControls
+                  isHost={isHost}
+                  room={rs}
+                  tracks={tracks}
+                  mediaKey={mediaKey}
+                  hasMissingFile={rs.missingFile != null}
+                  onChangeSource={() => setChangeSource({})}
+                  onChooseFile={() => {
+                    setDismissedPanel(-1);
+                    void chooseMyFile();
+                  }}
+                  onSelectTrack={(k, s) => void run(player.selectTrack(k, s))}
+                  onAddTrack={(k) => void addTrack(k)}
+                  onAction={act}
+                />
               </Section>
             </div>
           </>
@@ -378,8 +504,33 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
         <ChangeSourceDialog
           initialPath={changeSource.path}
           onClose={() => setChangeSource(null)}
-          onLocalChosen={(p) => void run(player.open(p))}
+          onLocalChosen={(p) => void run(rs.active ? room.setLocalMedia(p) : player.open(p))}
         />
+      )}
+      {rs.active && rs.needPassword && <PasswordPrompt wrong={rs.needPassword.wrong} retryAfterMs={rs.needPassword.retryAfterMs} onLeave={leave} />}
+      {rs.ended && rs.ended.kind !== 'left' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" role="alertdialog" aria-labelledby="ended-title">
+          <div className="w-96 space-y-4 rounded-xl border border-border bg-elevated p-5">
+            <h2 id="ended-title" className="font-brand text-lg font-bold">
+              You left the room
+            </h2>
+            <p className="text-sm text-muted">{endText(rs.ended)}</p>
+            <div className="flex justify-end">
+              <button type="button" className="rounded-md bg-accent px-4 py-2 font-semibold text-on-accent hover:bg-accent-hover" onClick={onLeave}>
+                Back to home
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {toasts.length > 0 && (
+        <div className="pointer-events-none fixed bottom-4 right-4 z-40 space-y-2" aria-live="polite">
+          {toasts.map((t) => (
+            <p key={t.id} className="rounded-md border border-border bg-elevated px-3 py-2 text-sm shadow-lg">
+              {t.text}
+            </p>
+          ))}
+        </div>
       )}
     </div>
   );

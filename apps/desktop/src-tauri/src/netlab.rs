@@ -62,20 +62,25 @@ fn env_u64(k: &str, d: u64) -> u64 {
         .unwrap_or(d)
 }
 
+/// Relay-only through the local dev coturn (deploy/compose.dev.yml). The user below is a local
+/// placeholder for that container only, not a real credential.
+pub fn coturn_ice() -> IceConfig {
+    IceConfig {
+        ice_servers: vec![IceServerJs {
+            urls: vec![
+                "turn:127.0.0.1:3478?transport=udp".into(),
+                "turn:127.0.0.1:3478?transport=tcp".into(),
+            ],
+            username: Some("syncwatch-dev".into()),
+            credential: Some("syncwatch-dev-pass".into()),
+        }],
+        relay_only: true,
+    }
+}
+
 async fn ice_config(app: &AppHandle, mode: &str) -> IceConfig {
     match mode {
-        "coturn" => IceConfig {
-            ice_servers: vec![IceServerJs {
-                urls: vec![
-                    "turn:127.0.0.1:3478?transport=udp".into(),
-                    "turn:127.0.0.1:3478?transport=tcp".into(),
-                ],
-                // Local dev coturn only (deploy/compose.dev.yml); not a real credential.
-                username: Some("syncwatch-dev".into()),
-                credential: Some("syncwatch-dev-pass".into()),
-            }],
-            relay_only: true,
-        },
+        "coturn" => coturn_ice(),
         "metered" => {
             // The static ICE list from SYNCWATCH_NET_LAB_ICE_FILE (the git-ignored
             // .env.ice.local: no API request), else the saved connection settings. Values are

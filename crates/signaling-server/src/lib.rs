@@ -51,7 +51,14 @@ impl Default for Config {
     }
 }
 
-type Tx = mpsc::Sender<ServerMsg>;
+/// What a connection task receives: a message to send, or a role change made by another
+/// connection (host transfer).
+enum Outbound {
+    Msg(ServerMsg),
+    SetRole(Role),
+}
+
+type Tx = mpsc::Sender<Outbound>;
 
 struct Room {
     host: Option<(u64, Tx)>,
@@ -118,7 +125,7 @@ impl Hub {
 
     fn send(tx: &Tx, m: ServerMsg) {
         // A full queue means a stuck client; drop the message (it will time out).
-        let _ = tx.try_send(m);
+        let _ = tx.try_send(Outbound::Msg(m));
     }
 }
 
@@ -187,7 +194,7 @@ async fn ws_handler(
 
 async fn run_connection(hub: Arc<Hub>, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
-    let (tx, mut rx) = mpsc::channel::<ServerMsg>(256);
+    let (tx, mut rx) = mpsc::channel::<Outbound>(256);
     let conn_id = {
         let mut g = hub.lock();
         g.next_conn += 1;
@@ -204,7 +211,11 @@ async fn run_connection(hub: Arc<Hub>, socket: WebSocket) {
     loop {
         tokio::select! {
             out = rx.recv() => {
-                let Some(m) = out else { break };
+                let m = match out {
+                    Some(Outbound::Msg(m)) => m,
+                    Some(Outbound::SetRole(r)) => { role = r; continue }
+                    None => break,
+                };
                 let close = matches!(m, ServerMsg::RoomClosed | ServerMsg::Error { code: SigError::Version });
                 let Ok(text) = serde_json::to_string(&m) else { continue };
                 if sink.send(Message::Text(text.into())).await.is_err() || close {
@@ -412,6 +423,52 @@ fn handle(
                     });
                 }
             }
+        }
+        ClientMsg::TransferHost { to } => {
+            let Role::Host(room) = role.clone() else {
+                reply(ServerMsg::Error {
+                    code: SigError::NotHost,
+                });
+                return false;
+            };
+            let mut g = hub.lock();
+            let Some(r) = g.rooms.get_mut(&room) else {
+                return true;
+            };
+            let Some((new_conn, new_tx)) = r.members.remove(&to) else {
+                drop(g);
+                reply(ServerMsg::Error {
+                    code: SigError::UnknownPeer,
+                });
+                return false;
+            };
+            // The former host becomes an ordinary member with a fresh number.
+            let me = r.next_peer;
+            r.next_peer += 1;
+            r.members.insert(me, (conn, tx.clone()));
+            r.host = Some((new_conn, new_tx.clone()));
+            r.token = random_bytes::<16>()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let peers: Vec<SigPeer> = r.members.keys().copied().collect();
+            let _ = new_tx.try_send(Outbound::SetRole(Role::Host(room.clone())));
+            Hub::send(
+                &new_tx,
+                ServerMsg::BecameHost {
+                    token: r.token.clone(),
+                    peers,
+                },
+            );
+            for (p, (_, mtx)) in &r.members {
+                if *p != me {
+                    Hub::send(mtx, ServerMsg::HostChanged { you: None });
+                }
+            }
+            drop(g);
+            tracing::info!("host transferred");
+            *role = Role::Member(room, me);
+            reply(ServerMsg::HostChanged { you: Some(me) });
         }
         ClientMsg::Leave => {
             if let Role::Host(room) = role.clone() {

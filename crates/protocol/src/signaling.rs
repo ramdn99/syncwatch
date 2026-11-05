@@ -65,6 +65,10 @@ pub enum ClientMsg {
         to: Option<SigPeer>,
         data: SignalData,
     },
+    /// Host: hand the host role to member `to` (after the room-level handover was sent).
+    TransferHost {
+        to: SigPeer,
+    },
     Leave,
     Ping,
 }
@@ -125,6 +129,15 @@ pub enum ServerMsg {
         code: SigError,
     },
     Pong,
+    /// You are the host now (after `TransferHost`); `token` resumes the room.
+    BecameHost {
+        token: String,
+        peers: Vec<SigPeer>,
+    },
+    /// The host changed. The former host receives its new member number in `you`.
+    HostChanged {
+        you: Option<SigPeer>,
+    },
 }
 
 impl SignalData {

@@ -118,6 +118,23 @@ Notes:
   - Well under 1 MB relayed: DTLS/SCTP setup, about 50 RTT probes, keepalives. The 1 MiB bulk
     step did not start inside the 10 s window.
 
+## Open issues
+
+- **Unexplained stall, 306 s after minimizing (earlier build, spec section 2 pitfall 2).** It was
+  never reproduced or explained. This build keeps the safety net:
+  - the watchdog flags a silent link after 4 s and restarts the peer after about 10 s, with
+    diagnostics (silence, frame counts, ICE and connection state, cause);
+  - a hung bridge page is rebuilt after 5 s.
+
+  Not seen here so far:
+  - the 13-minute minimized run (786 s, worst gap 1.27 s);
+  - the Milestone 5 15-minute two-window soak (ADR 0006).
+
+  The issue stays open until someone finds a cause.
+- **Slow bulk transfer during the 13-minute minimized run** (1.7 MB/s against 9.0 MB/s for an idle
+  rerun). It was blamed on a clippy and test build running at the same time, but that was not
+  proven. Re-check when external files go over the bridge (Milestone 6).
+
 ## Consequences
 - Rooms (Milestone 5) consume `TransportEvent`s and drive `PeerTransport`. The SPAKE2 proof binds
   the fingerprints from `PeerInfo`.

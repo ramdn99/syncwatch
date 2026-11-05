@@ -6,8 +6,10 @@
 //! WebRTC plumbing. This crate holds the pure parts: the binary IPC framing, the wire framing,
 //! SDP fingerprint extraction, the watchdog and the signaling client.
 
+pub mod auth;
 pub mod frame;
 pub mod sdp;
+pub mod session;
 pub mod signaling;
 pub mod transport;
 pub mod watchdog;

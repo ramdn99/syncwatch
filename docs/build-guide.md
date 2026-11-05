@@ -93,6 +93,35 @@ Development environment variables:
 
 Logs go to `%LOCALAPPDATA%\SyncWatch\logs\syncwatch.log` (in portable mode: `<exe>\data\logs`).
 
+## 5a. Two windows in one room
+
+`scripts/dev/two-windows.ps1` starts:
+- a local signaling server;
+- the dev UI server;
+- two app instances as two different people: window `a` (data in `%LOCALAPPDATA%\SyncWatch-dev-a`) and window `b`.
+
+It stops everything again when both windows are closed (or on Ctrl+C). It never moves the mouse or presses keys.
+
+```
+pwsh -NoProfile -File scripts/dev/two-windows.ps1
+pwsh -NoProfile -File scripts/dev/two-windows.ps1 -AutoRoom
+pwsh -NoProfile -File scripts/dev/two-windows.ps1 -AutoRoom -Password test
+pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Soak 900
+pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Ice coturn -AutoRoom
+```
+
+| Option | Meaning |
+|---|---|
+| `-AutoRoom` | window a creates a room, window b joins it |
+| `-Password x` | the auto room uses this password |
+| `-Soak N` | auto room, window b minimized, both idle for N s; fails on any "Reconnecting" banner or link reconnect |
+| `-Ice none` / `coturn` / `metered` | direct (default) / relay-only via the local coturn / relay-only via your Metered connection (uses quota) |
+| `-Docker` | run the signaling server in Docker instead of the local binary |
+| `-FreePort` | stop a stale node process of this repo that still holds port 1420 |
+| `-Media D:\media\test.mkv` | both windows open this file at startup |
+
+Without `-AutoRoom`, use Create room in window a, then Join room in window b with the code from a's header. Rooms without a password show four words in b's header and next to b's name in a's member list: they must match.
+
 ## 5b. Signaling server and network lab
 
 Run the signaling server locally:

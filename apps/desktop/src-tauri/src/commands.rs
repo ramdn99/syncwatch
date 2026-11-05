@@ -14,7 +14,7 @@ use syncwatch_player::{PlaybackState, Player, PlayerEvent, Track, TrackKind, Tra
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 pub struct AppState {
-    player: Arc<MpvPlayer>,
+    pub(crate) player: Arc<MpvPlayer>,
     /// `app_ready` runs once (React StrictMode calls effects twice in development).
     ready: std::sync::atomic::AtomicBool,
     surface: Arc<VideoSurface>,
@@ -67,6 +67,7 @@ fn app_ready(app: AppHandle, window: WebviewWindow, state: State<'_, AppState>) 
     // Dev convenience: auto-open a file (e.g. D:\media\test.mkv) from the environment.
     if cfg!(debug_assertions)
         && let Ok(media) = std::env::var("SYNCWATCH_DEV_MEDIA")
+        && !media.is_empty()
     {
         tracing::info!("dev: auto-loading SYNCWATCH_DEV_MEDIA");
         if let Err(e) = state.player.load(&media) {
@@ -191,9 +192,10 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             tracing::info!(signaling_url = %syncwatch_net::signaling::configured_url(), "signaling server for this instance");
             let (bridge, events) = crate::bridge::Bridge::start(app.handle())?;
             app.manage(Arc::clone(&bridge));
-            if let Some(mut events) = crate::netlab::maybe_start(app.handle(), bridge, events) {
-                // Rooms (Milestone 5) consume transport events; until then just drain them.
-                tauri::async_runtime::spawn(async move { while events.recv().await.is_some() {} });
+            app.manage(crate::room::RoomManager::new(&conn_paths));
+            if let Some(events) = crate::netlab::maybe_start(app.handle(), bridge, events) {
+                crate::room::RoomManager::forward_transport(app.handle().clone(), events);
+                crate::room::dev_autoroom(app.handle());
             }
             let window = app
                 .get_webview_window("main")
@@ -251,6 +253,14 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             crate::connection::open_help_link,
             crate::media::magnet_inspect,
             crate::media::prepare_change_media,
+            crate::room::room_create,
+            crate::room::room_join,
+            crate::room::room_state,
+            crate::room::room_leave,
+            crate::room::room_password,
+            crate::room::room_action,
+            crate::room::room_choose_file,
+            crate::room::room_set_local_media,
             crate::bridge::bridge_attach,
             crate::bridge::bridge_in,
         ])

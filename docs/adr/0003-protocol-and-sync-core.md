@@ -84,7 +84,7 @@ scenario.
 - `Disconnect` must flush queued messages first (Kicked/Reject must arrive).
 
 ## Open items
-- Authentication (SPAKE2, verification words) and seat retention: Milestone 5.
+- Authentication (SPAKE2, verification words) and seat retention: done in Milestone 5 (ADR 0006).
 - Host succession over the network: last item of Milestone 6 (the in-process handover exists now).
 - Warning before sending large externals to relayed peers: needs the connection type
-  (Milestone 4/5) and is wired in Milestone 6.
+  (available since Milestone 5 as the link state) and is wired in Milestone 6.

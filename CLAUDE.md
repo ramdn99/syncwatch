@@ -37,7 +37,8 @@ crates/protocol        versioned postcard protocol enum, no I/O (M2)
 crates/sync-core       pure deterministic state machine (Event, Clock) -> Vec<Effect>; SimClock, FakeNet (M2)
 crates/ice-config      Metered fetch/parse/validate, STUN/TURN connection test (M3)
 crates/net             PeerTransport trait, bridge IPC framing (binary, batched), SDP fingerprints, watchdog,
-                       signaling client (rustls+ring). NO webrtc-rs (it has no TURN over TCP/TLS) (M4).
+                       signaling client (rustls+ring) (M4); auth (ed25519 + SPAKE2 + words), RoomSession (M5).
+                       NO webrtc-rs (it has no TURN over TCP/TLS).
                        The bridge itself (hidden WebView2 window) is apps/desktop/src-tauri/src/bridge.rs
                        + apps/desktop/src/bridge/bridge.ts (WebRTC plumbing only, no timers)
 crates/player          Player trait; libmpv implementation (libmpv2 crate) and a mock (M1)
@@ -70,6 +71,7 @@ cargo run --release -p syncwatch-sim -- --latency-ms 150 --jitter-ms 60 --loss 0
 cargo run -p syncwatch-ice-config --example live_probe   (real Metered account; prints OK/FAIL + latency only)
 cargo run -p syncwatch-signaling
 pwsh -NoProfile -File scripts/dev/net-lab.ps1 -Ice none -Seconds 25 -MB 64 -Release   (two instances, no input simulation)
+pwsh -NoProfile -File scripts/dev/two-windows.ps1 -AutoRoom   (host a + member b in one room; -Soak 900 = 15 min banner soak)
 docker compose -f deploy/compose.dev.yml up -d --build   (signaling + local coturn; always down afterwards)
 pwsh -NoProfile -File scripts/verify-imports.ps1
 pwsh -NoProfile -File scripts/secret-scan.ps1 -Mode All
@@ -85,6 +87,8 @@ pwsh -NoProfile -File scripts/secret-scan.ps1 -Mode All
   TLS = rustls + ring (ADR 0004).
 - Network behaviour (connect time, throughput, watchdog, minimized gaps) is measured with `scripts/dev/net-lab.ps1`;
   numbers and design live in ADR 0005. Prefer `-Ice coturn` (local, free) over `-Ice metered`.
+- Room logic (auth, signaling, links, host transfer, seats) is the pure `RoomSession` in `crates/net/src/session.rs`;
+  test it in process with `crates/net/tests/session.rs` (fake signaling + fake links). Auth design: ADR 0006.
 - All webviews must use the same `additionalBrowserArgs` (WebView2 shares one browser process); a test checks
   `bridge::BROWSER_ARGS` against tauri.conf.json.
 

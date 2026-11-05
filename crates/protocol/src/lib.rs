@@ -6,6 +6,7 @@
 //! [`Message::FileChunk`], and it always names a manifest `ExternalId`. The main media is never
 //! transmitted; see [`MessageKind::carries_bulk_bytes`] and its exhaustive test.
 
+pub mod auth;
 pub mod ids;
 pub mod limits;
 pub mod magnet;

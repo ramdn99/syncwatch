@@ -608,3 +608,50 @@ fn host_transfer_keeps_playback_tracks_and_permissions() {
     w.run_for(1_000_000);
     assert!(host(&w).room().paused);
 }
+
+#[test]
+fn dropped_member_keeps_the_seat_for_20_seconds() {
+    let (mut w, ids) = room(2, 71);
+    let m = ids[0];
+    let (id, identity) = (w.nodes[m].id, w.nodes[m].identity);
+    w.run_for(1_000_000);
+    w.disconnect(m);
+    w.run_for(19_000_000);
+    assert_eq!(host(&w).seat_of(&identity), Some(id), "seat kept for 19 s");
+    let listed = |w: &World| {
+        let ms: Vec<MemberInfo> = w.nodes[HOST]
+            .ui
+            .iter()
+            .rev()
+            .find_map(|(_, u)| match u {
+                UiEvent::Members(v) => Some(v.clone()),
+                _ => None,
+            })
+            .unwrap();
+        ms.into_iter().find(|i| i.id == id).map(|i| i.connected)
+    };
+    assert_eq!(listed(&w), Some(false), "listed as reconnecting");
+    w.run_for(2_000_000);
+    assert_eq!(host(&w).seat_of(&identity), None, "seat freed after 20 s");
+    assert_eq!(listed(&w), None, "no longer listed");
+}
+
+#[test]
+fn reconnect_within_20_seconds_gets_the_same_seat() {
+    let (mut w, ids) = room(2, 72);
+    let m = ids[0];
+    let (id, identity) = (w.nodes[m].id, w.nodes[m].identity);
+    w.run_for(1_000_000);
+    w.disconnect(m);
+    w.run_for(5_000_000);
+    let h = w.host_idx();
+    w.deliver_event(
+        h,
+        Event::PeerJoined {
+            member: MemberId(99),
+            identity,
+            display_name: "again".into(),
+        },
+    );
+    assert_eq!(host(&w).seat_of(&identity), Some(id));
+}

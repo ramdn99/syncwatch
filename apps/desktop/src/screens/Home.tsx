@@ -7,6 +7,7 @@ export function Home(props: {
   onSetup: () => void;
   onSettings: () => void;
   onCreate: () => void;
+  onJoin: () => void;
 }) {
   const { status } = props;
   const blocked = !status.canConnect;
@@ -49,9 +50,10 @@ export function Home(props: {
           </button>
           <button
             type="button"
-            disabled
-            title={blocked ? statusText.bannerBody : 'Joining rooms arrives with networking (Milestone 5).'}
-            className="rounded-lg border border-border px-6 py-3 font-semibold text-text disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={blocked}
+            title={blocked ? statusText.bannerBody : undefined}
+            className="rounded-lg border border-border px-6 py-3 font-semibold text-text hover:border-accent disabled:cursor-not-allowed disabled:opacity-40"
+            onClick={props.onJoin}
           >
             Join room
           </button>

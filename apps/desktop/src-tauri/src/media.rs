@@ -90,7 +90,7 @@ pub struct PreparedChange {
     torrent_engine_available: bool,
 }
 
-fn file_name(path: &Path) -> String {
+pub fn file_name(path: &Path) -> String {
     let n = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

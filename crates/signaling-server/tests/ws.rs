@@ -297,3 +297,98 @@ async fn limits_version_full_and_rate() {
     }
     assert!(limited >= 4, "{limited}");
 }
+
+#[tokio::test]
+async fn host_transfer_swaps_roles_and_routes_to_the_new_host() {
+    let addr = start(Config::default()).await;
+    let mut host = connect(addr).await;
+    let (room, _) = create(&mut host).await;
+    let mut a = connect(addr).await;
+    send(&mut a, &ClientMsg::Join { room: room.clone() }).await;
+    let ServerMsg::Joined { peer: pa, .. } = recv(&mut a).await else {
+        panic!()
+    };
+    let mut b = connect(addr).await;
+    send(&mut b, &ClientMsg::Join { room: room.clone() }).await;
+    let ServerMsg::Joined { peer: pb, .. } = recv(&mut b).await else {
+        panic!()
+    };
+    assert!(matches!(
+        recv(&mut host).await,
+        ServerMsg::PeerJoined { .. }
+    ));
+    assert!(matches!(
+        recv(&mut host).await,
+        ServerMsg::PeerJoined { .. }
+    ));
+
+    // Only the host may transfer.
+    send(&mut b, &ClientMsg::TransferHost { to: pa }).await;
+    assert_eq!(
+        recv(&mut b).await,
+        ServerMsg::Error {
+            code: SigError::NotHost
+        }
+    );
+
+    send(&mut host, &ClientMsg::TransferHost { to: pa }).await;
+    let ServerMsg::HostChanged {
+        you: Some(old_host_peer),
+    } = recv(&mut host).await
+    else {
+        panic!()
+    };
+    let ServerMsg::BecameHost { peers, .. } = recv(&mut a).await else {
+        panic!()
+    };
+    assert!(peers.contains(&pb) && peers.contains(&old_host_peer) && !peers.contains(&pa));
+    assert_eq!(recv(&mut b).await, ServerMsg::HostChanged { you: None });
+
+    // Members (including the former host) now reach the new host only.
+    send(
+        &mut b,
+        &ClientMsg::Signal {
+            to: None,
+            data: SignalData::EndOfCandidates,
+        },
+    )
+    .await;
+    assert_eq!(
+        recv(&mut a).await,
+        ServerMsg::Signal {
+            from: Some(pb),
+            data: SignalData::EndOfCandidates
+        }
+    );
+    send(
+        &mut host,
+        &ClientMsg::Signal {
+            to: None,
+            data: SignalData::EndOfCandidates,
+        },
+    )
+    .await;
+    assert_eq!(
+        recv(&mut a).await,
+        ServerMsg::Signal {
+            from: Some(old_host_peer),
+            data: SignalData::EndOfCandidates
+        }
+    );
+    // And the new host can address them.
+    send(
+        &mut a,
+        &ClientMsg::Signal {
+            to: Some(old_host_peer),
+            data: SignalData::EndOfCandidates,
+        },
+    )
+    .await;
+    assert_eq!(
+        recv(&mut host).await,
+        ServerMsg::Signal {
+            from: None,
+            data: SignalData::EndOfCandidates
+        }
+    );
+}

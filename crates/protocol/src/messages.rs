@@ -113,6 +113,8 @@ pub struct MemberInfo {
     pub buffering: bool,
     pub tracks: TrackSyncStatus,
     pub chat_muted: bool,
+    /// False while a dropped member's seat is kept (shown as reconnecting).
+    pub connected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -8,11 +8,15 @@ export interface ChatPanelProps {
   onCollapse: () => void;
   onChipClick: (seconds: number) => void;
   onSend: (text: string) => void;
+  /** Host only: delete a message. */
+  onDelete?: (id: string) => void;
+  /** Shown instead of the input when this person cannot chat. */
+  disabledReason?: string | null;
 }
 
 /** LEFT column: chat, full height. Plain text only; URLs are never linked. */
 export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(function ChatPanel(
-  { messages, onCollapse, onChipClick, onSend },
+  { messages, onCollapse, onChipClick, onSend, onDelete, disabledReason },
   inputRef,
 ) {
   const [draft, setDraft] = useState('');
@@ -39,7 +43,7 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(functio
               <span className="h-px flex-1 bg-border" />
             </li>
           ) : (
-            <li key={m.id} className="text-sm leading-snug">
+            <li key={m.id} className="group text-sm leading-snug">
               <div className="flex items-baseline gap-2">
                 <span className="font-semibold" style={{ color: memberColors[m.colorIndex % memberColors.length] }}>
                   {m.senderName}
@@ -56,6 +60,16 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(functio
                   </button>
                 )}
                 <span className="tabular ml-auto text-xs text-disabled">{m.wallTime}</span>
+                {onDelete && (
+                  <button
+                    type="button"
+                    className="invisible rounded px-1 text-xs text-danger group-hover:visible focus:visible"
+                    aria-label={`Delete message from ${m.senderName}`}
+                    onClick={() => onDelete(m.id)}
+                  >
+                    Delete
+                  </button>
+                )}
               </div>
               {/* React escapes text: markup in messages is shown literally, never rendered. */}
               <p className="break-words whitespace-pre-wrap text-text">{m.text}</p>
@@ -64,6 +78,9 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(functio
         )}
       </ol>
       <div className="border-t border-border p-2">
+        {disabledReason ? (
+          <p className="rounded-md bg-elevated px-2 py-2 text-xs text-muted">{disabledReason}</p>
+        ) : (
         <textarea
           ref={inputRef}
           rows={2}
@@ -81,6 +98,7 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(functio
             if (e.key === 'Escape') (e.target as HTMLTextAreaElement).blur();
           }}
         />
+        )}
       </div>
     </aside>
   );

@@ -46,6 +46,8 @@ struct MemberEntry {
     perms: Permissions,
     status: Option<MemberStatus>,
     connected: bool,
+    /// When the transport dropped; the seat is kept for [`SEAT_RETENTION_US`].
+    left_at: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -123,6 +125,7 @@ impl HostMachine {
                     perms: m.permissions,
                     status: None,
                     connected: true,
+                    left_at: None,
                 },
             );
         }
@@ -195,6 +198,41 @@ impl HostMachine {
         self.chat.history()
     }
 
+    /// The seat a (re)connecting identity gets back, if it is still kept.
+    pub fn seat_of(&self, identity: &Identity) -> Option<MemberId> {
+        self.members
+            .iter()
+            .find(|(_, e)| e.identity == *identity)
+            .map(|(id, _)| *id)
+    }
+
+    /// A member number no current or kept seat uses (for a newly authenticated member).
+    pub fn free_member_id(&self) -> MemberId {
+        let mut n = self.next_member_id.max(1);
+        while self.members.contains_key(&MemberId(n)) || MemberId(n) == self.me {
+            n += 1;
+        }
+        MemberId(n)
+    }
+
+    /// Identity of a seat (connected or kept).
+    pub fn identity_of(&self, m: MemberId) -> Option<Identity> {
+        self.members.get(&m).map(|e| e.identity)
+    }
+
+    /// Seats whose member is currently marked connected.
+    pub fn connected_members(&self) -> Vec<MemberId> {
+        self.members
+            .iter()
+            .filter(|(_, e)| e.connected)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    pub fn is_locked(&self) -> bool {
+        self.locked
+    }
+
     pub fn bans(&self) -> &[Identity] {
         &self.bans
     }
@@ -228,6 +266,7 @@ impl HostMachine {
             Event::PeerLeft { member } => {
                 if let Some(e) = self.members.get_mut(&member) {
                     e.connected = false;
+                    e.left_at = Some(now);
                 }
                 self.try_resume(now, &mut out);
             }
@@ -288,11 +327,12 @@ impl HostMachine {
             buffering: host_status.buffering,
             tracks: host_status.tracks,
             chat_muted: false,
+            connected: true,
         }];
         v.extend(
             self.members
                 .iter()
-                .filter(|(_, e)| e.connected)
+                // Disconnected members stay listed (as reconnecting) while their seat is kept.
                 .map(|(id, e)| MemberInfo {
                     id: *id,
                     display_name: e.name.clone(),
@@ -305,6 +345,7 @@ impl HostMachine {
                         .map(|s| s.tracks)
                         .unwrap_or(TrackSyncStatus::Applying),
                     chat_muted: self.chat.is_muted(*id),
+                    connected: e.connected,
                 }),
         );
         v
@@ -434,6 +475,9 @@ impl HostMachine {
     // ------------------------------------------------------------------ tick --------------
 
     fn on_tick(&mut self, now: i64, out: &mut Out) {
+        // A dropped member keeps their seat for 20 s (spec section 1); then it is freed.
+        self.members
+            .retain(|_, e| e.connected || e.left_at.is_none_or(|t| now - t < SEAT_RETENTION_US));
         self.local.tick(Some(now), now, out);
         if self.gate.pending.is_some() {
             self.try_resume(now, out);
@@ -477,6 +521,7 @@ impl HostMachine {
             Some(id) => {
                 if let Some(e) = self.members.get_mut(&id) {
                     e.connected = true;
+                    e.left_at = None;
                     e.status = None;
                 }
                 id
@@ -497,6 +542,7 @@ impl HostMachine {
                         perms: self.default_perms,
                         status: None,
                         connected: true,
+                        left_at: None,
                     },
                 );
                 member
@@ -591,10 +637,9 @@ impl HostMachine {
             Message::FileCancel { external_id } => {
                 out.push(Effect::CancelUpload { to: m, external_id })
             }
+            // A deliberate leave frees the seat at once (no 20 s retention).
             Message::Bye => {
-                if let Some(e) = self.members.get_mut(&m) {
-                    e.connected = false;
-                }
+                self.members.remove(&m);
             }
             Message::Command(Command::Tracks(_)) => out.push(Effect::ProtocolViolation {
                 from: m,

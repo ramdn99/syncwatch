@@ -332,4 +332,6 @@ pub mod timing {
     pub const CHAT_CLAIM_TOLERANCE_MS: i64 = 5_000;
     /// A member's position estimate older than this is not used for drift correction.
     pub const OBS_FRESH_US: i64 = 600_000;
+    /// A dropped member keeps their seat this long (spec section 1).
+    pub const SEAT_RETENTION_US: i64 = 20_000_000;
 }

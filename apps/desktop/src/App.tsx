@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { connection, EMPTY_STATUS, onConnectionStatus, type ConnectionStatus } from './lib/connection';
 import { app, inTauri } from './lib/player';
 import { RoomView } from './RoomView';
+import { RoomEntryDialog } from './components/RoomDialogs';
+import { onRoomState, room } from './lib/room';
 import { ConnectionSetup } from './screens/ConnectionSetup';
 import { Home } from './screens/Home';
 import { SettingsConnection } from './screens/SettingsConnection';
@@ -12,6 +14,15 @@ export function App() {
   const [status, setStatus] = useState<ConnectionStatus>(EMPTY_STATUS);
   const [view, setView] = useState<View>('home');
   const [loaded, setLoaded] = useState(!inTauri());
+  const [entry, setEntry] = useState<'create' | 'join' | null>(null);
+
+  // Already in a room (window reload, dev auto-room): show it.
+  useEffect(() => {
+    void room.state().then((s) => s.active && setView('room'));
+    return onRoomState((s) => {
+      if (s.active) setView('room');
+    });
+  }, []);
 
   useEffect(() => {
     void connection.status().then((s) => {
@@ -54,12 +65,25 @@ export function App() {
       return <RoomView onLeave={() => setView('home')} />;
     default:
       return (
-        <Home
-          status={status}
-          onSetup={() => setView('setup')}
-          onSettings={() => setView('settings')}
-          onCreate={() => status.canConnect && setView('room')}
-        />
+        <>
+          <Home
+            status={status}
+            onSetup={() => setView('setup')}
+            onSettings={() => setView('settings')}
+            onCreate={() => status.canConnect && setEntry('create')}
+            onJoin={() => status.canConnect && setEntry('join')}
+          />
+          {entry && (
+            <RoomEntryDialog
+              mode={entry}
+              onClose={() => setEntry(null)}
+              onEntered={() => {
+                setEntry(null);
+                setView('room');
+              }}
+            />
+          )}
+        </>
       );
   }
 }
