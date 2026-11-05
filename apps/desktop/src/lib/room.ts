@@ -56,6 +56,8 @@ export type EndReason =
 
 export interface RoomState {
   active: boolean;
+  /** Increments for every room this app process enters. */
+  sessionId: number;
   roomCode: string | null;
   phase: Phase | null;
   isHost: boolean;
@@ -98,6 +100,7 @@ const NO_PERMS: Perms = { canPlayPause: false, canSeek: false, canChangeMedia: f
 
 export const EMPTY_ROOM: RoomState = {
   active: false,
+  sessionId: 0,
   roomCode: null,
   phase: null,
   isHost: false,

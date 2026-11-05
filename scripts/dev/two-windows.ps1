@@ -34,7 +34,7 @@ param(
     [string]$Password = '',
     [int]$Soak = 0,
     # Scripted end-to-end check between the two windows (debug builds): 'chat'.
-    [ValidateSet('', 'chat')][string]$Scenario = '',
+    [ValidateSet('', 'chat', 'rooms')][string]$Scenario = '',
     [switch]$Docker,
     # Stop a stale Vite/node process of THIS repo that still holds port 1420.
     [switch]$FreePort,
@@ -112,7 +112,9 @@ try {
     $env:SYNCWATCH_DEV_FORCE_RELAY = $(if ($Ice -eq 'metered') { '1' } else { '' })
     $env:SYNCWATCH_DEV_ROOM_FILE = Join-Path $work 'room.txt'
     $env:SYNCWATCH_DEV_ROOM_PASSWORD = $Password
-    if ($Media) { $env:SYNCWATCH_DEV_MEDIA = $Media } else { Remove-Item env:SYNCWATCH_DEV_MEDIA -ErrorAction SilentlyContinue }
+    # Startup media applies only to the first launch of a window (never to rooms; entering a
+    # room unloads the player). The rooms scenario uses its own variable instead.
+    if ($Media -and $Scenario -ne 'rooms') { $env:SYNCWATCH_DEV_MEDIA = $Media } else { Remove-Item env:SYNCWATCH_DEV_MEDIA -ErrorAction SilentlyContinue }
     $apps = @()
     foreach ($who in 'a', 'b') {
         $env:SYNCWATCH_DEV_IDENTITY = $who
@@ -121,6 +123,9 @@ try {
         $env:SYNCWATCH_DEV_SOAK_FILE = $(if ($Soak -gt 0) { Join-Path $work "soak-$who.json" } else { '' })
         $env:SYNCWATCH_DEV_MINIMIZE = $(if ($Soak -gt 0 -and $who -eq 'b') { '1' } else { '' })
         $env:SYNCWATCH_DEV_SCENARIO = $Scenario
+        # The rooms scenario loads this video inside a room (read only). It is NOT the startup
+        # media variable, so nothing is loaded before a room picks it.
+        $env:SYNCWATCH_DEV_SCENARIO_MEDIA = $(if ($Scenario -eq 'rooms') { if ($Media) { $Media } else { 'D:\media\test.mkv' } } else { '' })
         $env:SYNCWATCH_DEV_SCENARIO_FILE = $(if ($Scenario) { Join-Path $work "scenario-$who.txt" } else { '' })
         $p = Start-Process target\debug\syncwatch.exe -PassThru
         $started += $p

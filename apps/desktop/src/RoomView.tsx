@@ -489,6 +489,7 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
           onToggleMute={() => void run(player.setMute(!state.mute))}
           onToggleFullscreen={() => toggleFullscreen()}
           onOpenFile={() => void openFile()}
+          emptyState={rs.active ? roomEmptyState(rs) : undefined}
         >
           {showPanel && rs.missingFile && (
             <MissingFilePanel
@@ -562,6 +563,21 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
       )}
     </div>
   );
+}
+
+/** The in-room empty player: a new room starts with no video until the host picks a source. */
+export function roomEmptyState(rs: RoomState): { title: string; body: string; action: string | null } {
+  if (rs.missingFile) {
+    return { title: 'No video yet', body: `Choose your copy of ${rs.missingFile.name} to watch along.`, action: null };
+  }
+  const canPick = rs.isHost || rs.myPermissions.canChangeMedia;
+  return {
+    title: 'No video yet',
+    body: rs.isHost
+      ? 'Pick a local file or a torrent magnet for the room. Everyone plays their own copy.'
+      : 'The host has not picked a video yet.',
+    action: canPick ? 'Choose a source...' : null,
+  };
 }
 
 function Section(props: { title: string; count?: number; collapsed: boolean; onToggle: () => void; onCollapseColumn?: () => void; children: React.ReactNode }) {

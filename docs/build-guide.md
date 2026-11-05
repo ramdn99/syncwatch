@@ -108,6 +108,7 @@ pwsh -NoProfile -File scripts/dev/two-windows.ps1 -AutoRoom
 pwsh -NoProfile -File scripts/dev/two-windows.ps1 -AutoRoom -Password test
 pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Soak 900
 pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario chat
+pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario rooms
 pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Ice coturn -AutoRoom
 ```
 
@@ -116,6 +117,7 @@ pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Ice coturn -AutoRoom
 | `-AutoRoom` | window a creates a room, window b joins it |
 | `-Password x` | the auto room uses this password |
 | `-Scenario chat` | scripted end-to-end check through the real UI command path in both windows. It covers: chat both ways, Chat enabled off/on, Hide chat from members, slow mode, delete, clear, mute/unmute. Prints PASS/FAIL per step |
+| `-Scenario rooms` | room 1 with a video (`D:\media\test.mkv`, read only, or `-Media`), close it, create room 2, join: asserts nothing from room 1 is loaded or shown |
 | `-Soak N` | auto room, window b minimized, both idle for N s; fails on any "Reconnecting" banner or link reconnect |
 | `-Ice none` / `coturn` / `metered` | direct (default) / relay-only via the local coturn / relay-only via your Metered connection (uses quota) |
 | `-Docker` | run the signaling server in Docker instead of the local binary |

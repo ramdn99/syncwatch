@@ -250,8 +250,14 @@ fn event_loop(mpv: &Mpv, shared: &Mutex<Shared>, stop: &AtomicBool, tx: &Sender<
                     g.state.file_loaded = false;
                     g.state.time_pos = None;
                     g.state.duration = None;
+                    // No file, no tracks: a later snapshot must not show the old ones.
+                    g.tracks.clear();
                 }
                 let _ = tx.send(PlayerEvent::EndFile { reason });
+                if reason != EndReason::Redirect {
+                    let _ = tx.send(PlayerEvent::TracksChanged { tracks: Vec::new() });
+                    let _ = tx.send(PlayerEvent::State(lock().state.clone()));
+                }
             }
             Event::PropertyChange { name, change, .. } => {
                 let mut tracks_changed = false;
@@ -302,6 +308,17 @@ impl Player for MpvPlayer {
         self.mpv
             .command("loadfile", &[source, "replace"])
             .map_err(cmd_err)
+    }
+    fn unload(&self) -> Result<()> {
+        // `stop` ends the current file; with idle=yes the player stays alive with nothing loaded.
+        // The EndFile event then clears the state and the track list.
+        self.mpv.command("stop", &[]).map_err(cmd_err)?;
+        let mut g = self.lock();
+        g.state.file_loaded = false;
+        g.state.time_pos = None;
+        g.state.duration = None;
+        g.tracks.clear();
+        Ok(())
     }
     fn set_paused(&self, paused: bool) -> Result<()> {
         self.mpv.set_property("pause", paused).map_err(cmd_err)

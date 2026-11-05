@@ -208,6 +208,8 @@ pub struct ChatConfigDto {
 #[serde(rename_all = "camelCase")]
 pub struct RoomStateDto {
     active: bool,
+    /// Increments for every room this app process enters (the UI remounts the room view).
+    session_id: u32,
     room_code: Option<String>,
     phase: Option<Phase>,
     is_host: bool,
@@ -623,6 +625,28 @@ pub struct RoomManager {
     state: Mutex<RoomStateDto>,
     /// The local file this member chose (never sent anywhere).
     chosen: Mutex<Option<PathBuf>>,
+    sessions: std::sync::atomic::AtomicU32,
+}
+
+/// Clears EVERYTHING a room leaves behind in this app process: the player is stopped and
+/// unloaded (no file, no tracks), the chosen local file is forgotten and the UI state is reset
+/// (members, chat, permissions, words, choose-my-file, diagnostics). Called when a room starts
+/// and when it ends; the session itself (sync-core state: media descriptor and epochs,
+/// playback, tracks, manifest, chat history, ready gate, transfers) is dropped with its task.
+/// Only nded (why the last room ended) is kept, for the dialog.
+fn reset_room_scope(player: &dyn Player, m: &RoomManager, ended: Option<EndReason>) {
+    if let Err(e) = player.unload() {
+        tracing::warn!(error = %e, "could not unload the player");
+    }
+    if let Ok(mut g) = m.chosen.lock() {
+        *g = None;
+    }
+    if let Ok(mut g) = m.state.lock() {
+        *g = RoomStateDto {
+            ended,
+            ..RoomStateDto::default()
+        };
+    }
 }
 
 impl RoomManager {
@@ -633,6 +657,7 @@ impl RoomManager {
             transport: Mutex::new(None),
             state: Mutex::new(RoomStateDto::default()),
             chosen: Mutex::new(None),
+            sessions: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -801,16 +826,26 @@ async fn start(app: AppHandle, name: String, mode: Mode) -> Result<EntryOutcome,
     if let Ok(mut g) = m.transport.lock() {
         *g = Some(tr_tx);
     }
-    if let Ok(mut g) = m.chosen.lock() {
-        *g = None;
-    }
-    if let Ok(mut g) = m.state.lock() {
-        *g = RoomStateDto::default();
-    }
+    // A new room starts completely clean: nothing loaded, nothing remembered.
+    reset_room_scope(&*app.state::<AppState>().player, &m, None);
+    let session_id = m.sessions.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
-        drive(app2.clone(), cfg, mode, sig, url, cmd_rx, tr_rx).await;
+        let ended = drive(
+            app2.clone(),
+            cfg,
+            mode,
+            sig,
+            DriveIds { url, session_id },
+            cmd_rx,
+            tr_rx,
+        )
+        .await;
         let m = app2.state::<RoomManager>();
+        // Nothing from this room may survive into the next one.
+        reset_room_scope(&*app2.state::<AppState>().player, &m, ended);
+        let last = m.state.lock().map(|g| g.clone()).unwrap_or_default();
+        let _ = app2.emit("room-state", &last);
         if let Ok(mut g) = m.cmd.lock() {
             *g = None;
         }
@@ -839,15 +874,22 @@ async fn recv_sig(
     }
 }
 
+/// Signaling URL and the room's session number, for the driver.
+struct DriveIds {
+    url: String,
+    session_id: u32,
+}
+
 async fn drive(
     app: AppHandle,
     cfg: SessionConfig,
     mode: Mode,
     sig: SignalingConn,
-    url: String,
+    ids: DriveIds,
     mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
     mut tr_rx: mpsc::UnboundedReceiver<TransportEvent>,
-) {
+) -> Option<EndReason> {
+    let DriveIds { url, session_id } = ids;
     let epoch = Instant::now();
     let bridge = Arc::clone(&*app.state::<Arc<Bridge>>());
     let mut sig = Some(sig);
@@ -855,6 +897,7 @@ async fn drive(
     let mut backoff = Duration::from_secs(1);
     let mut mirror = Mirror::default();
     mirror.s.active = true;
+    mirror.s.session_id = session_id;
     mirror.t0 = Some(epoch);
     mirror.s.diag.signaling_host = signaling_host(&url);
     mirror.s.diag.signaling_connected = true;
@@ -932,6 +975,7 @@ async fn drive(
     publish(&app, &mut mirror, &session);
     write_soak(&mirror, epoch, true);
     tracing::info!("room session ended");
+    mirror.s.ended.clone()
 }
 
 /// Debug builds: SYNCWATCH_DEV_SOAK_FILE receives banner counters (scripts/dev/two-windows.ps1).
@@ -1308,6 +1352,35 @@ pub async fn room_set_local_media(app: AppHandle, path: String) -> Result<(), St
 pub struct DevScenario {
     name: String,
     role: String,
+    /// A video the scenario may load (SYNCWATCH_DEV_SCENARIO_MEDIA; only read, never written).
+    media: Option<String>,
+}
+
+fn dev_shared_file() -> Option<PathBuf> {
+    let f = std::env::var("SYNCWATCH_DEV_ROOM_FILE").ok()?;
+    Some(PathBuf::from(format!("{f}.room2")))
+}
+
+/// Debug builds: the host publishes a second room code for the scenario.
+#[tauri::command]
+pub fn dev_scenario_share(code: String) {
+    if cfg!(debug_assertions)
+        && normalize_room_code(&code).is_some()
+        && let Some(p) = dev_shared_file()
+    {
+        let _ = std::fs::write(p, code);
+    }
+}
+
+/// Debug builds: the second room code, once the host published it.
+#[tauri::command]
+pub fn dev_scenario_shared() -> Option<String> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::fs::read_to_string(dev_shared_file()?)
+        .ok()
+        .map(|s| s.trim().to_owned())
 }
 
 #[tauri::command]
@@ -1321,7 +1394,10 @@ pub fn dev_scenario() -> Option<DevScenario> {
     let role = std::env::var("SYNCWATCH_DEV_AUTOROOM")
         .ok()
         .filter(|s| !s.is_empty())?;
-    Some(DevScenario { name, role })
+    let media = std::env::var("SYNCWATCH_DEV_SCENARIO_MEDIA")
+        .ok()
+        .filter(|s| !s.is_empty());
+    Some(DevScenario { name, role, media })
 }
 
 /// Debug builds: appends one result line of the scenario to SYNCWATCH_DEV_SCENARIO_FILE.
@@ -1474,6 +1550,117 @@ mod tests {
             chat_muted: muted,
             connected,
         }
+    }
+
+    fn manager() -> RoomManager {
+        RoomManager {
+            key: IdentityKey::from_secret([9; 32]),
+            cmd: Mutex::new(None),
+            transport: Mutex::new(None),
+            state: Mutex::new(RoomStateDto::default()),
+            chosen: Mutex::new(None),
+            sessions: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    /// Spec: on leave/close/kick/ban/room end, reset ALL room-scoped state; a new room in the
+    /// same app process starts with nothing from the old one.
+    #[test]
+    fn nothing_from_a_room_survives_into_the_next() {
+        use syncwatch_player::mock::MockPlayer;
+        let (player, _rx) = MockPlayer::new();
+        let m = manager();
+        // --- room 1, fully used: a video loaded, a chosen file, members, chat, panel, words.
+        player.load(r"D:\media\old.mkv").unwrap();
+        assert!(player.state().file_loaded);
+        *m.chosen.lock().unwrap() = Some(PathBuf::from(r"D:\media\old.mkv"));
+        let mut mirror = Mirror::default();
+        mirror.s.active = true;
+        mirror.apply(RoomUi::Created {
+            room: "ROOMAAAA".into(),
+        });
+        mirror.apply(RoomUi::Core(UiEvent::Members(vec![
+            info(0, "H", true, false),
+            info(1, "Mo", true, true),
+        ])));
+        mirror.apply(RoomUi::Core(UiEvent::Permissions(Permissions::CHAT_ONLY)));
+        mirror.apply(RoomUi::Core(UiEvent::MediaChanged {
+            title: Some("old.mkv".into()),
+        }));
+        mirror.apply(RoomUi::Core(UiEvent::ShowMissingFilePanel {
+            name: "old.mkv".into(),
+            size: 1,
+            duration_ms: None,
+        }));
+        mirror.apply(RoomUi::Verification {
+            member: None,
+            words: ["a", "b", "c", "d"],
+        });
+        mirror.apply(RoomUi::PasswordIgnored);
+        mirror.apply(RoomUi::Rejected {
+            member: Some(MemberId(1)),
+            what: "x".into(),
+        });
+        *m.state.lock().unwrap() = mirror.s.clone();
+        // --- room 1 ends (close, leave, kick, ban and room end all go through this).
+        reset_room_scope(&player, &m, Some(EndReason::RoomClosed));
+        assert!(!player.state().file_loaded, "mpv unloaded");
+        assert!(player.tracks().is_empty(), "no tracks left");
+        assert!(player.state().time_pos.is_none());
+        assert!(m.chosen.lock().unwrap().is_none(), "chosen file forgotten");
+        let after = m.state.lock().unwrap().clone();
+        let empty = RoomStateDto {
+            ended: Some(EndReason::RoomClosed),
+            ..RoomStateDto::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&after).unwrap(),
+            serde_json::to_value(&empty).unwrap(),
+            "only the end reason is kept"
+        );
+        // --- room 2 is created in the same process: start() resets again, then a new session.
+        reset_room_scope(&player, &m, None);
+        let cfg = SessionConfig {
+            key: m.key.clone(),
+            display_name: "H".into(),
+            ice: IceConfig::default(),
+            max_members: 12,
+        };
+        let clock = Clock {
+            mono_us: 5_000_000,
+            wall_ms: 0,
+        };
+        let (s, outs) = RoomSession::create(cfg, None, clock);
+        let syncwatch_sync_core::Peer::Host(h) = s.peer() else {
+            panic!()
+        };
+        assert!(
+            h.descriptor().is_none(),
+            "no media until the host picks a source"
+        );
+        assert_eq!(h.room().media_epoch, MediaEpoch(0));
+        assert_eq!(h.room().position_ms, 0);
+        assert!(h.room().paused);
+        assert_eq!(
+            *h.tracks(),
+            TrackState::default(),
+            "default track state, empty manifest"
+        );
+        assert!(h.chat_history().is_empty(), "no chat history");
+        assert!(h.bans().is_empty() && !h.is_locked() && h.connected_members().is_empty());
+        let mut fresh = Mirror::default();
+        for o in outs {
+            if let Output::Ui(u) = o {
+                fresh.apply(u);
+            }
+        }
+        assert!(
+            fresh.s.chat.is_empty()
+                && fresh.s.missing_file.is_none()
+                && fresh.s.media_title.is_none()
+        );
+        assert!(!player.state().file_loaded);
+        assert!(m.state.lock().unwrap().ended.is_none());
     }
 
     #[test]

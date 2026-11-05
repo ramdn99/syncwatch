@@ -198,6 +198,11 @@ impl HostMachine {
         self.chat.history()
     }
 
+    /// The room's current media (None until the host picks a source).
+    pub fn descriptor(&self) -> Option<&MediaDescriptor> {
+        self.descriptor.as_ref()
+    }
+
     /// The seat a (re)connecting identity gets back, if it is still kept.
     pub fn seat_of(&self, identity: &Identity) -> Option<MemberId> {
         self.members

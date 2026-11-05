@@ -81,6 +81,9 @@ pub enum PlayerEvent {
 pub trait Player: Send + Sync {
     /// Opens a local file (or, later, a loopback URL) and starts paused.
     fn load(&self, source: &str) -> Result<()>;
+    /// Stops playback and unloads the file: afterwards nothing is loaded and the track list is
+    /// empty (rooms call this when they start and when they end).
+    fn unload(&self) -> Result<()>;
     fn set_paused(&self, paused: bool) -> Result<()>;
     /// Absolute seek in seconds.
     fn seek(&self, seconds: f64) -> Result<()>;

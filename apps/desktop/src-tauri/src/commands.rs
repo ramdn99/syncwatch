@@ -263,6 +263,8 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             crate::room::room_set_local_media,
             crate::room::dev_scenario,
             crate::room::dev_scenario_report,
+            crate::room::dev_scenario_share,
+            crate::room::dev_scenario_shared,
             crate::bridge::bridge_attach,
             crate::bridge::bridge_in,
         ])

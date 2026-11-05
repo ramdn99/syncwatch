@@ -945,3 +945,76 @@ fn the_host_records_rejections_per_member_for_diagnostics() {
         vec![(Some(mid), "chat message refused: Disabled".to_owned())]
     );
 }
+
+#[test]
+fn a_new_room_after_closing_one_starts_clean_for_host_and_member() {
+    let mut w = World::new();
+    let h = w.host("Hana", 1, None);
+    w.ui_action(
+        h,
+        UiAction::ChangeMedia {
+            descriptor: MediaDescriptor::LocalFile(LocalMedia {
+                name: "old.mkv".into(),
+                identity: FileIdentity {
+                    sample_blake3: [4; 32],
+                    size: 99,
+                    duration_ms: Some(1000),
+                },
+            }),
+            own_file: true,
+        },
+    );
+    let m = w.join("Mo", 2, None);
+    w.run_for(500_000);
+    chat(&mut w, m, "from room one");
+    let mid = w.members(h).into_iter().find(|i| !i.is_host).unwrap().id;
+    let mut p = Permissions::ALL;
+    p.can_seek = false;
+    w.ui_action(
+        h,
+        UiAction::SetPermissions {
+            member: mid,
+            permissions: p,
+        },
+    );
+    w.ui_action(h, UiAction::Lock(true));
+    w.run_for(300_000);
+    w.act(h, Action::Leave);
+    w.run_for(1_000_000);
+    assert_eq!(w.nodes[m].ended, Some(EndReason::RoomClosed));
+
+    // Same people, same app identities, a NEW room.
+    let h2 = w.host("Hana", 1, None);
+    let m2 = w.join("Mo", 2, None);
+    w.run_for(1_000_000);
+    assert!(w.in_room(m2), "the old lock did not carry over");
+    let ui = &w.nodes[m2].ui;
+    assert!(
+        !ui.iter()
+            .any(|u| matches!(u, RoomUi::Core(UiEvent::ShowMissingFilePanel { .. }))),
+        "no media: no choose-my-file panel"
+    );
+    assert!(
+        w.chats(m2).is_empty() && w.chats(h2).is_empty(),
+        "no chat history"
+    );
+    let members = w.members(m2);
+    assert!(
+        members.iter().all(|i| i.media == MediaStatus::NoMedia),
+        "{members:?}"
+    );
+    let mine = ui.iter().rev().find_map(|u| match u {
+        RoomUi::Core(UiEvent::Permissions(p)) => Some(*p),
+        _ => None,
+    });
+    assert_eq!(
+        mine,
+        Some(Permissions::ALL),
+        "default permissions, not the old ones"
+    );
+    let syncwatch_sync_core::Peer::Host(host) = w.nodes[h2].s.peer() else {
+        panic!()
+    };
+    assert!(host.descriptor().is_none());
+    assert!(host.chat_history().is_empty());
+}

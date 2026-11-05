@@ -13,8 +13,16 @@ export interface VideoAreaProps {
   onToggleMute: () => void;
   onToggleFullscreen: () => void;
   onOpenFile: () => void;
+  /** In a room: what to show while no video is loaded (null = the room cannot pick one). */
+  emptyState?: { title: string; body: string; action: string | null };
   children?: ReactNode;
 }
+
+const DEFAULT_EMPTY = {
+  title: 'No video loaded',
+  body: 'Open a local file or drop it here. Your copy plays locally; it is never sent to anyone.',
+  action: 'Open file...',
+};
 
 const HIDE_AFTER_MS = 2500;
 
@@ -58,12 +66,14 @@ export const VideoArea = forwardRef<HTMLDivElement, VideoAreaProps>(function Vid
       data-testid="video-area"
     >
       {!state.fileLoaded && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-center">
-          <p className="font-brand text-lg">No video loaded</p>
-          <p className="max-w-xs text-sm text-muted">Open a local file or drop it here. Your copy plays locally; it is never sent to anyone.</p>
-          <button type="button" className="rounded-md bg-accent px-4 py-2 font-semibold text-on-accent hover:bg-accent-hover active:bg-accent-pressed" onClick={props.onOpenFile}>
-            Open file...
-          </button>
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-center" data-testid="video-empty">
+          <p className="font-brand text-lg">{(props.emptyState ?? DEFAULT_EMPTY).title}</p>
+          <p className="max-w-xs text-sm text-muted">{(props.emptyState ?? DEFAULT_EMPTY).body}</p>
+          {(props.emptyState ?? DEFAULT_EMPTY).action && (
+            <button type="button" className="rounded-md bg-accent px-4 py-2 font-semibold text-on-accent hover:bg-accent-hover active:bg-accent-pressed" onClick={props.onOpenFile}>
+              {(props.emptyState ?? DEFAULT_EMPTY).action}
+            </button>
+          )}
         </div>
       )}
       {state.fileLoaded && state.pausedForCache && (

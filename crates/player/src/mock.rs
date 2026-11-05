@@ -11,6 +11,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 #[derive(Debug, Clone, PartialEq)]
 pub enum MockCall {
     Load(String),
+    Unload,
     SetPaused(bool),
     Seek(f64),
     SeekRelative(f64),
@@ -90,6 +91,23 @@ impl MockPlayer {
 impl Player for MockPlayer {
     fn load(&self, source: &str) -> Result<()> {
         self.record(MockCall::Load(source.to_owned()));
+        self.lock().state.file_loaded = true;
+        self.emit_state();
+        Ok(())
+    }
+    fn unload(&self) -> Result<()> {
+        self.record(MockCall::Unload);
+        {
+            let mut g = self.lock();
+            g.state.file_loaded = false;
+            g.state.time_pos = None;
+            g.state.duration = None;
+            g.tracks.clear();
+        }
+        let _ = self
+            .tx
+            .send(PlayerEvent::TracksChanged { tracks: Vec::new() });
+        self.emit_state();
         Ok(())
     }
     fn set_paused(&self, paused: bool) -> Result<()> {

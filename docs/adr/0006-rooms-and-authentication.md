@@ -166,6 +166,32 @@ Milestone 2 the sync-core machine (ADR 0003).
 
    "Copy diagnostics" leaves out chat text, credentials and addresses.
 
+6. **A new room showed the previous room's video.**
+   - Root cause: the player was never unloaded. The `Player` trait had no unload at all, so mpv
+     kept the last file loaded after a room ended. The next room view read the player snapshot
+     when it mounted. Also, at end of file mpv cleared "file loaded" but kept the old track list.
+   - Not the cause:
+     - Room state in memory: every room gets a new session and sync-core machine, and the UI
+       mirror was already reset on start.
+     - A saved "last played" value: none exists; only layout widths and the display name are
+       stored.
+     - The dev startup variable: `SYNCWATCH_DEV_MEDIA` loads once per process, before any room.
+       Entering a room now unloads it, and the rooms scenario uses its own variable.
+   - Fix: `Player::unload()` (mpv `stop`, which clears the state and the tracks), and
+     `reset_room_scope` runs when a room starts and when it ends, for every way it can end. It
+     unloads the player, forgets the chosen file and resets the UI state. The room view also
+     remounts per room (`sessionId`).
+   - Nothing else is left behind. The sync-core state (descriptor, epochs, playback, tracks,
+     manifest, chat history, gate, transfers) goes away with the session. Torrents and the
+     per-room external-file cache do not exist yet (Milestones 6 and 7). They must hook into
+     `reset_room_scope`.
+   - Tests:
+     - `nothing_from_a_room_survives_into_the_next` (same process, mock player);
+     - `a_new_room_after_closing_one_starts_clean_for_host_and_member` (sessions);
+     - `VideoEmpty.test.tsx` ("No video yet");
+     - `two-windows.ps1 -Scenario rooms`: load a video in room 1, close it, create room 2 and
+       join. With the unload disabled it reproduces the bug.
+
 ## Security notes (feed the Milestone 9 threat model)
 - **Signaling compromise.** It cannot join or impersonate anyone in a password room without the
   password: one online guess per attempt, throttled. In rooms without a password, a MITM changes

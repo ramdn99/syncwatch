@@ -1,1 +1,1 @@
-{"done":false,"elapsedS":15,"ended":null,"inRoom":true,"isHost":true,"linkReconnecting":0,"links":["Direct"],"members":2,"membersDisconnected":0,"reconnectingBanners":0}
+{"done":true,"elapsedS":2,"ended":{"kind":"roomClosed"},"inRoom":true,"isHost":false,"linkReconnecting":0,"links":["Direct"],"members":2,"membersDisconnected":0,"reconnectingBanners":0}

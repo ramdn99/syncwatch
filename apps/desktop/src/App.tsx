@@ -15,6 +15,8 @@ export function App() {
   const [view, setView] = useState<View>('home');
   const [loaded, setLoaded] = useState(!inTauri());
   const [entry, setEntry] = useState<'create' | 'join' | null>(null);
+  // Every room gets a fresh room view (no UI state carries over from the previous room).
+  const [roomSession, setRoomSession] = useState(0);
   // While the Create/Join dialog is open it decides when to enter the room (it may show a
   // notice first).
   const entryOpen = useRef(false);
@@ -27,8 +29,12 @@ export function App() {
 
   // Already in a room (window reload, dev auto-room): show it.
   useEffect(() => {
-    void room.state().then((s) => s.active && setView('room'));
+    void room.state().then((s) => {
+      setRoomSession(s.sessionId);
+      if (s.active) setView('room');
+    });
     return onRoomState((s) => {
+      if (s.sessionId) setRoomSession(s.sessionId);
       if (s.active && !entryOpen.current) setView('room');
     });
   }, []);
@@ -71,7 +77,7 @@ export function App() {
     case 'settings':
       return <SettingsConnection status={status} onReplace={() => setView('setup')} onBack={() => setView('home')} />;
     case 'room':
-      return <RoomView onLeave={() => setView('home')} />;
+      return <RoomView key={roomSession} onLeave={() => setView('home')} />;
     default:
       return (
         <>

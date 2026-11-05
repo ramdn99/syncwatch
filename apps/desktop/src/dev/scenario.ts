@@ -159,6 +159,89 @@ async function member(report: Report) {
   });
 }
 
+// ------------------------------------------------------------------ 'rooms' scenario ---
+
+interface Snap {
+  state: { fileLoaded: boolean };
+  tracks: unknown[];
+}
+const snap = () => invoke<Snap>('snapshot');
+async function waitPlayer(label: string, loaded: boolean, timeoutMs = 20_000) {
+  const end = Date.now() + timeoutMs;
+  for (;;) {
+    const s = await snap();
+    if (s.state.fileLoaded === loaded && (loaded || s.tracks.length === 0)) return;
+    if (Date.now() > end) throw new Error(`player: ${label}`);
+    await sleep(200);
+  }
+}
+async function assertCleanRoom(who: string) {
+  await sleep(1500);
+  const p = await snap();
+  if (p.state.fileLoaded) throw new Error(`${who}: a video is loaded in the new room`);
+  if (p.tracks.length) throw new Error(`${who}: ${p.tracks.length} old tracks are still listed`);
+  const s = await current();
+  if (s.missingFile) throw new Error(`${who}: the choose-my-file panel came back (${s.missingFile.name})`);
+  if (s.mediaTitle) throw new Error(`${who}: media title ${s.mediaTitle} survived`);
+  if (texts(s).length) throw new Error(`${who}: chat from the old room survived`);
+  const withMedia = s.members.filter((m) => m.media !== 'none');
+  if (withMedia.length) throw new Error(`${who}: members still report media (${withMedia.map((m) => m.media).join(',')})`);
+}
+
+async function roomsHost(report: Report, media: string) {
+  await waitFor('member joined', (s) => s.phase === 'inRoom' && s.members.length === 2);
+  await check(report, 'room 1: host loads the video', async () => {
+    await room.setLocalMedia(media);
+    await waitPlayer('host file loaded', true);
+  });
+  await check(report, 'room 1: member reports ready', () =>
+    waitFor('member ready', (s) => s.members.some((m) => !m.isYou && m.media === 'ready'), 30_000),
+  );
+  await check(report, 'closing the room unloads the host player', async () => {
+    await sleep(1000);
+    await room.leave();
+    await waitFor('ended', (s) => !s.active && s.ended != null);
+    await waitPlayer('host unloaded', false);
+  });
+  await check(report, 'room 2: created clean', async () => {
+    await sleep(1000);
+    const out = await room.create('Host A', null);
+    if (out.status !== 'inRoom') throw new Error(`create: ${out.status}`);
+    const s = await current();
+    await invoke('dev_scenario_share', { code: s.roomCode });
+    await waitFor('member joined room 2', (x) => x.members.length === 2, 30_000);
+    await assertCleanRoom('host');
+  });
+}
+
+async function roomsMember(report: Report, media: string) {
+  await waitFor('in the room', (s) => s.phase === 'inRoom' && s.members.some((m) => m.isHost));
+  await check(report, 'room 1: member chooses the same file', async () => {
+    await waitFor('choose-my-file panel', (s) => s.missingFile?.panelOpen === true);
+    await room.chooseFile(media);
+    await waitFor('verified', (s) => s.fileStatus === 'verified', 30_000);
+    await waitPlayer('member file loaded', true);
+    const s = await current();
+    if (s.missingFile?.panelOpen) throw new Error('the panel is still open after choosing');
+  });
+  await check(report, 'room closed: the member player is unloaded', async () => {
+    await waitFor('room closed', (s) => !s.active && s.ended?.kind === 'roomClosed', 60_000);
+    await waitPlayer('member unloaded', false);
+  });
+  await check(report, 'room 2: joined clean, no video loaded', async () => {
+    let code: string | null = null;
+    const end = Date.now() + 30_000;
+    while (!code && Date.now() < end) {
+      code = await invoke<string | null>('dev_scenario_shared');
+      if (!code) await sleep(300);
+    }
+    if (!code) throw new Error('no room 2 code');
+    const out = await room.join('Member B', code, null);
+    if (out.status !== 'inRoom') throw new Error(`join: ${out.status}`);
+    await assertCleanRoom('member');
+  });
+}
+
 let started = false;
 
 /** Starts the scenario if the debug build was launched with one (once per window). */
@@ -166,13 +249,17 @@ export async function maybeRunScenario() {
   // React StrictMode runs effects twice in development: run the scenario only once.
   if (started) return;
   started = true;
-  const cfg = await invoke<{ name: string; role: string } | null>('dev_scenario').catch(() => null);
-  if (!cfg || cfg.name !== 'chat') return;
+  const cfg = await invoke<{ name: string; role: string; media: string | null } | null>('dev_scenario').catch(() => null);
+  if (!cfg || (cfg.name !== 'chat' && cfg.name !== 'rooms')) return;
   const report: Report = (line) => void invoke('dev_scenario_report', { line });
   onRoomState((s) => (latest = s));
   report(`START ${cfg.role}`);
   try {
-    if (cfg.role === 'host') await host(report);
+    if (cfg.name === 'rooms') {
+      if (!cfg.media) throw new Error('no media for the rooms scenario');
+      if (cfg.role === 'host') await roomsHost(report, cfg.media);
+      else await roomsMember(report, cfg.media);
+    } else if (cfg.role === 'host') await host(report);
     else await member(report);
     report('DONE');
   } catch {
