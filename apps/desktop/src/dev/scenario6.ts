@@ -14,7 +14,7 @@ import { room } from '../lib/room';
 import { act, check, current, has, sleep, texts, waitFor, type Report } from './scenario';
 
 interface Snap {
-  state: { fileLoaded: boolean; paused: boolean; timePos: number | null; speed: number; duration: number | null };
+  state: { fileLoaded: boolean; paused: boolean; timePos: number | null; speed: number; duration: number | null; subDelay?: number; audioDelay?: number };
   tracks: Track[];
 }
 const snap = () => invoke<Snap>('snapshot');
@@ -148,12 +148,34 @@ export async function syncHost(report: Report, media: string, extras: string[]) 
     const s = await snap();
     const ext = s.tracks.find((t) => t.kind === 'sub' && t.external);
     if (!ext) throw new Error('no external subtitle track');
-    report(`TS extsub_sent ${Date.now()}`);
+    const t0 = Date.now();
+    report(`TS extsub_sent ${t0}`);
     await room.selectTrack('sub', ext.id);
     await waitSnap('host external sub selected', (x) => selected(x, 'sub')?.external === true);
+    report(`INFO the host's own player shows the external subtitle selected after ${Date.now() - t0} ms`);
+  });
+  // Measured on its own: the member must not still be busy with the external audio download.
+  await waitFor('member has both externals', said('externals-in'), 90_000);
+  await check(report, 'host sets subtitle delay +500 ms and audio delay -300 ms', async () => {
+    const t0 = Date.now();
+    report(`TS delay_sent ${t0}`);
+    await act({ type: 'setDelay', kind: 'sub', ms: 500 });
+    await act({ type: 'setDelay', kind: 'audio', ms: -300 });
+    report(`INFO both delay actions returned after ${Date.now() - t0} ms`);
+    await waitSnap('host delays applied', delaysAre(0.5, -0.3));
+    report(`INFO the host's own player shows both delays after ${Date.now() - t0} ms`);
+  });
+  await check(report, 'the member applied both delays', () => waitFor('member confirms', said('delays-seen'), 30_000));
+  await check(report, 'host resets both delays', async () => {
+    await act({ type: 'setDelay', kind: 'sub', ms: 0 });
+    await act({ type: 'setDelay', kind: 'audio', ms: 0 });
+    await waitSnap('host delays reset', delaysAre(0, 0));
   });
   await waitFor('member finished', (s) => texts(s).includes('zqx sync-done'), 60_000);
 }
+
+const delaysAre = (sub: number, audio: number) => (s: Snap) =>
+  Math.abs((s.state.subDelay ?? 0) - sub) < 0.01 && Math.abs((s.state.audioDelay ?? 0) - audio) < 0.01;
 
 export async function syncMember(report: Report, media: string) {
   await waitFor('in the room', (s) => s.phase === 'inRoom' && s.members.some((m) => m.isHost));
@@ -212,14 +234,22 @@ export async function syncMember(report: Report, media: string) {
     const first = ofKind(s0, 'sub').find((t) => !t.external)!;
     await waitSnap('member sub = first', (s) => selected(s, 'sub')?.ffIndex === first.ffIndex, 15_000);
   });
-  await check(report, 'external files arrive and are added to the player', async () => {
-    await waitFor('two externals listed', (s) => s.externals.length >= 2, 30_000);
-    await waitSnap('both externals in the player', (s) => s.tracks.filter((t) => t.external).length >= 2, 60_000);
-  });
+  await check(report, 'external files are listed for the member', () => waitFor('two externals listed', (s) => s.externals.length >= 2, 30_000));
+  // Measured on its own (the audio file may still be downloading): the subtitle selection.
   await check(report, 'the host external subtitle selection applies here', async () => {
     await waitSnap('member external sub selected', (s) => selected(s, 'sub')?.external === true, 30_000);
     report(`TS extsub_seen ${Date.now()}`);
   });
+  await check(report, 'both external files end up in the player', async () => {
+    await waitSnap('both externals in the player', (s) => s.tracks.filter((t) => t.external).length >= 2, 60_000);
+    await say('externals-in');
+  });
+  await check(report, 'host subtitle and audio delay apply here', async () => {
+    await waitSnap('member delays +0.5 / -0.3', delaysAre(0.5, -0.3), 30_000);
+    report(`TS delay_seen ${Date.now()}`);
+    await say('delays-seen');
+  });
+  await check(report, 'host delay reset applies here', () => waitSnap('member delays reset', delaysAre(0, 0), 30_000));
   await say('sync-done');
 }
 

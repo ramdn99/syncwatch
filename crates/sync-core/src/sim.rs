@@ -296,6 +296,8 @@ pub struct World {
     last_reliable: HashMap<(usize, usize), i64>,
     rng: ChaCha8Rng,
     uploads: Vec<Upload>,
+    /// (member node, file) the host does not send (like the app's "skip relayed members").
+    pub withhold: Vec<(usize, ExternalId)>,
     pub wall_base_ms: i64,
     /// Transports closing after their queued messages are delivered: (true time, node).
     closing: Vec<(i64, usize)>,
@@ -318,6 +320,7 @@ impl World {
             last_reliable: HashMap::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
             uploads: Vec::new(),
+            withhold: Vec::new(),
             wall_base_ms: 1_800_000_000_000,
             closing: Vec::new(),
             traffic: BTreeMap::new(),
@@ -556,7 +559,11 @@ impl World {
                     external_id,
                     offset,
                 } => {
-                    if let Some(t) = self.idx_of(to) {
+                    if let Some(t) = self.idx_of(to)
+                        && self.withhold.contains(&(t, external_id))
+                    {
+                        self.send(idx, t, &Message::FileWithheld { external_id });
+                    } else if let Some(t) = self.idx_of(to) {
                         self.uploads.push(Upload {
                             to: t,
                             external_id,

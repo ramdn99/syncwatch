@@ -508,3 +508,49 @@ fn transfer_resumes_after_a_disconnect() {
         w.nodes[m].violations
     );
 }
+
+/// "Skip relayed members": a member the host does not send a file to is told so. It stops
+/// waiting (no stalled download), never asks again, and the subtitle falls back while the
+/// other member gets the file.
+#[test]
+fn a_withheld_file_is_reported_to_the_member_instead_of_stalling() {
+    let (mut w, ids) = room(2, 31);
+    w.withhold.push((ids[0], ExternalId(1)));
+    let bytes: Vec<u8> = vec![3u8; 50_000];
+    let id = w.host_add_external(ExternalKind::Subtitle, "fansub.ass", "ass", bytes.clone());
+    assert_eq!(id, ExternalId(1));
+    w.ui(
+        HOST,
+        UiAction::SelectSub(Selection::Track(TrackRef::External { external_id: id })),
+    );
+    w.run_for(3_000_000);
+    let withheld = |i: usize| {
+        w.nodes[i]
+            .ui_events()
+            .filter(|u| matches!(u, UiEvent::ExternalWithheld(x) if *x == id))
+            .count()
+    };
+    assert_eq!(withheld(ids[0]), 1, "told once");
+    assert_eq!(withheld(ids[1]), 0);
+    assert!(!w.nodes[ids[0]].ext_files.contains_key(&id));
+    assert_eq!(w.nodes[ids[1]].ext_files.get(&id), Some(&bytes));
+    let requests = w.nodes[ids[0]]
+        .sent
+        .iter()
+        .filter(|(_, m)| matches!(m, Message::FileRequest { .. }))
+        .count();
+    assert_eq!(requests, 1, "never requested again");
+    // The withheld member is not left waiting on the subtitle.
+    let last = w.nodes[ids[0]]
+        .sent
+        .iter()
+        .rev()
+        .find_map(|(_, m)| match m {
+            Message::Status(s) => Some(s.tracks),
+            _ => None,
+        });
+    assert!(
+        !matches!(last, Some(TrackSyncStatus::Downloading { .. })),
+        "not reported as downloading: {last:?}"
+    );
+}

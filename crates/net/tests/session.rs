@@ -1199,3 +1199,117 @@ fn no_succession_when_only_signaling_dropped_for_the_host() {
     chat(&mut w, a, "still the same host");
     assert!(w.chats(h).contains(&"still the same host".to_owned()));
 }
+
+/// Part B (M7): a host crash must not undo the room's rules. The host keeps its designated
+/// successor updated (seats with custom permissions, mutes, bans, lock); the successor
+/// enforces them as the new host. In particular a banned member cannot rejoin.
+#[test]
+fn succession_keeps_bans_lock_custom_permissions_and_mutes() {
+    let mut w = World::new();
+    let h = w.host("Hana", 1, None);
+    let a = w.join("Ana", 2, None);
+    let b = w.join("Ben", 3, None);
+    let c = w.join("Cy", 4, None);
+    w.run_for(500_000);
+    let id_of = |w: &World, name: &str| {
+        w.members(h)
+            .into_iter()
+            .find(|i| i.display_name == name)
+            .unwrap()
+            .id
+    };
+    let (bid, cid) = (id_of(&w, "Ben"), id_of(&w, "Cy"));
+    let mut custom = Permissions::NONE;
+    custom.can_seek = true;
+    w.ui_action(
+        h,
+        UiAction::SetPermissions {
+            member: bid,
+            permissions: custom,
+        },
+    );
+    w.ui_action(h, UiAction::Moderate(Moderation::Mute(bid)));
+    w.ui_action(h, UiAction::Ban(cid));
+    w.ui_action(h, UiAction::Lock(true));
+    w.run_for(500_000);
+    assert_eq!(w.nodes[c].ended, Some(EndReason::Kicked { banned: true }));
+
+    w.crash(h);
+    w.run_for(25_000_000);
+    assert!(w.nodes[a].s.is_host(), "Ana (rank 0) took over");
+    assert!(w.in_room(b), "Ben reconnected to Ana: {:?}", w.phases(b));
+    {
+        let syncwatch_sync_core::Peer::Host(host) = w.nodes[a].s.peer() else {
+            panic!()
+        };
+        assert!(host.is_locked(), "the lock survived");
+        assert_eq!(host.bans().len(), 1, "the ban list survived");
+    }
+    // Ben kept his seat, his custom permissions and his mute.
+    let ben = w
+        .members(b)
+        .into_iter()
+        .find(|i| i.display_name == "Ben")
+        .unwrap();
+    assert_eq!(ben.id, bid, "same seat");
+    assert_eq!(ben.permissions, custom, "custom permissions kept");
+    assert!(ben.chat_muted);
+    let muted_state = w.nodes[b].ui.iter().rev().find_map(|u| match u {
+        RoomUi::Core(UiEvent::ChatState(s)) => Some(s.muted),
+        _ => None,
+    });
+    assert_eq!(muted_state, Some(true), "Ben's window still shows muted");
+    chat(&mut w, b, "still muted?");
+    assert!(!w.chats(a).contains(&"still muted?".to_owned()));
+    // The banned identity cannot come back after the crash, a new one cannot join the
+    // locked room.
+    let again = w.join("Cy", 4, None);
+    w.run_for(2_000_000);
+    assert_eq!(
+        w.nodes[again].ended,
+        Some(EndReason::Refused {
+            reason: "banned".into()
+        })
+    );
+    let new = w.join("Neo", 9, None);
+    w.run_for(2_000_000);
+    assert_eq!(
+        w.nodes[new].ended,
+        Some(EndReason::Refused {
+            reason: "locked".into()
+        })
+    );
+}
+
+/// The successor role moves when the designated successor leaves; the new one is updated.
+#[test]
+fn the_next_successor_is_updated_when_the_first_one_leaves() {
+    let mut w = World::new();
+    let h = w.host("Hana", 1, None);
+    let a = w.join("Ana", 2, None);
+    let b = w.join("Ben", 3, None);
+    let c = w.join("Cy", 4, None);
+    w.run_for(500_000);
+    let cid = w
+        .members(h)
+        .into_iter()
+        .find(|i| i.display_name == "Cy")
+        .unwrap()
+        .id;
+    w.ui_action(h, UiAction::Ban(cid));
+    w.run_for(500_000);
+    let _ = c;
+    w.crash(a);
+    w.run_for(2_000_000);
+    w.crash(h);
+    w.run_for(30_000_000);
+    assert!(w.nodes[b].s.is_host(), "Ben took over");
+    let again = w.join("Cy", 4, None);
+    w.run_for(2_000_000);
+    assert_eq!(
+        w.nodes[again].ended,
+        Some(EndReason::Refused {
+            reason: "banned".into()
+        })
+    );
+}

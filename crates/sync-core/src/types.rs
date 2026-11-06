@@ -236,6 +236,8 @@ pub enum UiEvent {
         size: u64,
     },
     ExternalFailed(ExternalId),
+    /// The host did not send this external file to us (relayed connection, host choice).
+    ExternalWithheld(ExternalId),
     Kicked {
         banned: bool,
     },

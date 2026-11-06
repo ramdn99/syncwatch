@@ -288,6 +288,12 @@ impl MediaCtx {
 
     /// Executes a sync-core player command on the real player.
     pub fn player_cmd(&mut self, player: &dyn Player, chosen: Option<&Path>, cmd: PlayerCmd) {
+        if matches!(
+            cmd,
+            PlayerCmd::SelectSub(_) | PlayerCmd::SelectAudio(_) | PlayerCmd::AddExternal { .. }
+        ) {
+            tracing::debug!(cmd = ?cmd, "track command");
+        }
         let r = match cmd {
             PlayerCmd::LoadLocal => match chosen {
                 Some(p) => player.load(&p.to_string_lossy()),

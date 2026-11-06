@@ -158,7 +158,7 @@ export function MyPermissions({ perms, chat = 'on' }: { perms: RoomState['myPerm
 const fmtMb = (n: number) => (n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${(n / 1e6).toFixed(1)} MB`);
 
 /** The room's external subtitle/audio files: members see their download and can cancel. */
-function Externals({ room, isHost, onAction }: { room: Pick<RoomState, 'externals' | 'declined'>; isHost: boolean; onAction: (a: RoomAction) => void }) {
+export function Externals({ room, isHost, onAction }: { room: Pick<RoomState, 'externals' | 'declined'>; isHost: boolean; onAction: (a: RoomAction) => void }) {
   return (
     <section className="space-y-1 text-xs" aria-label="Added audio and subtitle files">
       <h3 className="text-muted">Added files</h3>
@@ -174,8 +174,13 @@ function Externals({ room, isHost, onAction }: { room: Pick<RoomState, 'external
               </span>
               <span className="tabular text-muted">{fmtMb(e.size)}</span>
               {!isHost && e.failed && <span className="text-danger">failed</span>}
-              {!isHost && !e.failed && pct != null && !done && <span className="tabular text-warning">{pct}%</span>}
-              {!isHost && !e.failed && pct != null && !done && (
+              {!isHost && e.withheld && (
+                <span className="text-muted" data-testid="external-withheld">
+                  The host did not send this file to you
+                </span>
+              )}
+              {!isHost && !e.failed && !e.withheld && pct != null && !done && <span className="tabular text-warning">{pct}%</span>}
+              {!isHost && !e.failed && !e.withheld && pct != null && !done && (
                 <button type="button" className="rounded px-1 text-danger hover:bg-surface" onClick={() => onAction({ type: 'cancelDownload', externalId: e.id })}>
                   Cancel
                 </button>

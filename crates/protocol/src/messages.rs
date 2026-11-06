@@ -292,6 +292,29 @@ pub enum Command {
     },
     HostTransfer(Box<HostHandover>),
     RoomClosed,
+    /// To the designated successor only (the lowest connected member id): what it needs to
+    /// keep the room's rules if the host crashes. Sent again whenever it changes. ADR 0007.
+    Succession(Box<SuccessionState>),
+}
+
+/// Room rules the designated successor keeps for a host crash (a host transfer carries the
+/// full [`HostHandover`] instead).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SuccessionState {
+    /// Every kept seat except the host's: member id, identity, name and custom permissions.
+    pub seats: Vec<SuccessorSeat>,
+    pub default_permissions: Permissions,
+    pub muted: Vec<Identity>,
+    pub bans: Vec<Identity>,
+    pub locked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SuccessorSeat {
+    pub id: MemberId,
+    pub identity: Identity,
+    pub display_name: String,
+    pub permissions: Permissions,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -355,6 +378,11 @@ pub enum Message {
     FileCancel {
         external_id: ExternalId,
     },
+    /// Host -> member: this file will not be sent to you (the host chose not to send large
+    /// files to members whose connection goes through the relay). The member stops waiting.
+    FileWithheld {
+        external_id: ExternalId,
+    },
 }
 
 /// Data-channel kind a message travels on.
@@ -393,10 +421,11 @@ pub enum MessageKind {
     FileChunk,
     FileHave,
     FileCancel,
+    FileWithheld,
 }
 
 impl MessageKind {
-    pub const ALL: [MessageKind; 17] = [
+    pub const ALL: [MessageKind; 18] = [
         MessageKind::Hello,
         MessageKind::Welcome,
         MessageKind::Reject,
@@ -414,6 +443,7 @@ impl MessageKind {
         MessageKind::FileChunk,
         MessageKind::FileHave,
         MessageKind::FileCancel,
+        MessageKind::FileWithheld,
     ];
 
     /// Whether this kind carries an opaque byte payload. Exhaustive on purpose: adding a message
@@ -437,7 +467,8 @@ impl MessageKind {
             | MessageKind::ChatRejected
             | MessageKind::FileRequest
             | MessageKind::FileHave
-            | MessageKind::FileCancel => false,
+            | MessageKind::FileCancel
+            | MessageKind::FileWithheld => false,
         }
     }
 }
@@ -483,6 +514,7 @@ impl Message {
             Message::FileChunk { .. } => MessageKind::FileChunk,
             Message::FileHave { .. } => MessageKind::FileHave,
             Message::FileCancel { .. } => MessageKind::FileCancel,
+            Message::FileWithheld { .. } => MessageKind::FileWithheld,
         }
     }
 

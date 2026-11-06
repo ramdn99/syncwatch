@@ -160,6 +160,22 @@ where
     out
 }
 
+/// Makes the `selected` flags of one kind follow mpv's `aid`/`sid` value (a track id, or
+/// `no`). The track list read right after a `sid` change can still carry the old flags; the
+/// property value is authoritative. Other values (`auto`) leave the list as read.
+pub fn apply_selection(tracks: &mut [Track], kind: TrackKind, value: &str) {
+    let selected = match value.trim() {
+        "no" | "false" => None,
+        v => match v.parse::<i64>() {
+            Ok(id) => Some(id),
+            Err(_) => return,
+        },
+    };
+    for t in tracks.iter_mut().filter(|t| t.kind == kind) {
+        t.selected = Some(t.id) == selected;
+    }
+}
+
 /// The selected track of a kind, if any.
 pub fn selected(tracks: &[Track], kind: TrackKind) -> Option<&Track> {
     tracks.iter().find(|t| t.kind == kind && t.selected)
@@ -176,6 +192,37 @@ mod tests {
             .map(|(k, v)| ((*k).to_owned(), v.clone()))
             .collect();
         move |k| m.get(k).cloned()
+    }
+
+    #[test]
+    fn selection_follows_the_property_value() {
+        let mk = |id, sel| Track {
+            id,
+            kind: TrackKind::Sub,
+            ff_index: None,
+            lang: None,
+            title: None,
+            codec: None,
+            selected: sel,
+            external: id == 40,
+            default: false,
+            forced: false,
+            channels: None,
+            external_filename: None,
+        };
+        // A stale list: track 1 still flagged although sid is already 40.
+        let mut v = vec![mk(1, true), mk(40, false)];
+        apply_selection(&mut v, TrackKind::Sub, "40");
+        assert!(!v[0].selected && v[1].selected);
+        apply_selection(&mut v, TrackKind::Sub, "no");
+        assert!(v.iter().all(|t| !t.selected));
+        apply_selection(&mut v, TrackKind::Sub, "auto");
+        assert!(
+            v.iter().all(|t| !t.selected),
+            "unknown values leave the list unchanged"
+        );
+        apply_selection(&mut v, TrackKind::Audio, "1");
+        assert!(v.iter().all(|t| !t.selected), "other kinds untouched");
     }
 
     #[test]

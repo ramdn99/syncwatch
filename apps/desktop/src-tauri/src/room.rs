@@ -287,6 +287,8 @@ pub struct ExternalDto {
     /// Member: bytes received so far (None = not downloading).
     received: Option<u64>,
     failed: bool,
+    /// Member: the host chose not to send this file to us (relayed connection).
+    withheld: bool,
 }
 
 fn media_text(m: MediaStatus) -> &'static str {
@@ -423,6 +425,7 @@ impl Mirror {
                     size: e.size,
                     received: prev.and_then(|p| p.received),
                     failed: prev.is_some_and(|p| p.failed),
+                    withheld: prev.is_some_and(|p| p.withheld),
                 }
             })
             .collect();
@@ -616,6 +619,13 @@ impl Mirror {
                     e.received = Some(received);
                 }
             }
+            UiEvent::ExternalWithheld(id) => {
+                self.event(format!("the host did not send external file {}", id.0));
+                if let Some(e) = self.s.externals.iter_mut().find(|e| e.id == id.0) {
+                    e.withheld = true;
+                    e.received = None;
+                }
+            }
             UiEvent::ExternalFailed(id) => {
                 self.event(format!("external file {} failed verification", id.0));
                 if let Some(e) = self.s.externals.iter_mut().find(|e| e.id == id.0) {
@@ -797,7 +807,13 @@ enum Cmd {
 pub struct RoomManager {
     key: IdentityKey,
     cmd: Mutex<Option<mpsc::UnboundedSender<Cmd>>>,
-    transport: Mutex<Option<mpsc::UnboundedSender<TransportEvent>>>,
+    /// Bridge events for the active room: (control and everything else, bulk file chunks).
+    transport: Mutex<
+        Option<(
+            mpsc::UnboundedSender<TransportEvent>,
+            mpsc::UnboundedSender<TransportEvent>,
+        )>,
+    >,
     state: Mutex<RoomStateDto>,
     /// The local file this member chose (never sent anywhere).
     chosen: Mutex<Option<PathBuf>>,
@@ -865,8 +881,15 @@ impl RoomManager {
             while let Some(ev) = events.recv().await {
                 let m = app.state::<RoomManager>();
                 let tx = m.transport.lock().ok().and_then(|g| g.clone());
-                if let Some(tx) = tx {
-                    let _ = tx.send(ev);
+                if let Some((control, bulk)) = tx {
+                    // File chunks get their own queue so the driver serves control, chat and
+                    // track commands first (they must never wait behind a transfer).
+                    let _ = match ev {
+                        TransportEvent::Frame {
+                            lane: Lane::Bulk, ..
+                        } => bulk.send(ev),
+                        other => control.send(other),
+                    };
                 }
             }
         });
@@ -1018,6 +1041,7 @@ async fn start(app: AppHandle, name: String, mode: Mode) -> Result<EntryOutcome,
     };
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (tr_tx, tr_rx) = mpsc::unbounded_channel();
+    let (bk_tx, bk_rx) = mpsc::unbounded_channel();
     let (pl_tx, pl_rx) = mpsc::unbounded_channel();
     if let Ok(mut g) = m.cmd.lock() {
         *g = Some(cmd_tx);
@@ -1026,7 +1050,7 @@ async fn start(app: AppHandle, name: String, mode: Mode) -> Result<EntryOutcome,
         *g = Some(pl_tx);
     }
     if let Ok(mut g) = m.transport.lock() {
-        *g = Some(tr_tx);
+        *g = Some((tr_tx, bk_tx));
     }
     // A new room starts completely clean: nothing loaded, nothing remembered.
     reset_room_scope(&*app.state::<AppState>().player, &m, None);
@@ -1036,6 +1060,7 @@ async fn start(app: AppHandle, name: String, mode: Mode) -> Result<EntryOutcome,
         let chans = Chans {
             cmd: cmd_rx,
             tr: tr_rx,
+            bulk: bk_rx,
             pl: pl_rx,
         };
         let ended = drive(
@@ -1093,6 +1118,8 @@ struct DriveIds {
 struct Chans {
     cmd: mpsc::UnboundedReceiver<Cmd>,
     tr: mpsc::UnboundedReceiver<TransportEvent>,
+    /// External-file chunks (served only when nothing else is waiting).
+    bulk: mpsc::UnboundedReceiver<TransportEvent>,
     pl: mpsc::UnboundedReceiver<syncwatch_player::PlayerEvent>,
 }
 
@@ -1158,10 +1185,14 @@ async fn drive(
     publish(&app, &mut rt, &session);
     let mut last_soak = Instant::now();
     let mut last_pos = Instant::now();
+    let mut last_publish = Instant::now();
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     while !ended {
+        let mut bulk_step = false;
         let input = tokio::select! {
+            // Control before bulk: a track command must not wait behind file chunks.
+            biased;
             m = recv_sig(&mut rt.sig) => match m {
                 Ok(m) => Some(Input::Signaling(m)),
                 Err(()) => {
@@ -1213,6 +1244,10 @@ async fn drive(
                 None => Some(Input::Action(Action::Leave)),
             },
             _ = tick.tick() => Some(Input::Tick),
+            ev = ch.bulk.recv() => {
+                bulk_step = true;
+                ev.map(Input::Transport)
+            }
         };
         if rt.sig.is_none() && reconnect_at.is_some_and(|t| Instant::now() >= t) {
             match SignalingConn::connect(&url).await {
@@ -1251,7 +1286,12 @@ async fn drive(
             ended |= after_step(&mut rt, &mut session, epoch).await;
             pump_uploads(&mut rt, &session);
         }
-        publish(&app, &mut rt, &session);
+        // A step that only stored a file chunk publishes at most every 100 ms (publishing
+        // serializes the whole UI state; per chunk that once cost seconds per transfer).
+        if !bulk_step || ended || last_publish.elapsed() >= Duration::from_millis(100) {
+            last_publish = Instant::now();
+            publish(&app, &mut rt, &session);
+        }
         if last_soak.elapsed() >= Duration::from_secs(5) {
             last_soak = Instant::now();
             write_soak(&rt.mirror, epoch, false);
@@ -1347,6 +1387,12 @@ fn pump_uploads(rt: &mut Rt, session: &RoomSession) {
                 id = id.0,
                 "not sending to a relayed member (host's choice)"
             );
+            // Tell the member, so it shows "not sent to you" instead of a stalled download.
+            for o in session.send_to_member(to, &Message::FileWithheld { external_id: id }) {
+                if let Output::Send { peer, lane, data } = o {
+                    let _ = rt.bridge.send(peer, lane, data);
+                }
+            }
             rt.media.uploads.remove(i);
             continue;
         }

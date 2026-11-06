@@ -13,7 +13,11 @@ const OP_DATA = 1;
 const OP_JSON = 2;
 const OP_BATCH = 3;
 const MAX_BATCH = 1 << 20;
-const LOW_WATER = 1 << 20;
+// A drained channel reports fresh credit to Rust (bufferedamountlow). This MUST be well below
+// Rust's bulk window (bridge.rs BULK_HIGH_WATER), or the event never fires and transfers stall.
+const LOW_WATER = 64 * 1024;
+// The in-page benchmark keeps its own, larger buffer.
+const BENCH_WATER = 1 << 20;
 
 type SignalData =
   | { kind: 'offer'; sdp: string }
@@ -228,9 +232,9 @@ async function devBench(total: number, chunk: number) {
   const buf = new Uint8Array(chunk);
   let sent = 0;
   let got = 0;
-  tx.bufferedAmountLowThreshold = LOW_WATER;
+  tx.bufferedAmountLowThreshold = BENCH_WATER;
   const pump = () => {
-    while (sent < total && tx.bufferedAmount < 4 * LOW_WATER) {
+    while (sent < total && tx.bufferedAmount < 4 * BENCH_WATER) {
       tx.send(buf);
       sent += chunk;
     }

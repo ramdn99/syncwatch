@@ -83,7 +83,7 @@ export interface RoomState {
   mediaEpoch: number;
   mediaDurationMs: number | null;
   gate: { active: boolean; waiting: { member: number; name: string; reason: string }[] };
-  externals: { id: number; kind: 'audio' | 'sub'; name: string; size: number; received: number | null; failed: boolean }[];
+  externals: { id: number; kind: 'audio' | 'sub'; name: string; size: number; received: number | null; failed: boolean; withheld: boolean }[];
   declined: string[];
   joining: boolean;
 }

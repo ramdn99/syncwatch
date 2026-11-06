@@ -86,8 +86,9 @@ and 9 and Milestone 6 require:
   - identical files already in the room cache are not transferred again;
   - subtitles go first (ADR 0003).
 - **Relayed members:** if a file larger than 25 MB would go to members whose path is relayed,
-  the host chooses "Send to everyone", "Skip relayed members" or "Cancel". Skipped members get
-  nothing and can cancel on their side (limitation: they see a stalled download, not a reason).
+  the host chooses "Send to everyone", "Skip relayed members" or "Cancel". A skipped member gets
+  `FileWithheld` instead of data (M7 Part B): it stops waiting, never asks again, drops any
+  partial data, its track falls back, and the file shows "The host did not send this file to you".
 - Members see each file's name, size and progress and can cancel it. The host then sees
   "<member> declined <file>".
 
@@ -116,16 +117,24 @@ restore.
   member of rank r sends `ClaimHost` after (r + 1) x 8 s. The signaling server accepts the first
   claim while the room has no host, refuses the rest, and gives the new host a resume token.
   Everyone else gets `HostChanged`.
-- **Takeover.** The successor builds a `HostHandover` from what a member knows:
+- **The designated successor is kept updated** (M7 Part B). The host sends
+  `Command::Succession(SuccessionState)` to the rank-0 member (the lowest connected seat). It
+  carries every kept seat (id, identity, name, custom permissions), the default permissions, the
+  mute list, the ban list and the lock. It is sent again on every change and whenever the
+  successor changes, for example when the old one leaves. Only the successor gets it: other
+  members never see the identities and the ban list.
+- **Takeover.** The successor builds a `HostHandover` from what it knows:
   - media descriptor, playback timeline (converted to its own clock), track state and manifest,
     chat settings;
+  - the room rules from the succession state. The other seats are kept as reconnecting for the
+    usual retention time, so each member gets its seat and custom permissions back. Mutes stay,
+    a banned identity is refused, and a locked room stays locked;
   - chat ids continue above the highest it has seen;
   - its downloaded external files become the files it serves.
 
-  **Not carried** (members never had them):
-  - other members' identities and custom permissions (they rejoin with the default);
-  - the ban list and the lock;
-  - the chat history for later joiners (everyone keeps what they already see).
+  **Not carried:** the chat history for later joiners (everyone keeps what they already see).
+  If rank 0 crashes together with the host, rank 1 takes over without the rules (it never
+  received them), as before.
 - **Reconnect.** The others forget the old host's identity and clock (`ExpectNewHost`),
   reconnect and authenticate. Password rooms: the new host must prove the room password.
   Rooms without a password: new verification words. The same media counts as a reconnect, so
@@ -156,7 +165,8 @@ restore.
 |---|---|
 | Host play -> visible in the member's player | 340-408 ms (includes the scheduled-start lead time) |
 | Host pause / seek / audio switch -> member | 15-117 ms / 37-106 ms / 88-91 ms (100 ms polling included) |
-| External subtitle selected by the host -> member | 1.26 s |
+| External subtitle selected by the host -> member | 95-175 ms (M7 Part B; was 1.3-4.9 s, see below) |
+| Host subtitle delay +500 ms and audio delay -300 ms -> member | 53 ms; the reset to 0 also applies |
 | Position agreement while playing (paired samples) | worst 30-84 ms |
 | Late joiner (mismatch file, proceeded) vs host | worst 56 ms; same audio, subtitle and delay; identical chat chips for the history |
 | Chat chips at 0:10, 5:30, 1:02:03 (playing, 1 h+ video) | stamp minus the member's real position: +47, -55, -115 ms (5 fps test video: time-pos moves in 200 ms steps) |
@@ -164,8 +174,34 @@ restore.
 | Host crash -> the next member hosts, the other reconnected | about 8.2 s (8 s deliberate wait + about 160 ms); survivors keep playing, 42 ms apart |
 | Log grep (debug level, all windows) | no chat content, no credential values |
 
+## External subtitle selection latency (M7 Part B)
+
+The member applied a just-added external subtitle 1.3-4.9 s after the host selected it. There
+were two causes:
+- **Control behind bulk.** The host's selection is a small reliable message, but it was queued
+  in the bridge behind up to 4 MiB of external-audio chunks. Logs showed it reaching the member
+  3.9 s after it was sent. Fixes:
+  - the bulk window is now 512 KiB (`BULK_HIGH_WATER`);
+  - the page reports fresh credit below 64 KiB (`LOW_WATER`). It must stay well below the
+    window, or the credit event never fires and transfers stall (seen with 512 KiB / 1 MiB);
+  - in the app driver, bulk chunks get their own queue and a biased select, so control is
+    served first;
+  - a step that only stored a chunk publishes the UI state at most every 100 ms.
+
+  Direct bulk throughput rose from 13-14 to 21.8 MB/s (a 1 MiB window measured 13.1 MB/s).
+  Relay through the local coturn measures 6.1-7.0 MB/s on this machine today with both the old
+  and the new settings, so it is unchanged (ADR 0005 recorded 8.1 MB/s earlier).
+- **The check itself.** The member's scenario waited for BOTH external files to be in its player
+  before taking the subtitle timestamp, so the external audio download time was folded into the
+  number. The subtitle is now measured on its own, and the delay check waits until both files are
+  in.
+
+Also, mpv's `aid`/`sid` values are now authoritative for the selected flags
+(`tracks::apply_selection`), so a stale `track-list` read cannot report the previous track. It
+was not the cause here, but it is the correct reading.
+
 ## Consequences
 - Milestone 7 plugs the torrent engine into the same effects (`StartTorrent`, `StopTorrent`,
   `LoadTorrentStream`) and adds its state to the room reset.
-- Open: a stalled download for members skipped by "Skip relayed members"; succession loses
-  bans, the lock and custom permissions. Both are documented in the user guide in Milestone 9.
+- Closed in M7 Part B: the stalled download for skipped relayed members (`FileWithheld`), and
+  succession losing bans, the lock, custom permissions and mutes (`SuccessionState`).

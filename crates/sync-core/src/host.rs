@@ -70,6 +70,8 @@ pub struct HostMachine {
     last_members: Vec<MemberInfo>,
     local_mutes: HashSet<MemberId>,
     handover: Option<HostHandover>,
+    /// The succession state last sent, and to whom (sent again only when either changes).
+    successor_sent: Option<(MemberId, SuccessionState)>,
     closed: bool,
 }
 
@@ -98,6 +100,7 @@ impl HostMachine {
             last_members: Vec::new(),
             local_mutes: HashSet::new(),
             handover: None,
+            successor_sent: None,
             closed: false,
         }
     }
@@ -124,8 +127,10 @@ impl HostMachine {
                     name: m.display_name.clone(),
                     perms: m.permissions,
                     status: None,
-                    connected: true,
-                    left_at: None,
+                    // After a succession the others still have to reconnect: their seats
+                    // are kept for the usual retention time.
+                    connected: m.connected,
+                    left_at: (!m.connected).then_some(now),
                 },
             );
         }
@@ -150,10 +155,10 @@ impl HostMachine {
             last_members: Vec::new(),
             local_mutes: HashSet::new(),
             handover: None,
+            successor_sent: None,
             closed: false,
         };
         host.local.room = h.playback;
-        let _ = now;
         host
     }
 
@@ -298,7 +303,62 @@ impl HostMachine {
             Event::ExternalCached(_) => {}
         }
         self.broadcast_members_if_changed(&mut out);
+        self.update_successor(&mut out);
         out.into_vec()
+    }
+
+    /// The designated successor: the lowest connected member id (the same rank-0 rule the
+    /// members use to decide who claims the room after a host crash).
+    pub fn designated_successor(&self) -> Option<MemberId> {
+        self.members
+            .iter()
+            .find(|(id, e)| e.connected && **id != self.me)
+            .map(|(id, _)| *id)
+    }
+
+    /// What the successor needs to keep the room's rules after a host crash.
+    pub fn succession_state(&self) -> SuccessionState {
+        let mut muted = self.chat.muted();
+        muted.sort_by_key(|i| i.0);
+        SuccessionState {
+            seats: self
+                .members
+                .iter()
+                .filter(|(id, _)| **id != self.me)
+                .map(|(id, e)| SuccessorSeat {
+                    id: *id,
+                    identity: e.identity,
+                    display_name: e.name.clone(),
+                    permissions: e.perms,
+                })
+                .collect(),
+            default_permissions: self.default_perms,
+            muted,
+            bans: self.bans.clone(),
+            locked: self.locked,
+        }
+    }
+
+    /// Keeps the designated successor up to date: the state goes out on every change and to
+    /// every new successor.
+    fn update_successor(&mut self, out: &mut Out) {
+        let Some(to) = self.designated_successor() else {
+            self.successor_sent = None;
+            return;
+        };
+        let st = self.succession_state();
+        if self
+            .successor_sent
+            .as_ref()
+            .is_some_and(|(t, s)| *t == to && *s == st)
+        {
+            return;
+        }
+        out.push(Effect::SendTo(
+            to,
+            Message::Command(Command::Succession(Box::new(st.clone()))),
+        ));
+        self.successor_sent = Some((to, st));
     }
 
     // ------------------------------------------------------------------ helpers -----------
@@ -670,6 +730,10 @@ impl HostMachine {
             Message::FileChunk { .. } => out.push(Effect::ProtocolViolation {
                 from: m,
                 what: "file chunk from a member",
+            }),
+            Message::FileWithheld { .. } => out.push(Effect::ProtocolViolation {
+                from: m,
+                what: "host-only file message from a member",
             }),
             Message::Hello { .. }
             | Message::Welcome(_)

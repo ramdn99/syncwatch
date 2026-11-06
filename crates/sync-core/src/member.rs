@@ -23,6 +23,8 @@ pub struct MemberMachine {
     pub chat_config: ChatConfig,
     /// My chat state as the host last told me (authoritative for my UI).
     pub chat_state: ChatState,
+    /// The room rules the host keeps us updated with while we are its designated successor.
+    pub succession: Option<SuccessionState>,
     downloads: Downloads,
     local_mutes: HashSet<MemberId>,
     next_ping_us: i64,
@@ -50,6 +52,7 @@ impl MemberMachine {
             members: Vec::new(),
             chat_config: ChatConfig::default(),
             chat_state: ChatState::default(),
+            succession: None,
             downloads: Downloads::default(),
             local_mutes: HashSet::new(),
             next_ping_us: i64::MIN,
@@ -65,14 +68,38 @@ impl MemberMachine {
     }
 
     /// Host succession: the room state as this member knows it, to continue as the host.
-    /// Unknown to members and therefore not carried: other members' identities and custom
-    /// permissions (they rejoin with the default), the ban list, the lock and the chat
-    /// history (members keep what they already show). See ADR 0007.
+    /// The room rules (seats with identities and custom permissions, default permissions,
+    /// mutes, bans, lock) come from the [`SuccessionState`] the host kept us updated with;
+    /// the other seats wait for their owners to reconnect. Not carried: the chat history
+    /// (members keep what they already show). See ADR 0007.
     fn succession_handover(&self) -> Option<HostHandover> {
         let me = self.me?;
         let mut mine = self.members.iter().find(|i| i.id == me).cloned()?;
         mine.is_host = true;
         mine.permissions = Permissions::ALL;
+        let rules = self.succession.clone().unwrap_or_default();
+        let old_host = self.members.iter().find(|i| i.is_host).map(|i| i.id);
+        let mut members = vec![mine];
+        let mut identities = Vec::new();
+        for s in rules
+            .seats
+            .iter()
+            .filter(|s| s.id != me && Some(s.id) != old_host)
+        {
+            let known = self.members.iter().find(|i| i.id == s.id);
+            members.push(MemberInfo {
+                id: s.id,
+                display_name: s.display_name.clone(),
+                is_host: false,
+                permissions: s.permissions,
+                media: known.map(|i| i.media).unwrap_or(MediaStatus::NoMedia),
+                buffering: false,
+                tracks: known.map(|i| i.tracks).unwrap_or(TrackSyncStatus::InSync),
+                chat_muted: rules.muted.contains(&s.identity),
+                connected: false,
+            });
+            identities.push((s.id, s.identity));
+        }
         let next_external_id = self
             .local
             .tracks
@@ -88,15 +115,19 @@ impl MemberMachine {
             descriptor: self.local.descriptor.clone(),
             playback: self.local.room,
             tracks: self.local.tracks.desired.clone(),
-            members: vec![mine],
-            identities: Vec::new(),
-            default_permissions: Permissions::default(),
+            members,
+            identities,
+            default_permissions: if self.succession.is_some() {
+                rules.default_permissions
+            } else {
+                Permissions::default()
+            },
             chat: Vec::new(),
             chat_config: self.chat_config,
             chat_next_seq: self.last_chat_seq + 1,
-            muted: Vec::new(),
-            bans: Vec::new(),
-            locked: false,
+            muted: rules.muted,
+            bans: rules.bans,
+            locked: rules.locked,
             next_external_id,
         })
     }
@@ -425,6 +456,11 @@ impl MemberMachine {
                     });
                 }
             }
+            Message::FileWithheld { external_id } => {
+                let manifest = self.local.tracks.desired.manifest.clone();
+                self.downloads
+                    .withheld(external_id, &manifest, &mut self.local.tracks, out);
+            }
             Message::Hello { .. }
             | Message::Bye
             | Message::TimePing { .. }
@@ -567,6 +603,7 @@ impl MemberMachine {
                     });
                 }
             }
+            Command::Succession(s) => self.succession = Some(*s),
             Command::RoomClosed => {
                 out.ui(UiEvent::RoomClosed);
                 out.player(PlayerCmd::Stop);

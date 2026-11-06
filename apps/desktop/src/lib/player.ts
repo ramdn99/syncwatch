@@ -31,6 +31,8 @@ export interface PlaybackState {
   mute: boolean;
   fileLoaded: boolean;
   cacheAhead: number | null;
+  subDelay?: number;
+  audioDelay?: number;
 }
 
 export type PlayerEvent =

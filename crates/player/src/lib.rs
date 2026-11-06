@@ -46,6 +46,11 @@ pub struct PlaybackState {
     pub file_loaded: bool,
     /// Seconds of demuxer cache ahead of the playhead (from `demuxer-cache-state`).
     pub cache_ahead: Option<f64>,
+    /// Subtitle and audio delay in seconds (mpv `sub-delay` / `audio-delay`).
+    #[serde(default)]
+    pub sub_delay: f64,
+    #[serde(default)]
+    pub audio_delay: f64,
 }
 
 /// Why playback of a file ended.

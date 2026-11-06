@@ -183,6 +183,29 @@ impl Downloads {
         self.start_next(manifest, out);
     }
 
+    /// The host will not send this file to us (its choice for relayed members): stop waiting,
+    /// drop any partial data and let the track fall back. Never requested again.
+    pub fn withheld(
+        &mut self,
+        id: ExternalId,
+        manifest: &[ExternalEntry],
+        tracks: &mut crate::tracks::TrackApplier,
+        out: &mut Out,
+    ) {
+        if self.done.contains(&id) || !self.declined.insert(id) {
+            return;
+        }
+        self.queue.retain(|x| *x != id);
+        self.suspended.retain(|s| s.id != id);
+        if self.active.as_ref().is_some_and(|a| a.id == id) {
+            self.active = None;
+            out.push(Effect::DiscardExternal { external_id: id });
+        }
+        out.ui(UiEvent::ExternalWithheld(id));
+        tracks.external_abandoned(id, out);
+        self.start_next(manifest, out);
+    }
+
     /// The member cancels their own download ("declined").
     pub fn cancel(
         &mut self,

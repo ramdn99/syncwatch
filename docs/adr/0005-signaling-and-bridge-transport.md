@@ -55,8 +55,9 @@ Known pitfalls from the earlier build (spec section 2):
   1 MB/s to 13-14 MB/s (table below).
 - **Flow control by credit.** Rust counts the wire bytes it queued per peer. After each batch the
   page reports the cumulative bytes it accepted plus `bufferedAmount`. Bulk senders wait while
-  `queued - accepted + buffered >= 4 MiB`. The first version reset a counter on each report and could
-  stall.
+  `queued - accepted + buffered >= 512 KiB` (4 MiB until M7 Part B, which held control messages
+  behind file chunks for seconds: see ADR 0007). The page reports when its buffer falls below
+  64 KiB. The first version reset a counter on each report and could stall.
 - **Anti-throttling.** Every webview gets the same `additionalBrowserArgs`, because WebView2 shares
   one browser process and mismatched arguments fail:
   - wry's defaults: `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection`;

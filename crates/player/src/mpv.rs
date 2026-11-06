@@ -86,6 +86,8 @@ const OBSERVED: &[(&str, Format)] = &[
     ("track-list/count", Format::Int64),
     ("aid", Format::String),
     ("sid", Format::String),
+    ("sub-delay", Format::Double),
+    ("audio-delay", Format::Double),
 ];
 
 /// Minimum interval between `State` events caused only by `time-pos` ticks.
@@ -209,6 +211,9 @@ fn event_loop(mpv: &Mpv, shared: &Mutex<Shared>, stop: &AtomicBool, tx: &Sender<
     let lock = || shared.lock().unwrap_or_else(|p| p.into_inner());
     let mut last_state_emit = Instant::now() - TIME_POS_THROTTLE;
     let mut pending_time_tick = false;
+    // Latest aid/sid values: the authoritative selection (see tracks::apply_selection).
+    let mut last_aid: Option<String> = None;
+    let mut last_sid: Option<String> = None;
     while !stop.load(Ordering::SeqCst) {
         // `None` means: queue empty for this timeout, OR an unavailable property changed.
         let Some(ev) = mpv.wait_event(0.25) else {
@@ -276,6 +281,8 @@ fn event_loop(mpv: &Mpv, shared: &Mutex<Shared>, stop: &AtomicBool, tx: &Sender<
                         }
                         ("duration", PropertyData::Double(v)) => s.duration = Some(v),
                         ("speed", PropertyData::Double(v)) => s.speed = v,
+                        ("sub-delay", PropertyData::Double(v)) => s.sub_delay = v,
+                        ("audio-delay", PropertyData::Double(v)) => s.audio_delay = v,
                         ("paused-for-cache", PropertyData::Flag(v)) => s.paused_for_cache = v,
                         ("eof-reached", PropertyData::Flag(v)) => s.eof_reached = v,
                         ("volume", PropertyData::Double(v)) => s.volume = v,
@@ -284,12 +291,26 @@ fn event_loop(mpv: &Mpv, shared: &Mutex<Shared>, stop: &AtomicBool, tx: &Sender<
                             s.cache_ahead = Some(v);
                             only_time = true;
                         }
+                        ("aid", PropertyData::Str(v)) => {
+                            last_aid = Some(v.to_owned());
+                            tracks_changed = true;
+                        }
+                        ("sid", PropertyData::Str(v)) => {
+                            last_sid = Some(v.to_owned());
+                            tracks_changed = true;
+                        }
                         ("track-list/count", _) | ("aid", _) | ("sid", _) => tracks_changed = true,
                         _ => {}
                     }
                 }
                 if tracks_changed && lock().state.file_loaded {
-                    let tracks = read_tracks(mpv);
+                    let mut tracks = read_tracks(mpv);
+                    if let Some(v) = &last_aid {
+                        crate::tracks::apply_selection(&mut tracks, TrackKind::Audio, v);
+                    }
+                    if let Some(v) = &last_sid {
+                        crate::tracks::apply_selection(&mut tracks, TrackKind::Sub, v);
+                    }
                     lock().tracks = tracks.clone();
                     let _ = tx.send(PlayerEvent::TracksChanged { tracks });
                 } else if only_time && last_state_emit.elapsed() < TIME_POS_THROTTLE {

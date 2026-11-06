@@ -28,8 +28,11 @@ pub const BRIDGE_LABEL: &str = "bridge";
 /// `tauri.conf.json` must carry the same string (checked by a test).
 pub const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows";
 
-/// Bulk data is queued in the bridge only while it holds less than this.
-const BULK_HIGH_WATER: u64 = 4 * 1024 * 1024;
+/// Bulk data is queued in the bridge only while it holds less than this. It bounds how long a
+/// control message can wait behind file chunks already queued (backlog / transfer rate):
+/// 4 MiB delayed a track command by ~3.8 s; 512 KiB keeps it well under a second without
+/// lowering throughput (ADR 0007).
+const BULK_HIGH_WATER: u64 = 512 * 1024;
 
 struct PeerState {
     watch: PeerWatch,
