@@ -69,6 +69,9 @@ pub enum ClientMsg {
     TransferHost {
         to: SigPeer,
     },
+    /// Member: take over a room whose host is gone (only while the host's grace period runs;
+    /// the first claim wins). Used for host succession after a host crash.
+    ClaimHost,
     Leave,
     Ping,
 }

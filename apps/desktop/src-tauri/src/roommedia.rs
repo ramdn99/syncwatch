@@ -107,6 +107,13 @@ impl MediaCtx {
         ))
     }
 
+    /// We became the host (succession): serve the files we downloaded as a member.
+    pub fn promote_member_files(&mut self) {
+        for (id, path) in self.member_files.drain() {
+            self.host_files.entry(id).or_insert(path);
+        }
+    }
+
     /// Host: remember a prepared file until its manifest id is known.
     pub fn host_prepared(&mut self, blake3: [u8; 32], path: PathBuf) {
         self.pending_host.push((blake3, path));

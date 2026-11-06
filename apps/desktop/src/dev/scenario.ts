@@ -250,7 +250,7 @@ export async function maybeRunScenario() {
   if (started) return;
   started = true;
   const cfg = await invoke<{ name: string; role: string; media: string | null; extra: string[] } | null>('dev_scenario').catch(() => null);
-  if (!cfg || !['chat', 'rooms', 'sync', 'chattime', 'late', 'popup'].includes(cfg.name)) return;
+  if (!cfg || !['chat', 'rooms', 'sync', 'chattime', 'late', 'popup', 'succession'].includes(cfg.name)) return;
   const report: Report = (line) => void invoke('dev_scenario_report', { line });
   onRoomState((s) => (latest = s));
   report(`START ${cfg.role}`);
@@ -260,6 +260,9 @@ export async function maybeRunScenario() {
     if (cfg.name === 'sync') {
       if (cfg.role === 'host') await m6.syncHost(report, media, cfg.extra);
       else await m6.syncMember(report, media);
+    } else if (cfg.name === 'succession') {
+      if (cfg.role === 'host') await m6.successionHost(report, media);
+      else await m6.successionMember(report, media);
     } else if (cfg.name === 'popup') {
       if (cfg.role === 'host') await m6.popupHost(report, media);
       else await m6.popupMember(report, media);

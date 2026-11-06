@@ -1073,6 +1073,8 @@ impl HostMachine {
                 }
                 self.try_resume(now, out);
             }
+            // Member-only actions.
+            UiAction::TakeOverAsSuccessor | UiAction::ExpectNewHost => {}
         }
     }
 

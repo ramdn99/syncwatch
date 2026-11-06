@@ -39,7 +39,7 @@ param(
     [string]$Password = '',
     [int]$Soak = 0,
     # Scripted end-to-end checks (debug builds): chat, rooms, sync, chattime, late (3 windows).
-    [ValidateSet('', 'chat', 'rooms', 'sync', 'chattime', 'late', 'popup')][string]$Scenario = '',
+    [ValidateSet('', 'chat', 'rooms', 'sync', 'chattime', 'late', 'popup', 'succession')][string]$Scenario = '',
     [switch]$Docker,
     # Stop a stale Vite/node process of THIS repo that still holds port 1420.
     [switch]$FreePort,
@@ -87,7 +87,7 @@ foreach ($port in 1420, 8787) {
 # Scenario media (only read; never part of the repo).
 $scenarioMedia = switch ($Scenario) {
     'chattime' { Join-Path $MediaDir 'long.mkv' }
-    { $_ -in 'rooms', 'sync', 'late', 'popup' } { if ($Media) { $Media } else { 'D:\media\test.mkv' } }
+    { $_ -in 'rooms', 'sync', 'late', 'popup', 'succession' } { if ($Media) { $Media } else { 'D:\media\test.mkv' } }
     default { '' }
 }
 $extra = switch ($Scenario) {
@@ -106,7 +106,10 @@ if ($LASTEXITCODE) { exit 1 }
 $work = Join-Path ([IO.Path]::GetTempPath()) "syncwatch-two-windows-$PID"
 New-Item -ItemType Directory -Force $work | Out-Null
 $windows = @('a', 'b')
-if ($Scenario -eq 'late') { $windows += 'c' }
+if ($Scenario -in 'late', 'succession') { $windows += 'c' }
+# Succession: window a (the host) is killed on purpose; only b and c must finish.
+$mustFinish = @($windows | Where-Object { -not ($Scenario -eq 'succession' -and $_ -eq 'a') })
+$killed = $false
 $started = @()
 $compose = @()
 try {
@@ -147,14 +150,14 @@ try {
     $env:SYNCWATCH_DEV_SCENARIO_EXTRA = $extra -join ';'
     $apps = @()
     foreach ($who in $windows) {
-        if ($who -eq 'c') {
+        if ($who -eq 'c' -and $Scenario -eq 'late') {
             Write-Host 'Window c joins late (in 25 s)...'
             Start-Sleep -Seconds 25
         }
         $env:SYNCWATCH_DEV_IDENTITY = $who
         $env:SYNCWATCH_DEV_NAME = switch ($who) { 'a' { 'Host A' } 'b' { 'Member B' } default { 'Late C' } }
         $env:SYNCWATCH_DEV_AUTOROOM = $(if ($AutoRoom) { if ($who -eq 'a') { 'host' } else { 'join' } } else { '' })
-        $env:SYNCWATCH_DEV_SCENARIO_ROLE = $(if ($who -eq 'c') { 'late' } else { '' })
+        $env:SYNCWATCH_DEV_SCENARIO_ROLE = $(if ($who -eq 'c' -and $Scenario -eq 'late') { 'late' } else { '' })
         $env:SYNCWATCH_DEV_SOAK_FILE = $(if ($Soak -gt 0) { Join-Path $work "soak-$who.json" } else { '' })
         $env:SYNCWATCH_DEV_MINIMIZE = $(if ($Soak -gt 0 -and $who -eq 'b') { '1' } else { '' })
         $env:SYNCWATCH_DEV_SCENARIO_FILE = $(if ($Scenario) { Join-Path $work "scenario-$who.txt" } else { '' })
@@ -169,8 +172,16 @@ try {
         Write-Host "Scenario '$Scenario' running in $($windows.Count) windows (no mouse or keyboard input)..."
         $end = (Get-Date).AddMinutes(9)
         while ((Get-Date) -lt $end) {
-            $done = @($windows | Where-Object { $f = Join-Path $work "scenario-$_.txt"; (Test-Path $f) -and ((Get-Content $f) -contains 'DONE') })
-            if ($done.Count -eq $windows.Count) { break }
+            if ($Scenario -eq 'succession' -and -not $killed) {
+                $fa = Join-Path $work 'scenario-a.txt'
+                if ((Test-Path $fa) -and ((Get-Content $fa) -contains 'KILL-HOST')) {
+                    Write-Host 'Killing the host window (a real crash: no clean leave)...'
+                    & taskkill /PID $apps[0].Id /T /F *> $null
+                    $killed = $true
+                }
+            }
+            $done = @($mustFinish | Where-Object { $f = Join-Path $work "scenario-$_.txt"; (Test-Path $f) -and ((Get-Content $f) -contains 'DONE') })
+            if ($done.Count -eq $mustFinish.Count) { break }
             Start-Sleep -Seconds 1
         }
     } elseif ($Soak -gt 0) {
@@ -205,18 +216,24 @@ function Show-Analysis($windows, $all) {
                 [pscustomobject]@{ tag = $x[1]; t = [long]$x[2]; p = [long]$x[3]; paused = ($x[4] -eq '1') }
             })
     }
-    foreach ($who in ($windows | Where-Object { $_ -ne 'a' })) {
-        foreach ($tag in ($pos[$who].tag | Select-Object -Unique)) {
+    # The reference for a tag is the first window that sampled it (the host, or after a
+    # succession the new host); every other window is compared with it.
+    $tags = @($windows | ForEach-Object { $pos[$_].tag } | Select-Object -Unique)
+    foreach ($tag in $tags) {
+        $have = @($windows | Where-Object { @($pos[$_] | Where-Object tag -EQ $tag).Count -gt 0 })
+        if ($have.Count -lt 2) { continue }
+        $ref = $have[0]
+        foreach ($who in ($have | Select-Object -Skip 1)) {
             $worst = 0; $n = 0
             foreach ($s in ($pos[$who] | Where-Object tag -EQ $tag)) {
-                $h = $pos['a'] | Where-Object tag -EQ $tag | Sort-Object { [math]::Abs($_.t - $s.t) } | Select-Object -First 1
+                $h = $pos[$ref] | Where-Object tag -EQ $tag | Sort-Object { [math]::Abs($_.t - $s.t) } | Select-Object -First 1
                 if (-not $h -or [math]::Abs($h.t - $s.t) -gt 400) { continue }
                 $expected = $h.p
                 if (-not $h.paused) { $expected += ($s.t - $h.t) }
                 $d = [math]::Abs($s.p - $expected); $n++
                 if ($d -gt $worst) { $worst = $d }
             }
-            if ($n -gt 0) { Write-Host ('POSITION a vs {0} [{1}]: worst difference {2} ms over {3} paired samples' -f $who, $tag, $worst, $n) }
+            if ($n -gt 0) { Write-Host ('POSITION {4} vs {0} [{1}]: worst difference {2} ms over {3} paired samples' -f $who, $tag, $worst, $n, $ref) }
         }
     }
     foreach ($who in $windows) { foreach ($l in $all[$who]) { if ($l -match '^(CHIP|ORDER|CHIPS|INFO) ') { Write-Host "$who $l" } } }
@@ -258,7 +275,7 @@ if ($Scenario) {
             elseif ($l -like 'FAIL*') { Write-Host $l -ForegroundColor Red; $fail = $true }
             elseif ($l -notmatch '^(TS|POS|CHIP|ORDER|CHIPS|INFO) ') { Write-Host $l }
         }
-        if ($lines -notcontains 'DONE') { Write-Host 'did not finish' -ForegroundColor Red; $fail = $true }
+        if ($lines -notcontains 'DONE' -and $who -in $mustFinish) { Write-Host 'did not finish' -ForegroundColor Red; $fail = $true }
     }
     Show-Analysis $windows $all
     if (-not (Test-Logs $windows)) { $fail = $true }

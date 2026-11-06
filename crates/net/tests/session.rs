@@ -39,6 +39,8 @@ struct Node {
     ui: Vec<RoomUi>,
     ended: Option<EndReason>,
     role: SigRole,
+    /// The process crashed: no more input, no clean leave.
+    dead: bool,
 }
 
 struct World {
@@ -108,6 +110,7 @@ impl World {
             ui: Vec::new(),
             ended: None,
             role: SigRole::None,
+            dead: false,
         });
         let i = self.nodes.len() - 1;
         self.exec(i, outs);
@@ -116,6 +119,9 @@ impl World {
     }
 
     fn input(&mut self, i: usize, input: Input) {
+        if self.nodes[i].dead {
+            return;
+        }
         let clock = self.clock();
         let outs = self.nodes[i].s.handle(clock, input);
         self.exec(i, outs);
@@ -392,8 +398,63 @@ impl World {
                 }
                 SigRole::None => {}
             },
+            ClientMsg::ClaimHost => {
+                let SigRole::Member(room, me) = &self.nodes[i].role else {
+                    return;
+                };
+                let (room, me) = (room.clone(), *me);
+                let r = self.rooms.get_mut(&room).unwrap();
+                if r.host.is_some() {
+                    return self.reply(
+                        i,
+                        ServerMsg::Error {
+                            code: SigError::NotHost,
+                        },
+                    );
+                }
+                r.members.remove(&me);
+                r.host = Some(i);
+                let peers: Vec<SigPeer> = r.members.keys().copied().collect();
+                let others: Vec<usize> = r.members.values().copied().collect();
+                self.nodes[i].role = SigRole::Host(room);
+                self.reply(
+                    i,
+                    ServerMsg::BecameHost {
+                        token: "t3".into(),
+                        peers,
+                    },
+                );
+                for o in others {
+                    self.reply(o, ServerMsg::HostChanged { you: None });
+                }
+            }
             ClientMsg::Hello { .. } | ClientMsg::Resume { .. } | ClientMsg::Ping => {}
         }
+    }
+
+    /// The process of node i dies: its links break, signaling notices the closed socket
+    /// (HostGone for a host), and it never says goodbye.
+    fn crash(&mut self, i: usize) {
+        self.nodes[i].dead = true;
+        let mine: Vec<PeerId> = self
+            .links
+            .keys()
+            .filter(|(n, _)| *n == i)
+            .map(|(_, p)| *p)
+            .collect();
+        for p in mine {
+            self.close_sim(i, p);
+        }
+        if let SigRole::Host(room) = std::mem::replace(&mut self.nodes[i].role, SigRole::None)
+            && let Some(r) = self.rooms.get_mut(&room)
+        {
+            r.host = None;
+            let members: Vec<usize> = r.members.values().copied().collect();
+            for m in members {
+                self.reply(m, ServerMsg::HostGone { grace_s: 30 });
+            }
+        }
+        self.settle();
     }
 
     fn phases(&self, i: usize) -> Vec<Phase> {
@@ -1017,4 +1078,103 @@ fn a_new_room_after_closing_one_starts_clean_for_host_and_member() {
     };
     assert!(host.descriptor().is_none());
     assert!(host.chat_history().is_empty());
+}
+
+#[test]
+fn host_succession_after_a_host_crash() {
+    let mut w = World::new();
+    let h = w.host("Hana", 1, None);
+    w.ui_action(
+        h,
+        UiAction::ChangeMedia {
+            descriptor: MediaDescriptor::LocalFile(LocalMedia {
+                name: "movie.mkv".into(),
+                identity: FileIdentity {
+                    sample_blake3: [5; 32],
+                    size: 77,
+                    duration_ms: Some(3_600_000),
+                },
+            }),
+            own_file: true,
+        },
+    );
+    let a = w.join("Ana", 2, None);
+    let b = w.join("Ben", 3, None);
+    w.run_for(500_000);
+    chat(&mut w, b, "before the crash");
+    let panels_before = w.nodes[b]
+        .ui
+        .iter()
+        .filter(|u| matches!(u, RoomUi::Core(UiEvent::ShowMissingFilePanel { .. })))
+        .count();
+
+    w.crash(h);
+    // Nobody claims while the host might still come back...
+    w.run_for(5_000_000);
+    assert!(!w.nodes[a].s.is_host() && !w.nodes[b].s.is_host());
+    // ...then the lowest-ranked connected member (Ana) takes over and Ben reconnects to her.
+    w.run_for(20_000_000);
+    assert!(w.nodes[a].s.is_host(), "Ana took over");
+    assert!(!w.nodes[b].s.is_host());
+    assert!(w.in_room(a) && w.in_room(b), "{:?}", w.phases(b));
+    let hosts: Vec<String> = w
+        .members(b)
+        .into_iter()
+        .filter(|i| i.is_host)
+        .map(|i| i.display_name)
+        .collect();
+    assert_eq!(hosts, vec!["Ana".to_owned()]);
+    assert!(
+        w.members(b).iter().all(|i| i.display_name != "Hana"),
+        "the crashed host is gone"
+    );
+    // The room continues: same media, no second choose-my-file panel, chat works both ways.
+    let syncwatch_sync_core::Peer::Host(host) = w.nodes[a].s.peer() else {
+        panic!()
+    };
+    assert!(
+        matches!(host.descriptor(), Some(MediaDescriptor::LocalFile(l)) if l.name == "movie.mkv")
+    );
+    let panels_after = w.nodes[b]
+        .ui
+        .iter()
+        .filter(|u| matches!(u, RoomUi::Core(UiEvent::ShowMissingFilePanel { .. })))
+        .count();
+    assert_eq!(panels_after, panels_before, "no new choose-my-file panel");
+    chat(&mut w, b, "after the crash");
+    assert!(w.chats(a).contains(&"after the crash".to_owned()));
+    chat(&mut w, a, "new host here");
+    assert!(w.chats(b).contains(&"new host here".to_owned()));
+    // New chat ids do not collide with the old ones (UI keys messages by id).
+    let ids: Vec<u64> = w.nodes[b]
+        .ui
+        .iter()
+        .filter_map(|u| match u {
+            RoomUi::Core(UiEvent::ChatMessage(c)) => Some(c.id.0),
+            _ => None,
+        })
+        .collect();
+    let mut uniq = ids.clone();
+    uniq.sort();
+    uniq.dedup();
+    assert_eq!(uniq.len(), ids.len(), "chat ids unique: {ids:?}");
+}
+
+#[test]
+fn no_succession_when_only_signaling_dropped_for_the_host() {
+    let mut w = World::new();
+    let h = w.host("Hana", 1, None);
+    let a = w.join("Ana", 2, None);
+    w.run_for(300_000);
+    // The host's signaling socket drops, but the data channel to Ana is fine.
+    w.reply(a, ServerMsg::HostGone { grace_s: 30 });
+    w.settle();
+    w.run_for(30_000_000);
+    assert!(
+        !w.nodes[a].s.is_host(),
+        "a healthy link to the host prevents a takeover"
+    );
+    assert!(w.nodes[h].s.is_host());
+    chat(&mut w, a, "still the same host");
+    assert!(w.chats(h).contains(&"still the same host".to_owned()));
 }

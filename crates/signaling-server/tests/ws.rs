@@ -392,3 +392,84 @@ async fn host_transfer_swaps_roles_and_routes_to_the_new_host() {
         }
     );
 }
+
+#[tokio::test]
+async fn a_member_can_take_over_only_while_the_host_is_gone() {
+    let cfg = Config {
+        host_grace: Duration::from_secs(5),
+        ..Config::default()
+    };
+    let addr = start(cfg).await;
+    let mut host = connect(addr).await;
+    let (room, _) = create(&mut host).await;
+    let mut a = connect(addr).await;
+    send(&mut a, &ClientMsg::Join { room: room.clone() }).await;
+    let ServerMsg::Joined { .. } = recv(&mut a).await else {
+        panic!()
+    };
+    let mut b = connect(addr).await;
+    send(&mut b, &ClientMsg::Join { room: room.clone() }).await;
+    let ServerMsg::Joined { peer: pb, .. } = recv(&mut b).await else {
+        panic!()
+    };
+    // While the host is there, a claim is refused.
+    send(&mut a, &ClientMsg::ClaimHost).await;
+    assert_eq!(
+        recv(&mut a).await,
+        ServerMsg::Error {
+            code: SigError::NotHost
+        }
+    );
+    // The host crashes.
+    drop(host);
+    assert!(matches!(recv(&mut a).await, ServerMsg::HostGone { .. }));
+    assert!(matches!(recv(&mut b).await, ServerMsg::HostGone { .. }));
+    send(&mut a, &ClientMsg::ClaimHost).await;
+    let ServerMsg::BecameHost { peers, .. } = recv(&mut a).await else {
+        panic!()
+    };
+    assert_eq!(peers, vec![pb]);
+    assert_eq!(recv(&mut b).await, ServerMsg::HostChanged { you: None });
+    // A second claim loses.
+    send(&mut b, &ClientMsg::ClaimHost).await;
+    assert_eq!(
+        recv(&mut b).await,
+        ServerMsg::Error {
+            code: SigError::NotHost
+        }
+    );
+    // The new host routes, and the room survives the old host's grace period.
+    send(
+        &mut b,
+        &ClientMsg::Signal {
+            to: None,
+            data: SignalData::EndOfCandidates,
+        },
+    )
+    .await;
+    assert_eq!(
+        recv(&mut a).await,
+        ServerMsg::Signal {
+            from: Some(pb),
+            data: SignalData::EndOfCandidates
+        }
+    );
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    send(&mut a, &ClientMsg::Ping).await;
+    assert_eq!(recv(&mut a).await, ServerMsg::Pong);
+    send(
+        &mut b,
+        &ClientMsg::Signal {
+            to: None,
+            data: SignalData::EndOfCandidates,
+        },
+    )
+    .await;
+    assert_eq!(
+        recv(&mut a).await,
+        ServerMsg::Signal {
+            from: Some(pb),
+            data: SignalData::EndOfCandidates
+        }
+    );
+}

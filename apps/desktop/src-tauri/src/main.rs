@@ -19,6 +19,16 @@ use paths::AppPaths;
 fn main() {
     let paths = AppPaths::resolve();
     paths.ensure();
+    // Debug builds with a dev identity: a separate WebView2 user-data folder per instance.
+    // Instances of one app otherwise share ONE WebView2 browser process, so killing one dev
+    // window (the host-crash test) would take the others' web views down with it.
+    if cfg!(debug_assertions)
+        && std::env::var("SYNCWATCH_DEV_IDENTITY").is_ok_and(|v| !v.is_empty())
+        && std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_none()
+    {
+        // SAFETY: single-threaded at this point (before logging, Tauri or any other thread).
+        unsafe { std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", paths.root.join("webview2")) };
+    }
     logging::init(&paths.logs);
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),

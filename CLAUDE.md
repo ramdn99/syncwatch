@@ -72,6 +72,8 @@ cargo run -p syncwatch-ice-config --example live_probe   (real Metered account; 
 cargo run -p syncwatch-signaling
 pwsh -NoProfile -File scripts/dev/net-lab.ps1 -Ice none -Seconds 25 -MB 64 -Release   (two instances, no input simulation)
 pwsh -NoProfile -File scripts/dev/two-windows.ps1 -AutoRoom   (host a + member b in one room; -Soak 900 = 15 min banner soak)
+pwsh -NoProfile -File scripts/dev/make-test-media.ps1   (M6 test media, outside the repo; never writes test.mkv)
+pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario sync   (also chattime, late, popup, succession, chat, rooms)
 docker compose -f deploy/compose.dev.yml up -d --build   (signaling + local coturn; always down afterwards)
 pwsh -NoProfile -File scripts/verify-imports.ps1
 pwsh -NoProfile -File scripts/secret-scan.ps1 -Mode All
@@ -89,6 +91,8 @@ pwsh -NoProfile -File scripts/secret-scan.ps1 -Mode All
   numbers and design live in ADR 0005. Prefer `-Ice coturn` (local, free) over `-Ice metered`.
 - Room logic (auth, signaling, links, host transfer, seats) is the pure `RoomSession` in `crates/net/src/session.rs`;
   test it in process with `crates/net/tests/session.rs` (fake signaling + fake links). Auth design: ADR 0006.
+- Real-player behaviour (sync, tracks, externals, chat chips, late join, succession) is proven with the
+  `two-windows.ps1 -Scenario` runs (real mpv, real bridge, no input simulation). Design: ADR 0007.
 - All webviews must use the same `additionalBrowserArgs` (WebView2 shares one browser process); a test checks
   `bridge::BROWSER_ARGS` against tauri.conf.json.
 

@@ -537,6 +537,10 @@ impl Mirror {
                 self.event(format!("error: {e}"));
                 self.toast(e);
             }
+            RoomUi::Info(text) => {
+                self.event(text.clone());
+                self.toast(text);
+            }
             RoomUi::PasswordIgnored => {
                 self.s.password_ignored = true;
                 self.event("the room has no password; the typed one was ignored");
@@ -1066,6 +1070,8 @@ struct Rt {
     skip_relayed: std::collections::HashSet<[u8; 32]>,
     /// Member: manifest entries already checked against the per-room cache.
     checked_cache: std::collections::HashSet<ExternalId>,
+    /// To notice becoming the host (succession): our downloaded externals become host files.
+    was_host: bool,
 }
 
 /// Position reports to sync-core (the drift controller and the chat timestamps).
@@ -1093,6 +1099,7 @@ async fn drive(
         media: crate::roommedia::MediaCtx::new(rooms_cache.join(session_id.to_string())),
         skip_relayed: Default::default(),
         checked_cache: Default::default(),
+        was_host: false,
     };
     let mut reconnect_at: Option<Instant> = None;
     let mut backoff = Duration::from_secs(1);
@@ -1244,9 +1251,15 @@ async fn after_step(rt: &mut Rt, session: &mut RoomSession, epoch: Instant) -> b
     let manifest = session.peer().local().tracks.desired.manifest.clone();
     rt.mirror.set_manifest(&manifest);
     if session.is_host() {
+        if !rt.was_host {
+            rt.was_host = true;
+            // Host succession: the files we downloaded as a member are what we now serve.
+            rt.media.promote_member_files();
+        }
         rt.media.sync_manifest(&manifest);
         return false;
     }
+    rt.was_host = false;
     let mut ended = false;
     for e in &manifest {
         if rt.checked_cache.insert(e.external_id) && rt.media.cached_identical(e) {

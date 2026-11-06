@@ -154,6 +154,11 @@ pub enum UiAction {
     SetWaitForEveryone(bool),
     /// Resume now, without the members currently blocking the ready gate.
     ResumeWithoutWaiting,
+    // --- host succession (the host crashed; ADR 0007) ---
+    /// Member: become the host of this room from what this member knows.
+    TakeOverAsSuccessor,
+    /// Member: the room will continue with a different host (accept its identity and clock).
+    ExpectNewHost,
 }
 
 /// Everything that can happen to a peer.

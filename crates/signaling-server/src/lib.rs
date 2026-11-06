@@ -470,6 +470,41 @@ fn handle(
             *role = Role::Member(room, me);
             reply(ServerMsg::HostChanged { you: Some(me) });
         }
+        ClientMsg::ClaimHost => {
+            let Role::Member(room, me) = role.clone() else {
+                reply(ServerMsg::Error {
+                    code: SigError::NotInRoom,
+                });
+                return false;
+            };
+            let mut g = hub.lock();
+            let Some(r) = g.rooms.get_mut(&room) else {
+                return true;
+            };
+            if r.host.is_some() {
+                // The host is back or someone else already took over.
+                drop(g);
+                reply(ServerMsg::Error {
+                    code: SigError::NotHost,
+                });
+                return false;
+            }
+            r.members.remove(&me);
+            r.host = Some((conn, tx.clone()));
+            r.token = random_bytes::<16>()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let peers: Vec<SigPeer> = r.members.keys().copied().collect();
+            for (_, mtx) in r.members.values() {
+                Hub::send(mtx, ServerMsg::HostChanged { you: None });
+            }
+            let token = r.token.clone();
+            drop(g);
+            tracing::info!("host succession: a member took over the room");
+            *role = Role::Host(room);
+            reply(ServerMsg::BecameHost { token, peers });
+        }
         ClientMsg::Leave => {
             if let Role::Host(room) = role.clone() {
                 close_room(hub, &room);

@@ -30,6 +30,8 @@ pub struct MemberMachine {
     next_request_id: u32,
     last_status: Option<MemberStatus>,
     handover: Option<HostHandover>,
+    /// Highest chat id/seq seen (a successor host continues above it, so ids never collide).
+    last_chat_seq: u64,
     pub closed: bool,
 }
 
@@ -54,8 +56,45 @@ impl MemberMachine {
             next_request_id: 1,
             last_status: None,
             handover: None,
+            last_chat_seq: 0,
             closed: false,
         }
+    }
+
+    /// Host succession: the room state as this member knows it, to continue as the host.
+    /// Unknown to members and therefore not carried: other members' identities and custom
+    /// permissions (they rejoin with the default), the ban list, the lock and the chat
+    /// history (members keep what they already show). See ADR 0007.
+    fn succession_handover(&self) -> Option<HostHandover> {
+        let me = self.me?;
+        let mut mine = self.members.iter().find(|i| i.id == me).cloned()?;
+        mine.is_host = true;
+        mine.permissions = Permissions::ALL;
+        let next_external_id = self
+            .local
+            .tracks
+            .desired
+            .manifest
+            .iter()
+            .map(|e| e.external_id.0 + 1)
+            .max()
+            .unwrap_or(1);
+        Some(HostHandover {
+            new_host: me,
+            new_host_identity: self.identity,
+            descriptor: self.local.descriptor.clone(),
+            playback: self.local.room,
+            tracks: self.local.tracks.desired.clone(),
+            members: vec![mine],
+            identities: Vec::new(),
+            default_permissions: Permissions::default(),
+            chat: Vec::new(),
+            chat_config: self.chat_config,
+            chat_next_seq: self.last_chat_seq + 1,
+            bans: Vec::new(),
+            locked: false,
+            next_external_id,
+        })
     }
 
     /// The former host continues as a member of the new host.
@@ -252,6 +291,20 @@ impl MemberMachine {
             | UiAction::SetChatConfig(_)
             | UiAction::SetWaitForEveryone(_)
             | UiAction::ResumeWithoutWaiting => deny(out),
+            UiAction::TakeOverAsSuccessor => {
+                if let Some(h) = self.succession_handover() {
+                    out.ui(UiEvent::BecameHost);
+                    self.handover = Some(h);
+                }
+            }
+            UiAction::ExpectNewHost => {
+                // A different host with its own clock: forget the old pins and resync.
+                self.host_identity = None;
+                self.clock = ClockSync::default();
+                self.outstanding.clear();
+                self.pings_sent = 0;
+                self.next_ping_us = i64::MIN;
+            }
         }
     }
 
@@ -260,7 +313,8 @@ impl MemberMachine {
         let from_host = self.host_identity == Some(from.identity);
         match msg {
             Message::Welcome(s) => {
-                if self.me.is_some() && !from_host {
+                // After a host succession (host_identity cleared) a new host may welcome us.
+                if self.me.is_some() && self.host_identity.is_some() && !from_host {
                     return out.push(Effect::ProtocolViolation {
                         from: from.member,
                         what: "welcome from a non-host",
@@ -317,6 +371,7 @@ impl MemberMachine {
             }
             Message::Command(c) => self.on_command(mono, c, out),
             Message::Chat(m) => {
+                self.last_chat_seq = self.last_chat_seq.max(m.seq).max(m.id.0);
                 if !self.local_mutes.contains(&m.sender) {
                     out.ui(UiEvent::ChatMessage(m));
                 }
@@ -363,7 +418,9 @@ impl MemberMachine {
     }
 
     fn on_welcome(&mut self, s: Snapshot, mono: i64, out: &mut Out) {
-        let reconnect = self.me == Some(s.your_id) && self.local.descriptor == s.descriptor;
+        // Same media = a reconnect (also to a successor host, which may give us a new seat):
+        // keep the loaded file and the downloads.
+        let reconnect = self.me.is_some() && self.local.descriptor == s.descriptor;
         self.me = Some(s.your_id);
         self.local.me = s.your_id;
         self.host_identity = Some(s.host_identity);
@@ -378,6 +435,7 @@ impl MemberMachine {
         out.ui(UiEvent::Permissions(s.your_permissions));
         out.ui(UiEvent::ChatConfig(s.chat_config));
         for m in s.chat {
+            self.last_chat_seq = self.last_chat_seq.max(m.seq).max(m.id.0);
             if !self.local_mutes.contains(&m.sender) {
                 out.ui(UiEvent::ChatMessage(m));
             }

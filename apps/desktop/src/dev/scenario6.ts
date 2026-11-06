@@ -444,3 +444,63 @@ export async function popupMember(report: Report, media: string) {
   });
   await say('popup-checked');
 }
+
+// ------------------------------------------------------------------------------ succession --
+
+/** The host prepares the room, then asks the script to kill its process (a real crash). */
+export async function successionHost(report: Report, media: string) {
+  await waitFor('two members', (s) => s.phase === 'inRoom' && s.members.length === 3, 60_000);
+  await loadAsHost(media);
+  await waitFor('members ready', (s) => s.members.filter((m) => !m.isYou && m.media === 'ready').length === 2, 90_000);
+  await act({ type: 'seek', ms: 200_000 });
+  await act({ type: 'play' });
+  await waitSnap('host playing', playing);
+  await sleep(3000);
+  await say('succ-before');
+  await sleep(1500);
+  report('KILL-HOST');
+  await sleep(600_000);
+}
+
+export async function successionMember(report: Report, media: string) {
+  await waitFor('in the room', (s) => s.phase === 'inRoom' && s.members.some((m) => m.isHost));
+  await chooseAsMember(media);
+  await waitSnap('playing', playing, 60_000);
+  await waitFor('pre-crash chat', said('succ-before'), 60_000);
+  await check(report, 'a member takes over after the host crashed', async () => {
+    const s = await waitFor('new host', (x) => x.members.some((m) => m.isHost && m.name !== 'Host A') && x.phase === 'inRoom', 90_000);
+    report(`INFO new host: ${s.members.find((m) => m.isHost)!.name}${s.isHost ? ' (me)' : ''}`);
+    if (s.members.some((m) => m.name === 'Host A')) throw new Error('the crashed host is still listed');
+  });
+  await check(report, 'the video keeps playing; no new choose-my-file panel', async () => {
+    const st = await current();
+    if (st.missingFile?.panelOpen) throw new Error('panel came back');
+    await waitSnap('still loaded and playing', playing, 20_000);
+  });
+  const me = await current();
+  if (me.isHost) {
+    const at = Date.now() + 3000;
+    await say(`succ-sample ${at}`);
+    await sleep(at - Date.now());
+  } else {
+    const s = await waitFor('sample time', (x) => x.chat.some((c) => c.text.startsWith('zqx succ-sample ')), 60_000);
+    const at = Number(s.chat.find((c) => c.text.startsWith('zqx succ-sample '))!.text.split(' ')[2]);
+    await sleep(Math.max(0, at - Date.now()));
+  }
+  await sample(report, 'succ', 8);
+  await check(report, 'chat works both ways with the new host', async () => {
+    const who = me.isHost ? 'host' : 'member';
+    await say(`succ-from-${who}`);
+    await waitFor('other side', said(`succ-from-${me.isHost ? 'member' : 'host'}`), 30_000);
+  });
+  await check(report, 'playback control still works (new host pauses)', async () => {
+    if (me.isHost) {
+      await sleep(1000);
+      await act({ type: 'pause' });
+    }
+    await waitSnap('paused', pausedAt, 20_000);
+  });
+  await sleep(1500);
+  await say(`succ-done-${me.isHost ? 'host' : 'member'}`);
+  await waitFor('both done', (x) => texts(x).includes('zqx succ-done-host') && texts(x).includes('zqx succ-done-member'), 30_000);
+}

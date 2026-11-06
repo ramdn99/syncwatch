@@ -36,6 +36,9 @@ const PASSWORD_TIMEOUT_US: i64 = 180_000_000;
 const REOFFER_WAIT_US: i64 = 20_000_000;
 /// Member: reconnect to a new host after this even if only one of the two signals arrived.
 const TRANSFER_WAIT_US: i64 = 8_000_000;
+/// Host succession: after the host vanished (signaling and our link both gone), the member
+/// ranked r among the connected members claims the room after (r + 1) times this.
+const SUCCESSION_WAIT_US: i64 = 8_000_000;
 
 #[derive(Clone)]
 pub struct SessionConfig {
@@ -159,6 +162,8 @@ pub enum RoomUi {
         state: LinkState,
     },
     Error(String),
+    /// Something worth telling the user (not an error).
+    Info(String),
     /// The member typed a password but the room has none (it was ignored). Once per join.
     PasswordIgnored,
     /// Host: something from member was refused (None: a joining link not yet a member).
@@ -256,6 +261,9 @@ pub struct RoomSession {
     pending_left: Vec<MemberId>,
     /// Old host: the link and signaling number of the member receiving the host role.
     transfer_target: Option<(PeerId, SigPeer)>,
+    /// Member: when signaling reported the host gone (host succession, ADR 0007).
+    host_gone_at: Option<i64>,
+    claimed: bool,
 }
 
 impl RoomSession {
@@ -323,6 +331,8 @@ impl RoomSession {
             ended: false,
             pending_left: Vec::new(),
             transfer_target: None,
+            host_gone_at: None,
+            claimed: false,
         }
     }
 
@@ -704,6 +714,41 @@ impl RoomSession {
         }
     }
 
+    /// Host succession: claim the room when the host is gone for long enough, in rank order.
+    fn maybe_claim_host(&mut self, now: i64, out: &mut Vec<Output>) {
+        let Some(gone) = self.host_gone_at else {
+            return;
+        };
+        if self.claimed || self.peer.is_host() || self.ending.is_some() {
+            return;
+        }
+        // If our link to the host is still fine, the host only lost signaling: keep waiting.
+        let link_ok = self
+            .host_link
+            .and_then(|h| self.links.get(&h))
+            .is_some_and(|l| l.authed() && !l.interrupted);
+        if link_ok {
+            return;
+        }
+        let Peer::Member(m) = &self.peer else { return };
+        let Some(me) = m.me else { return };
+        let mut ranked: Vec<MemberId> = m
+            .members
+            .iter()
+            .filter(|i| !i.is_host && i.connected)
+            .map(|i| i.id)
+            .collect();
+        ranked.sort();
+        let Some(rank) = ranked.iter().position(|id| *id == me) else {
+            return;
+        };
+        if now - gone >= SUCCESSION_WAIT_US * (rank as i64 + 1) {
+            self.claimed = true;
+            tracing::info!(rank, "host succession: claiming the room");
+            out.push(Output::Signaling(ClientMsg::ClaimHost));
+        }
+    }
+
     // ------------------------------------------------------------------ signaling ---------
 
     fn on_signaling_reconnected(&mut self, out: &mut Vec<Output>) {
@@ -742,12 +787,45 @@ impl RoomSession {
                     self.connect_to_host(now, out);
                 }
             }
+            ServerMsg::BecameHost { token, .. }
+                if self.host_gone_at.is_some() && !self.peer.is_host() =>
+            {
+                // Host succession: our claim won. Continue the room as its host.
+                self.token = Some(token);
+                self.sig_host = true;
+                self.host_gone_at = None;
+                if let Some(old) = self.host_link.take() {
+                    self.links.remove(&old);
+                    out.push(Output::ClosePeer(old));
+                }
+                self.host_identity = None;
+                tracing::info!("host succession: taking over the room");
+                self.core(clock, Event::Ui(UiAction::TakeOverAsSuccessor), out);
+                out.push(Output::Ui(RoomUi::Info(
+                    "The host left. You are the host now.".into(),
+                )));
+            }
             ServerMsg::BecameHost { token, .. } => {
                 self.token = Some(token);
                 self.sig_host = true;
                 if self.peer.is_host() {
                     self.flush_pending_signals(clock, out);
                 }
+            }
+            ServerMsg::HostChanged { you: None }
+                if self.host_gone_at.is_some() && !self.peer.is_host() =>
+            {
+                // Host succession by another member: reconnect to it (its identity is new).
+                self.host_gone_at = None;
+                self.claimed = false;
+                self.transfer = None;
+                self.host_identity = None;
+                self.core(clock, Event::Ui(UiAction::ExpectNewHost), out);
+                out.push(Output::Ui(RoomUi::Info(
+                    "The host left. The room continues with a new host.".into(),
+                )));
+                tracing::info!("host succession: reconnecting to the new host");
+                self.connect_to_host(now, out);
             }
             ServerMsg::HostChanged { you } => {
                 if you.is_some() {
@@ -803,6 +881,26 @@ impl RoomSession {
                     self.end_soon(now, EndReason::RoomClosed);
                 }
             }
+            ServerMsg::HostGone { .. } if !self.peer.is_host() => {
+                tracing::info!("signaling: the host is gone; waiting for it to come back");
+                self.host_gone_at.get_or_insert(now);
+            }
+            ServerMsg::HostBack => {
+                self.host_gone_at = None;
+                self.claimed = false;
+            }
+            ServerMsg::Error {
+                code: SigError::BadToken,
+            } if self.sig_host => {
+                // We lost the room while away (a member took over after the grace period).
+                self.end_now(
+                    EndReason::Error {
+                        message: "The room continued with a new host while you were disconnected."
+                            .into(),
+                    },
+                    out,
+                );
+            }
             ServerMsg::Error { code } => {
                 tracing::warn!(?code, "signaling error");
                 if !self.joined_once {
@@ -826,7 +924,6 @@ impl RoomSession {
             | ServerMsg::PeerJoined { .. }
             | ServerMsg::PeerLeft { .. }
             | ServerMsg::HostGone { .. }
-            | ServerMsg::HostBack
             | ServerMsg::Pong => {}
         }
     }
@@ -1398,6 +1495,7 @@ impl RoomSession {
         }
         self.flush_pending_left(clock, out);
         self.maybe_reconnect_after_transfer(now, out);
+        self.maybe_claim_host(now, out);
         if let Some((t, reason)) = self.ending.clone()
             && now >= t
         {
