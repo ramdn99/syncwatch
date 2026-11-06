@@ -14,8 +14,7 @@
         "canPlayPause": true,
         "canSeek": false,
         "canChangeMedia": false,
-        "canChangeSpeed": true,
-        "canChat": true
+        "canChangeSpeed": true
       }
     }
   },
@@ -71,7 +70,6 @@
     "action": {
       "type": "chatConfig",
       "enabled": false,
-      "hiddenFromMembers": true,
       "slowModeSecs": 10
     }
   },

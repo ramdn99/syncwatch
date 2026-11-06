@@ -59,8 +59,9 @@
   offset). Members can decline. Identical cached files are skipped (`FileHave`). There is no
   rate limiter: `OutboundQueue` simply serves control first.
 - Chat: plain text. Control and bidi characters are stripped, the limit is 500 graphemes,
-  5 messages per 5 s per member, with an optional slow mode, and there are mute, delete, clear,
-  "Chat enabled" and "Hide chat from members". The host stamps the media time and honors a
+  5 messages per 5 s per member, with an optional slow mode, and there are mute, delete, clear
+  and a global "Chat enabled" switch (Milestone 7 simplified the chat controls: see ADR 0008).
+  The host stamps the media time and honors a
   member's claim only within 5 s of the room position. History is in memory only (max 2000,
   snapshots carry 200) and moves with the host role.
 - Media change: everyone stops the old source (`Player Stop`, `StopTorrent`), resets playback

@@ -1,5 +1,6 @@
 //! Per-member permissions (spec section 6). Track control is host-only and has NO permission.
-//! Choosing one's own local file needs NO permission either.
+//! Choosing one's own local file needs NO permission either. Chat is NOT a permission: the
+//! host mutes members and switches chat on or off for everyone (see `ChatState`).
 
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +10,6 @@ pub struct Permissions {
     pub can_seek: bool,
     pub can_change_media: bool,
     pub can_change_speed: bool,
-    pub can_chat: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,29 +25,27 @@ impl Permissions {
         can_seek: true,
         can_change_media: true,
         can_change_speed: true,
-        can_chat: true,
     };
 
-    /// "Only me": members can only chat (can_chat stays ON by default).
-    pub const CHAT_ONLY: Permissions = Permissions {
+    /// "Only me": members control nothing (they can still chat unless muted or chat is off).
+    pub const NONE: Permissions = Permissions {
         can_play_pause: false,
         can_seek: false,
         can_change_media: false,
         can_change_speed: false,
-        can_chat: true,
     };
 
     pub fn for_preset(p: Preset, custom: Permissions) -> Permissions {
         match p {
             Preset::EveryoneControls => Permissions::ALL,
-            Preset::OnlyMe => Permissions::CHAT_ONLY,
+            Preset::OnlyMe => Permissions::NONE,
             Preset::Custom => custom,
         }
     }
 }
 
 impl Default for Permissions {
-    /// Default for new joiners: everyone controls playback, chat on.
+    /// Default for new joiners: everyone controls playback.
     fn default() -> Self {
         Permissions::ALL
     }

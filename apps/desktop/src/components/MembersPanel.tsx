@@ -32,7 +32,6 @@ const PERM_LABELS: [keyof Perms, string][] = [
   ['canSeek', 'Seek'],
   ['canChangeSpeed', 'Change speed'],
   ['canChangeMedia', 'Change source'],
-  ['canChat', 'Chat'],
 ];
 
 export function MembersPanel({

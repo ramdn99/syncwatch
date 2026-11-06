@@ -129,12 +129,7 @@ impl HostMachine {
                 },
             );
         }
-        let muted: Vec<MemberId> = h
-            .members
-            .iter()
-            .filter(|m| m.chat_muted)
-            .map(|m| m.id)
-            .collect();
+        let muted: Vec<Identity> = h.muted.clone();
         let next_member_id = h.members.iter().map(|m| m.id.0).max().unwrap_or(0) + 1;
         let mut host = Self {
             gate: Gate::new(cfg.gate_timeout_us),
@@ -201,6 +196,24 @@ impl HostMachine {
     /// The room's current media (None until the host picks a source).
     pub fn descriptor(&self) -> Option<&MediaDescriptor> {
         self.descriptor.as_ref()
+    }
+
+    /// One member's chat state (global switch, slow mode, its own mute flag).
+    fn chat_state_for(&self, m: MemberId) -> ChatState {
+        ChatState {
+            config: self.chat.config,
+            muted: self
+                .members
+                .get(&m)
+                .is_some_and(|e| self.chat.is_muted(&e.identity)),
+        }
+    }
+
+    pub fn chat_state(&self) -> ChatState {
+        ChatState {
+            config: self.chat.config,
+            muted: false,
+        }
     }
 
     /// The seat a (re)connecting identity gets back, if it is still kept.
@@ -349,7 +362,7 @@ impl HostMachine {
                         .status
                         .map(|s| s.tracks)
                         .unwrap_or(TrackSyncStatus::Applying),
-                    chat_muted: self.chat.is_muted(*id),
+                    chat_muted: self.chat.is_muted(&e.identity),
                     connected: e.connected,
                 }),
         );
@@ -561,12 +574,8 @@ impl HostMachine {
             tracks: self.tracks.clone(),
             members: self.member_infos(),
             your_permissions: self.members.get(&id).map(|e| e.perms).unwrap_or_default(),
-            chat: if self.chat.config.hidden_from_members {
-                Vec::new()
-            } else {
-                self.chat.snapshot()
-            },
-            chat_config: self.chat.config,
+            chat: self.chat.snapshot(),
+            chat_state: self.chat_state_for(id),
         };
         out.push(Effect::SendTo(id, Message::Welcome(Box::new(snapshot))));
         let _ = now;
@@ -848,11 +857,11 @@ impl HostMachine {
     ) {
         let now = clock.mono_us;
         let is_host = who == self.me;
-        let (name, can_chat) = if is_host {
-            (self.cfg.display_name.clone(), true)
+        let (name, identity) = if is_host {
+            (self.cfg.display_name.clone(), self.cfg.identity)
         } else {
             match self.members.get(&who) {
-                Some(e) => (e.name.clone(), e.perms.can_chat),
+                Some(e) => (e.name.clone(), e.identity),
                 None => return,
             }
         };
@@ -863,9 +872,9 @@ impl HostMachine {
         let res = self.chat.submit(
             Submit {
                 sender: who,
+                sender_identity: identity,
                 display_name: &name,
                 is_host,
-                can_chat,
                 mono_us: now,
                 wall_ms: clock.wall_ms,
                 media_epoch: self.local.room.media_epoch,
@@ -880,13 +889,8 @@ impl HostMachine {
                 if !self.local_mutes.contains(&who) {
                     out.ui(UiEvent::ChatMessage(msg.clone()));
                 }
-                if self.chat.config.hidden_from_members {
-                    if !is_host {
-                        out.push(Effect::SendTo(who, Message::Chat(msg)));
-                    }
-                } else {
-                    out.push(Effect::Broadcast(Message::Chat(msg)));
-                }
+                // Everyone sees all chat (muted members and members while chat is off too).
+                out.push(Effect::Broadcast(Message::Chat(msg)));
             }
             Err(reason) => {
                 if is_host {
@@ -1048,19 +1052,46 @@ impl HostMachine {
                 out.ui(UiEvent::RoomClosed);
                 self.closed = true;
             }
-            UiAction::Moderate(m) => {
-                self.chat.moderate(m);
-                match m {
-                    Moderation::Delete(id) => out.ui(UiEvent::ChatDeleted(id)),
-                    Moderation::Clear => out.ui(UiEvent::ChatCleared),
-                    _ => {}
+            UiAction::Moderate(m) => match m {
+                Moderation::Mute(who) | Moderation::Unmute(who) => {
+                    let muted = matches!(m, Moderation::Mute(_));
+                    let Some(identity) = self.members.get(&who).map(|e| e.identity) else {
+                        return;
+                    };
+                    if self.chat.set_muted(identity, muted) {
+                        // The affected member learns it at once; everyone sees the flag in the
+                        // member list.
+                        out.push(Effect::SendTo(
+                            who,
+                            Message::Command(Command::ChatState(self.chat_state_for(who))),
+                        ));
+                    }
                 }
-                self.broadcast_cmd(Command::ChatModeration(m), out);
-            }
+                Moderation::Delete(id) => {
+                    self.chat.moderate(m);
+                    out.ui(UiEvent::ChatDeleted(id));
+                    self.broadcast_cmd(Command::ChatModeration(m), out);
+                }
+                Moderation::Clear => {
+                    self.chat.moderate(m);
+                    out.ui(UiEvent::ChatCleared);
+                    self.broadcast_cmd(Command::ChatModeration(m), out);
+                }
+            },
             UiAction::SetChatConfig(c) => {
                 self.chat.config = c;
-                out.ui(UiEvent::ChatConfig(c));
-                self.broadcast_cmd(Command::ChatConfig(c), out);
+                out.ui(UiEvent::ChatState(ChatState {
+                    config: c,
+                    muted: false,
+                }));
+                // Each member gets its own state (the global switch plus its mute flag).
+                let ids: Vec<MemberId> = self.members.keys().copied().collect();
+                for m in ids {
+                    out.push(Effect::SendTo(
+                        m,
+                        Message::Command(Command::ChatState(self.chat_state_for(m))),
+                    ));
+                }
             }
             UiAction::SetWaitForEveryone(w) => {
                 self.gate.wait_for_everyone = w;
@@ -1110,6 +1141,7 @@ impl HostMachine {
             default_permissions: self.default_perms,
             chat: self.chat.history(),
             chat_config: self.chat.config,
+            muted: self.chat.muted(),
             chat_next_seq: self.chat.next_seq(),
             bans: self.bans.clone(),
             locked: self.locked,

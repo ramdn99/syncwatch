@@ -11,7 +11,7 @@ import { app, inTauri, onPlayerEvent, player, type PlaybackState, type Rect, typ
 import { mapKey } from './lib/shortcuts';
 import { MissingFilePanel, PasswordPrompt } from './components/RoomDialogs';
 import { DiagnosticsDialog, type UiErrorEntry } from './components/Diagnostics';
-import { EMPTY_ROOM, endText, formatCode, friendlyError, onRoomState, PASSWORD_IGNORED_TEXT, room, type RoomAction, type RoomState } from './lib/room';
+import { EMPTY_ROOM, endText, formatCode, friendlyError, onRoomState, PASSWORD_IGNORED_TEXT, chatBlockedReason, room, type RoomAction, type RoomState } from './lib/room';
 import { chatLines, markerSeconds } from './lib/chat';
 import type { TrackSelection } from './lib/player';
 
@@ -290,13 +290,8 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
     if (!rs.active) return setError('Chat works inside a room.');
     act({ type: 'chat', clientId: Date.now() % 2_000_000_000, text });
   };
-  const chatDisabled = !rs.active
-    ? null
-    : !rs.chatConfig.enabled && !rs.isHost
-      ? 'The host turned chat off.'
-      : !rs.myPermissions.canChat && !rs.isHost
-        ? 'The host has not allowed you to chat.'
-        : null;
+  // Derived ONLY from the host's authoritative chat state for this window.
+  const chatDisabled = rs.active ? chatBlockedReason(rs) : null;
 
   const cycleTrack = (kind: 'audio' | 'sub') => {
     const list = tracks.filter((t) => t.kind === kind);

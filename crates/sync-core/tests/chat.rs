@@ -18,45 +18,207 @@ fn say(w: &mut sim::World, idx: usize, cid: u32, text: &str) {
 
 use syncwatch_sync_core::sim;
 
-#[test]
-fn chat_denied_without_permission_and_live_revoke() {
-    let (mut w, ids) = room(2, 41);
-    say(&mut w, ids[0], 1, "before revoke");
-    w.run_for(500_000);
-    assert!(chat_texts(&w, ids[1]).contains(&"before revoke".to_owned()));
-    // Live revoke.
-    let mut p = Permissions::ALL;
-    p.can_chat = false;
+fn mute(w: &mut syncwatch_sync_core::sim::World, idx: usize, muted: bool) {
+    let m = w.nodes[idx].id;
     w.ui(
         HOST,
-        UiAction::SetPermissions {
-            member: w.nodes[ids[0]].id,
-            permissions: p,
-        },
+        UiAction::Moderate(if muted {
+            Moderation::Mute(m)
+        } else {
+            Moderation::Unmute(m)
+        }),
     );
     w.run_for(300_000);
-    say(&mut w, ids[0], 2, "after revoke");
-    w.run_for(500_000);
-    assert!(
-        !chat_texts(&w, ids[1]).contains(&"after revoke".to_owned()),
-        "not relayed"
-    );
-    assert!(!chat_texts(&w, HOST).contains(&"after revoke".to_owned()));
-    assert_eq!(rejections(&w, ids[0]), vec![ChatRejectReason::NoPermission]);
-    // Room-wide switch.
+}
+
+fn chat_on(w: &mut syncwatch_sync_core::sim::World, enabled: bool) {
     w.ui(
         HOST,
         UiAction::SetChatConfig(ChatConfig {
-            enabled: false,
+            enabled,
             ..ChatConfig::default()
         }),
     );
     w.run_for(300_000);
-    say(&mut w, ids[1], 1, "chat is off");
-    w.run_for(500_000);
-    assert!(rejections(&w, ids[1]).contains(&ChatRejectReason::Disabled));
 }
 
+#[test]
+fn muted_member_is_rejected_others_are_not_and_still_see_everything() {
+    let (mut w, ids) = room(2, 41);
+    mute(&mut w, ids[0], true);
+    assert!(
+        member(&w, ids[0]).chat_state.muted,
+        "the muted member is told at once"
+    );
+    assert!(!member(&w, ids[1]).chat_state.muted);
+    say(&mut w, ids[0], 1, "muted talk");
+    say(&mut w, ids[1], 1, "free talk");
+    say(&mut w, HOST, 1, "host talk");
+    w.run_for(500_000);
+    assert_eq!(rejections(&w, ids[0]), vec![ChatRejectReason::Muted]);
+    assert!(rejections(&w, ids[1]).is_empty());
+    for n in [HOST, ids[0], ids[1]] {
+        let texts = chat_texts(&w, n);
+        assert!(!texts.contains(&"muted talk".to_owned()), "not relayed");
+        assert!(
+            texts.contains(&"free talk".to_owned()),
+            "the muted member sees chat too"
+        );
+        assert!(texts.contains(&"host talk".to_owned()));
+    }
+    // Unmuting takes effect immediately.
+    mute(&mut w, ids[0], false);
+    assert!(!member(&w, ids[0]).chat_state.muted);
+    say(&mut w, ids[0], 2, "back");
+    w.run_for(500_000);
+    assert!(chat_texts(&w, ids[1]).contains(&"back".to_owned()));
+}
+
+#[test]
+fn chat_off_rejects_every_member_but_the_host_and_everyone_still_receives() {
+    let (mut w, ids) = room(2, 43);
+    mute(&mut w, ids[1], true);
+    chat_on(&mut w, false);
+    for &m in &ids {
+        assert!(
+            !member(&w, m).chat_state.config.enabled,
+            "every member learns chat is off"
+        );
+    }
+    say(&mut w, ids[0], 1, "while off");
+    say(&mut w, HOST, 1, "host while off");
+    w.run_for(500_000);
+    assert_eq!(rejections(&w, ids[0]), vec![ChatRejectReason::ChatDisabled]);
+    for n in [HOST, ids[0], ids[1]] {
+        assert!(!chat_texts(&w, n).contains(&"while off".to_owned()));
+        assert!(
+            chat_texts(&w, n).contains(&"host while off".to_owned()),
+            "the host still reaches everyone"
+        );
+    }
+    // On again: everyone except the muted member can chat.
+    chat_on(&mut w, true);
+    say(&mut w, ids[0], 2, "on again");
+    say(&mut w, ids[1], 2, "still muted");
+    w.run_for(500_000);
+    assert!(chat_texts(&w, HOST).contains(&"on again".to_owned()));
+    assert!(!chat_texts(&w, HOST).contains(&"still muted".to_owned()));
+    assert_eq!(rejections(&w, ids[1]), vec![ChatRejectReason::Muted]);
+}
+
+#[test]
+fn mute_survives_a_reconnect() {
+    let (mut w, ids) = room(1, 44);
+    let m = ids[0];
+    mute(&mut w, m, true);
+    w.disconnect(m);
+    w.run_for(2_000_000);
+    w.nodes[m].connected = true;
+    let (id, identity) = (w.nodes[m].id, w.nodes[m].identity);
+    let h = w.host_idx();
+    w.deliver_event(
+        h,
+        Event::PeerJoined {
+            member: id,
+            identity,
+            display_name: "again".into(),
+        },
+    );
+    w.run_for(500_000);
+    assert!(
+        member(&w, m).chat_state.muted,
+        "the reconnect snapshot says muted"
+    );
+    say(&mut w, m, 9, "after reconnect");
+    w.run_for(500_000);
+    assert!(rejections(&w, m).contains(&ChatRejectReason::Muted));
+}
+
+#[test]
+fn mute_survives_a_host_transfer() {
+    let (mut w, ids) = room(2, 45);
+    mute(&mut w, ids[1], true);
+    w.ui(HOST, UiAction::MakeHost(w.nodes[ids[0]].id));
+    w.run_for(2_000_000);
+    assert!(w.nodes[ids[0]].peer.is_host());
+    say(&mut w, ids[1], 3, "after transfer");
+    w.run_for(500_000);
+    assert!(
+        !chat_texts(&w, ids[0]).contains(&"after transfer".to_owned()),
+        "the new host enforces the mute"
+    );
+    assert!(rejections(&w, ids[1]).contains(&ChatRejectReason::Muted));
+}
+
+#[test]
+fn a_late_joiner_gets_the_chat_flag_and_its_own_mute() {
+    let (mut w, _ids) = room(1, 46);
+    chat_on(&mut w, false);
+    let late = w.add_member(syncwatch_sync_core::sim::NodeConfig::named("Late"));
+    w.run_for(500_000);
+    assert!(
+        !member(&w, late).chat_state.config.enabled,
+        "the snapshot carries chat off"
+    );
+    assert!(!member(&w, late).chat_state.muted);
+}
+
+#[test]
+fn every_change_and_every_snapshot_carries_the_chat_state() {
+    let (mut w, ids) = room(2, 47);
+    let base = w.nodes[HOST].sent.len();
+    chat_on(&mut w, false);
+    let sent: Vec<Message> = w.nodes[HOST].sent[base..]
+        .iter()
+        .map(|(_, m)| m.clone())
+        .collect();
+    let states = sent
+        .iter()
+        .filter(|m| matches!(m, Message::Command(Command::ChatState(s)) if !s.config.enabled))
+        .count();
+    assert_eq!(
+        states,
+        ids.len(),
+        "one ChatState per member on a global change"
+    );
+    let base = w.nodes[HOST].sent.len();
+    mute(&mut w, ids[0], true);
+    let sent: Vec<Message> = w.nodes[HOST].sent[base..]
+        .iter()
+        .map(|(_, m)| m.clone())
+        .collect();
+    assert_eq!(
+        sent.iter()
+            .filter(|m| matches!(m, Message::Command(Command::ChatState(s)) if s.muted))
+            .count(),
+        1,
+        "the muted member gets its state"
+    );
+    let welcome = w.nodes[HOST].sent.iter().rev().find_map(|(_, m)| match m {
+        Message::Welcome(s) => Some(s.chat_state),
+        _ => None,
+    });
+    assert!(welcome.is_some(), "snapshots carry chat_state");
+}
+
+#[test]
+fn a_rejection_corrects_the_member_state() {
+    let (mut w, ids) = room(1, 48);
+    let m = ids[0];
+    mute(&mut w, m, true);
+    // Simulate a member whose state was lost (stale UI): the rejection fixes it.
+    if let syncwatch_sync_core::Peer::Member(mm) = &mut w.nodes[m].peer {
+        mm.chat_state.muted = false;
+    }
+    say(&mut w, m, 5, "stale");
+    w.run_for(500_000);
+    assert!(member(&w, m).chat_state.muted);
+    assert!(
+        w.nodes[m]
+            .ui_events()
+            .any(|u| matches!(u, UiEvent::ChatState(s) if s.muted))
+    );
+}
 #[test]
 fn ordering_and_echo_to_the_sender() {
     let (mut w, ids) = room(3, 42);
@@ -278,7 +440,7 @@ fn delete_clear_mute_and_moderation_only_from_host() {
 }
 
 #[test]
-fn hidden_chat_and_local_mute() {
+fn local_mute_hides_a_member_only_locally() {
     let (mut w, ids) = room(2, 48);
     w.ui(
         ids[1],
@@ -291,23 +453,6 @@ fn hidden_chat_and_local_mute() {
     w.run_for(500_000);
     assert!(!chat_texts(&w, ids[1]).contains(&"you cannot see this locally".to_owned()));
     assert!(chat_texts(&w, HOST).contains(&"you cannot see this locally".to_owned()));
-    // Hide chat from members: only the host (and the sender's echo) see messages.
-    w.ui(
-        HOST,
-        UiAction::SetChatConfig(ChatConfig {
-            hidden_from_members: true,
-            ..ChatConfig::default()
-        }),
-    );
-    w.run_for(300_000);
-    say(&mut w, ids[1], 2, "secret to host");
-    w.run_for(500_000);
-    assert!(chat_texts(&w, HOST).contains(&"secret to host".to_owned()));
-    assert!(
-        chat_texts(&w, ids[1]).contains(&"secret to host".to_owned()),
-        "own echo"
-    );
-    assert!(!chat_texts(&w, ids[0]).contains(&"secret to host".to_owned()));
 }
 
 #[test]

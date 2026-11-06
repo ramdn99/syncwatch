@@ -58,7 +58,7 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(functio
 
   const send = () => {
     const t = draft.trim();
-    if (!t) return;
+    if (!t || disabledReason) return;
     onSend(t);
     setDraft('');
   };
@@ -175,17 +175,22 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(functio
         )}
       </div>
       <div className="border-t border-border p-2">
-        {disabledReason ? (
-          <p className="rounded-md bg-elevated px-2 py-2 text-xs text-muted">{disabledReason}</p>
-        ) : (
+        {/* Normal state, not an error: muted or chat off disables the input with the reason. */}
+        {disabledReason && (
+          <p className="mb-1 text-xs text-muted" role="status" data-testid="chat-input-status">
+            {disabledReason}
+          </p>
+        )}
+        <div className="flex gap-2">
           <textarea
             ref={inputRef}
             rows={2}
-            value={draft}
+            value={disabledReason ? '' : draft}
             maxLength={2000}
-            placeholder="Message (Enter to send)"
+            disabled={disabledReason != null}
+            placeholder={disabledReason ?? 'Message (Enter to send)'}
             aria-label="Chat message"
-            className="w-full resize-none rounded-md border border-border bg-elevated px-2 py-1.5 text-sm text-text placeholder:text-disabled focus:border-accent focus:outline-none"
+            className="w-full resize-none rounded-md border border-border bg-elevated px-2 py-1.5 text-sm text-text placeholder:text-disabled focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
@@ -195,8 +200,16 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(functio
               if (e.key === 'Escape') (e.target as HTMLTextAreaElement).blur();
             }}
           />
-        )}
-      </div>
-    </aside>
+          <button
+            type="button"
+            disabled={disabledReason != null || draft.trim() === ''}
+            aria-label="Send message"
+            className="self-end rounded-md bg-accent px-3 py-1.5 text-sm font-semibold text-on-accent disabled:cursor-not-allowed disabled:opacity-40"
+            onClick={send}
+          >
+            Send
+          </button>
+        </div>
+      </div>    </aside>
   );
 });

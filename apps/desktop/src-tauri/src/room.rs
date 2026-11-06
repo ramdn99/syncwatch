@@ -81,7 +81,6 @@ pub struct PermsDto {
     can_seek: bool,
     can_change_media: bool,
     can_change_speed: bool,
-    can_chat: bool,
 }
 
 impl From<Permissions> for PermsDto {
@@ -91,7 +90,6 @@ impl From<Permissions> for PermsDto {
             can_seek: p.can_seek,
             can_change_media: p.can_change_media,
             can_change_speed: p.can_change_speed,
-            can_chat: p.can_chat,
         }
     }
 }
@@ -103,7 +101,6 @@ pub struct PermsIn {
     can_seek: bool,
     can_change_media: bool,
     can_change_speed: bool,
-    can_chat: bool,
 }
 
 impl From<PermsIn> for Permissions {
@@ -113,7 +110,6 @@ impl From<PermsIn> for Permissions {
             can_seek: p.can_seek,
             can_change_media: p.can_change_media,
             can_change_speed: p.can_change_speed,
-            can_chat: p.can_chat,
         }
     }
 }
@@ -197,12 +193,34 @@ pub struct NeedPasswordDto {
     retry_after_ms: u32,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+/// This window's chat state, exactly as the host last told it (the UI derives everything about
+/// sending from this; the host is never muted).
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ChatConfigDto {
+pub struct ChatStateDto {
     enabled: bool,
-    hidden_from_members: bool,
     slow_mode_secs: u16,
+    muted: bool,
+}
+
+impl Default for ChatStateDto {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            slow_mode_secs: 0,
+            muted: false,
+        }
+    }
+}
+
+impl From<ChatState> for ChatStateDto {
+    fn from(s: ChatState) -> Self {
+        Self {
+            enabled: s.config.enabled,
+            slow_mode_secs: s.config.slow_mode_secs,
+            muted: s.muted,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -220,7 +238,7 @@ pub struct RoomStateDto {
     members: Vec<MemberDto>,
     my_permissions: PermsDto,
     chat: Vec<ChatDto>,
-    chat_config: ChatConfigDto,
+    chat_state: ChatStateDto,
     /// Member side: the words to compare with the host (rooms without a password).
     host_words: Option<[&'static str; 4]>,
     host_link: Option<LinkState>,
@@ -286,9 +304,8 @@ fn media_text(m: MediaStatus) -> &'static str {
 
 fn chat_reject_text(r: ChatRejectReason) -> &'static str {
     match r {
-        ChatRejectReason::Disabled => "Chat is turned off in this room.",
-        ChatRejectReason::NoPermission => "The host has not allowed you to chat.",
-        ChatRejectReason::Muted => "The host muted you in chat.",
+        ChatRejectReason::ChatDisabled => "Chat is turned off by the host.",
+        ChatRejectReason::Muted => "You are muted by the host.",
         ChatRejectReason::Empty => "Empty messages are not sent.",
         ChatRejectReason::TooLong => "That message is too long (500 characters at most).",
         ChatRejectReason::RateLimited => "Slow down: at most 5 messages in 5 seconds.",
@@ -655,17 +672,36 @@ impl Mirror {
                     "you".into(),
                     format!("chat message refused: {reason:?}"),
                 );
-                self.toast(chat_reject_text(reason));
+                // Muted / chat off are normal states (the ChatState update already disabled
+                // the input): no error toast for them.
+                if !matches!(
+                    reason,
+                    ChatRejectReason::Muted | ChatRejectReason::ChatDisabled
+                ) {
+                    self.toast(chat_reject_text(reason));
+                }
+            }
+            // The ONLY source of this window's chat state (input, placeholder, status line).
+            UiEvent::ChatState(s) => {
+                let new: ChatStateDto = s.into();
+                if new.muted != self.s.chat_state.muted {
+                    self.event(if new.muted {
+                        "you were muted by the host"
+                    } else {
+                        "you were unmuted"
+                    });
+                }
+                if new.enabled != self.s.chat_state.enabled {
+                    self.event(if new.enabled {
+                        "chat turned on"
+                    } else {
+                        "chat turned off"
+                    });
+                }
+                self.s.chat_state = new;
             }
             UiEvent::ChatDeleted(id) => self.s.chat.retain(|m| m.divider.is_some() || m.id != id.0),
             UiEvent::ChatCleared => self.s.chat.clear(),
-            UiEvent::ChatConfig(c) => {
-                self.s.chat_config = ChatConfigDto {
-                    enabled: c.enabled,
-                    hidden_from_members: c.hidden_from_members,
-                    slow_mode_secs: c.slow_mode_secs,
-                }
-            }
             UiEvent::ShowMissingFilePanel {
                 name,
                 size,
@@ -754,6 +790,8 @@ enum Cmd {
     },
     /// Host: a validated, hashed external file to add to the room.
     AddExternal(crate::roommedia::PreparedExternal, ExternalKind),
+    /// Debug: drop the link to the host (the session reconnects and re-authenticates).
+    DevReconnect,
 }
 
 pub struct RoomManager {
@@ -1165,6 +1203,13 @@ async fn drive(
                         blake3: p.blake3,
                     })))
                 }
+                Some(Cmd::DevReconnect) => session.host_link_peer().map(|peer| {
+                    rt.bridge.close_peer(peer);
+                    Input::Transport(TransportEvent::Closed {
+                        peer,
+                        reason: "dev reconnect".into(),
+                    })
+                }),
                 None => Some(Input::Action(Action::Leave)),
             },
             _ = tick.tick() => Some(Input::Tick),
@@ -1384,6 +1429,8 @@ fn publish(app: &AppHandle, rt: &mut Rt, session: &RoomSession) {
         mirror.s.has_password = session.has_password();
         if let syncwatch_sync_core::Peer::Host(h) = session.peer() {
             mirror.s.locked = h.is_locked();
+            // The host is never muted and can always send; it sees the room's switch.
+            mirror.s.chat_state = h.chat_state().into();
         }
     }
     mirror.rebuild_members();
@@ -1608,7 +1655,6 @@ pub enum RoomActionIn {
     ClearChat,
     ChatConfig {
         enabled: bool,
-        hidden_from_members: bool,
         slow_mode_secs: u16,
     },
     LocalMute {
@@ -1711,11 +1757,9 @@ fn to_ui_action(action: RoomActionIn) -> Result<UiAction, String> {
         RoomActionIn::ClearChat => UiAction::Moderate(Moderation::Clear),
         RoomActionIn::ChatConfig {
             enabled,
-            hidden_from_members,
             slow_mode_secs,
         } => UiAction::SetChatConfig(ChatConfig {
             enabled,
-            hidden_from_members,
             slow_mode_secs: slow_mode_secs.min(300),
         }),
         RoomActionIn::LocalMute { member, muted } => UiAction::LocalMute {
@@ -1944,6 +1988,15 @@ pub fn dev_scenario() -> Option<DevScenario> {
     })
 }
 
+/// Debug builds: drop this member's link to the host to force a reconnect (scenario hook).
+#[tauri::command]
+pub fn dev_reconnect(m: State<'_, RoomManager>) -> Result<(), String> {
+    if !cfg!(debug_assertions) {
+        return Err("debug builds only".into());
+    }
+    m.send(Cmd::DevReconnect)
+}
+
 /// Debug builds: window state for the popup regression scenario. Uses the window API (no
 /// mouse or keyboard input). op: "minimize", "restore" or "query"; returns whether the
 /// main window is minimized and whether the video window is visible.
@@ -2004,6 +2057,10 @@ pub fn dev_autoroom(app: &AppHandle) {
         .filter(|p| !p.is_empty());
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(2)).await;
+        // "manual": the scenario joins by itself at the right moment (late joiner checks).
+        if role == "manual" {
+            return;
+        }
         let res = if role == "host" {
             let r = room_create(app.clone(), name, password).await;
             // Publish the code once it exists.
@@ -2156,7 +2213,7 @@ mod tests {
             info(0, "H", true, false),
             info(1, "Mo", true, true),
         ])));
-        mirror.apply(RoomUi::Core(UiEvent::Permissions(Permissions::CHAT_ONLY)));
+        mirror.apply(RoomUi::Core(UiEvent::Permissions(Permissions::NONE)));
         mirror.apply(RoomUi::Core(UiEvent::MediaChanged {
             title: Some("old.mkv".into()),
         }));
@@ -2265,7 +2322,7 @@ mod tests {
         m.apply(RoomUi::Core(UiEvent::Members(vec![info(
             0, "H", true, false,
         )])));
-        m.apply(RoomUi::Core(UiEvent::Permissions(Permissions::CHAT_ONLY)));
+        m.apply(RoomUi::Core(UiEvent::Permissions(Permissions::NONE)));
         assert!(!m.s.missing_file.as_ref().unwrap().panel_open);
         // A mismatch closes it too (the warning is shown in the room instead).
         m.apply(RoomUi::Core(panel.clone()));
@@ -2292,6 +2349,39 @@ mod tests {
         assert_eq!(m.s.missing_file.as_ref().unwrap().seq, seq2);
     }
 
+    /// Regression (M7 Part A): the member's chat state must reach the UI mirror on every
+    /// change: it once fell through a catch-all and the input stayed enabled while muted.
+    #[test]
+    fn chat_state_updates_reach_the_ui_mirror() {
+        let mut m = Mirror::default();
+        assert!(
+            m.s.chat_state.enabled && !m.s.chat_state.muted,
+            "default: chat on"
+        );
+        let st = |enabled, muted| {
+            RoomUi::Core(UiEvent::ChatState(ChatState {
+                config: ChatConfig {
+                    enabled,
+                    slow_mode_secs: 0,
+                },
+                muted,
+            }))
+        };
+        m.apply(st(true, true));
+        assert!(m.s.chat_state.muted);
+        m.apply(st(false, true));
+        assert!(!m.s.chat_state.enabled && m.s.chat_state.muted);
+        m.apply(st(true, false));
+        assert!(m.s.chat_state.enabled && !m.s.chat_state.muted);
+        // A muted / chat-off rejection is a normal state: no error toast.
+        m.s.toasts.clear();
+        m.apply(RoomUi::Core(UiEvent::ChatRejected {
+            client_id: 1,
+            reason: ChatRejectReason::Muted,
+        }));
+        assert!(m.s.toasts.is_empty());
+    }
+
     #[test]
     fn own_permissions_follow_the_host_live() {
         let mut m = Mirror::default();
@@ -2300,7 +2390,7 @@ mod tests {
         let mut p = Permissions::ALL;
         p.can_seek = false;
         m.apply(RoomUi::Core(UiEvent::Permissions(p)));
-        assert!(!m.s.my_permissions.can_seek && m.s.my_permissions.can_chat);
+        assert!(!m.s.my_permissions.can_seek && m.s.my_permissions.can_play_pause);
     }
 
     #[test]

@@ -27,7 +27,7 @@ fn joined_member() -> MemberMachine {
         members: vec![],
         your_permissions: Permissions::ALL,
         chat: vec![],
-        chat_config: ChatConfig::default(),
+        chat_state: ChatState::default(),
     };
     m.handle(
         clock(0),
@@ -485,7 +485,7 @@ fn requests_without_permission_are_denied_by_the_host() {
         HOST,
         UiAction::SetPermissions {
             member: w.nodes[ids[0]].id,
-            permissions: Permissions::CHAT_ONLY,
+            permissions: Permissions::NONE,
         },
     );
     w.run_for(500_000);

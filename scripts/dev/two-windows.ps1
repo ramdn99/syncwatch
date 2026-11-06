@@ -106,7 +106,7 @@ if ($LASTEXITCODE) { exit 1 }
 $work = Join-Path ([IO.Path]::GetTempPath()) "syncwatch-two-windows-$PID"
 New-Item -ItemType Directory -Force $work | Out-Null
 $windows = @('a', 'b')
-if ($Scenario -in 'late', 'succession') { $windows += 'c' }
+if ($Scenario -in 'late', 'succession', 'chat') { $windows += 'c' }
 # Succession: window a (the host) is killed on purpose; only b and c must finish.
 $mustFinish = @($windows | Where-Object { -not ($Scenario -eq 'succession' -and $_ -eq 'a') })
 $killed = $false
@@ -156,8 +156,8 @@ try {
         }
         $env:SYNCWATCH_DEV_IDENTITY = $who
         $env:SYNCWATCH_DEV_NAME = switch ($who) { 'a' { 'Host A' } 'b' { 'Member B' } default { 'Late C' } }
-        $env:SYNCWATCH_DEV_AUTOROOM = $(if ($AutoRoom) { if ($who -eq 'a') { 'host' } else { 'join' } } else { '' })
-        $env:SYNCWATCH_DEV_SCENARIO_ROLE = $(if ($who -eq 'c' -and $Scenario -eq 'late') { 'late' } else { '' })
+        $env:SYNCWATCH_DEV_AUTOROOM = $(if ($AutoRoom) { if ($who -eq 'a') { 'host' } elseif ($who -eq 'c' -and $Scenario -eq 'chat') { 'manual' } else { 'join' } } else { '' })
+        $env:SYNCWATCH_DEV_SCENARIO_ROLE = $(if ($who -eq 'c' -and $Scenario -in 'late', 'chat') { 'late' } else { '' })
         $env:SYNCWATCH_DEV_SOAK_FILE = $(if ($Soak -gt 0) { Join-Path $work "soak-$who.json" } else { '' })
         $env:SYNCWATCH_DEV_MINIMIZE = $(if ($Soak -gt 0 -and $who -eq 'b') { '1' } else { '' })
         $env:SYNCWATCH_DEV_SCENARIO_FILE = $(if ($Scenario) { Join-Path $work "scenario-$who.txt" } else { '' })

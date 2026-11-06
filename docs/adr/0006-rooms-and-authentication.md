@@ -137,7 +137,7 @@ Milestone 2 the sync-core machine (ADR 0003).
 | Two real windows, direct: signaling connect to authenticated | about 0.6 s |
 | 15-minute two-window soak (member minimized, both idle) | 914 s in the room on both sides: 0 Reconnecting banners, 0 link reconnects, 0 watchdog interruptions logged (passes the 306 s mark of the old open issue) |
 | Room join, relay-only through Metered (fresh credentials per create/join) | both links relayed; member signaling connect to host authenticated about 1.45 s; 0 banners in a 30 s run. Quota: 2 API requests, at most 8 TURN allocations (4 TURN URLs x 2 peers), well under 1 MB relayed (handshake, keepalives). The script stops the windows forcibly, so those allocations expired on the server instead of being released |
-| In-process session tests (fake signaling and links) | 13 tests: join with and without password, missing/wrong/right password with throttling, MITM, kick and ban, lock, chat permission revoke, banner only on real interruption, restart keeps the seat, host transfer, password moves with the host, close room, leave frees the seat |
+| In-process session tests (fake signaling and links) | 13 tests: join with and without password, missing/wrong/right password with throttling, MITM, kick and ban, lock, chat refusal (now: mute, ADR 0008), banner only on real interruption, restart keeps the seat, host transfer, password moves with the host, close room, leave frees the seat |
 
 ## Findings from the first manual test (fixed)
 1. **Room actions with multi-word fields failed** (chat, chat settings, slow mode) with

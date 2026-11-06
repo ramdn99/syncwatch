@@ -21,6 +21,8 @@ pub struct MemberMachine {
     pub perms: Permissions,
     pub members: Vec<MemberInfo>,
     pub chat_config: ChatConfig,
+    /// My chat state as the host last told me (authoritative for my UI).
+    pub chat_state: ChatState,
     downloads: Downloads,
     local_mutes: HashSet<MemberId>,
     next_ping_us: i64,
@@ -47,6 +49,7 @@ impl MemberMachine {
             perms: Permissions::default(),
             members: Vec::new(),
             chat_config: ChatConfig::default(),
+            chat_state: ChatState::default(),
             downloads: Downloads::default(),
             local_mutes: HashSet::new(),
             next_ping_us: i64::MIN,
@@ -91,6 +94,7 @@ impl MemberMachine {
             chat: Vec::new(),
             chat_config: self.chat_config,
             chat_next_seq: self.last_chat_seq + 1,
+            muted: Vec::new(),
             bans: Vec::new(),
             locked: false,
             next_external_id,
@@ -377,6 +381,25 @@ impl MemberMachine {
                 }
             }
             Message::ChatRejected { client_id, reason } => {
+                // A rejection also corrects my chat state (normal disabled state, not an error).
+                let corrected = match reason {
+                    ChatRejectReason::Muted => Some(ChatState {
+                        muted: true,
+                        ..self.chat_state
+                    }),
+                    ChatRejectReason::ChatDisabled => Some(ChatState {
+                        config: ChatConfig {
+                            enabled: false,
+                            ..self.chat_state.config
+                        },
+                        ..self.chat_state
+                    }),
+                    _ => None,
+                };
+                if let Some(s) = corrected.filter(|s| *s != self.chat_state) {
+                    self.chat_state = s;
+                    out.ui(UiEvent::ChatState(s));
+                }
                 out.ui(UiEvent::ChatRejected { client_id, reason })
             }
             Message::FileChunk {
@@ -426,14 +449,15 @@ impl MemberMachine {
         self.host_identity = Some(s.host_identity);
         self.perms = s.your_permissions;
         self.members = s.members.clone();
-        self.chat_config = s.chat_config;
+        self.chat_config = s.chat_state.config;
+        self.chat_state = s.chat_state;
         self.last_status = None;
         self.next_ping_us = mono;
         self.pings_sent = 0;
         out.ui(UiEvent::Joined { me: s.your_id });
         out.ui(UiEvent::Members(s.members));
         out.ui(UiEvent::Permissions(s.your_permissions));
-        out.ui(UiEvent::ChatConfig(s.chat_config));
+        out.ui(UiEvent::ChatState(s.chat_state));
         for m in s.chat {
             self.last_chat_seq = self.last_chat_seq.max(m.seq).max(m.id.0);
             if !self.local_mutes.contains(&m.sender) {
@@ -514,9 +538,10 @@ impl MemberMachine {
                 Moderation::Clear => out.ui(UiEvent::ChatCleared),
                 Moderation::Mute(_) | Moderation::Unmute(_) => {}
             },
-            Command::ChatConfig(c) => {
-                self.chat_config = c;
-                out.ui(UiEvent::ChatConfig(c));
+            Command::ChatState(s) => {
+                self.chat_config = s.config;
+                self.chat_state = s;
+                out.ui(UiEvent::ChatState(s));
             }
             Command::ReadyGate(g) => out.ui(UiEvent::Gate(g)),
             Command::Notice(n) => out.ui(UiEvent::Notice(n)),

@@ -4,23 +4,23 @@ import { EMPTY_ROOM, friendlyError, permsSummary, type RoomState } from '../lib/
 import { diagnosticsText } from './Diagnostics';
 import { MyPermissions } from './HostControls';
 
-const ALL = { canPlayPause: true, canSeek: true, canChangeMedia: true, canChangeSpeed: true, canChat: true };
+const ALL = { canPlayPause: true, canSeek: true, canChangeMedia: true, canChangeSpeed: true };
 
 describe('own permissions badge', () => {
   it('lists exactly what the member may do and updates with new props', () => {
     const { rerender } = render(<MyPermissions perms={{ ...ALL, canChangeMedia: false, canPlayPause: false }} />);
     const items = () => screen.getAllByRole('listitem').map((li) => li.textContent);
-    expect(items()).toEqual(['seek', 'change speed', 'chat']);
-    // The host revokes seek and chat: the badge follows.
-    rerender(<MyPermissions perms={{ ...ALL, canSeek: false, canChat: false }} />);
+    expect(items()).toEqual(['seek', 'change speed']);
+    // The host revokes seek: the badge follows. Chat is no longer a permission.
+    rerender(<MyPermissions perms={{ ...ALL, canSeek: false }} />);
     expect(items()).toEqual(['play and pause', 'change speed', 'change the source']);
-    rerender(<MyPermissions perms={{ canPlayPause: false, canSeek: false, canChangeMedia: false, canChangeSpeed: false, canChat: false }} />);
+    rerender(<MyPermissions perms={{ canPlayPause: false, canSeek: false, canChangeMedia: false, canChangeSpeed: false }} />);
     expect(screen.queryAllByRole('listitem')).toHaveLength(0);
     expect(screen.getByText(/only watch/)).toBeTruthy();
   });
 
   it('summarizes permissions', () => {
-    expect(permsSummary(ALL)).toHaveLength(5);
+    expect(permsSummary(ALL)).toHaveLength(4);
   });
 });
 

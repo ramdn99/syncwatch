@@ -43,122 +43,174 @@ export async function check(report: Report, name: string, f: () => Promise<unkno
   }
 }
 
+// ------------------------------------------------------------------ 'chat' scenario ----
+// Host a, member b, late joiner c. Chat state is checked in the member's own DOM: the input
+// must be DISABLED with the right text whenever the host's state says it cannot send.
+
+/** The member's chat input as rendered (disabled flag, placeholder, status line). */
+function chatInput() {
+  const ta = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Chat message"]');
+  const status = document.querySelector('[data-testid="chat-input-status"]')?.textContent ?? null;
+  const mine = document.querySelector('[data-testid="my-chat-status"]')?.textContent ?? null;
+  return { found: ta != null, disabled: ta?.disabled ?? false, placeholder: ta?.placeholder ?? '', status, mine };
+}
+
+async function expectInput(label: string, want: 'enabled' | 'muted' | 'off') {
+  const end = Date.now() + 10_000;
+  for (;;) {
+    const i = chatInput();
+    const text = want === 'muted' ? 'You are muted by the host' : 'Chat is turned off by the host';
+    const ok =
+      i.found &&
+      (want === 'enabled'
+        ? !i.disabled && i.status == null && (i.mine == null || i.mine.endsWith('on'))
+        : i.disabled && i.placeholder === text && i.status === text && (i.mine == null || i.mine.endsWith(want)));
+    if (ok) return;
+    if (Date.now() > end) throw new Error(`${label}: input ${JSON.stringify(i)}`);
+    await sleep(150);
+  }
+}
+
 async function host(report: Report) {
   const s0 = await waitFor('member joined', (s) => s.phase === 'inRoom' && s.members.length === 2);
   const member = s0.members.find((m) => !m.isYou)!.id;
-  const cfg = async (c: Partial<RoomState['chatConfig']>) => {
-    const base = (await current()).chatConfig;
-    await act({ type: 'chatConfig', ...base, ...c });
+  const cfg = async (c: Partial<{ enabled: boolean; slowModeSecs: number }>) => {
+    const base = (await current()).chatState;
+    await act({ type: 'chatConfig', enabled: base.enabled, slowModeSecs: base.slowModeSecs, ...c });
   };
   await check(report, 'chat member -> host', () => waitFor('m1', has('m1: hello host')));
   await check(report, 'chat host -> member (sent)', () => say('h1: hello member'));
-  await check(report, 'chat enabled OFF is sent', async () => {
+  await check(report, 'mute: the muted member is refused, the host does not receive it', async () => {
+    await act({ type: 'muteChat', member, muted: true });
+    await waitFor('member refused (Muted)', rejected('Muted'), 20_000);
+    if (has('m2: while muted')(await current())) throw new Error('a muted message got through');
+  });
+  await say('h2: to everyone while muted');
+  await check(report, 'still muted after the member reconnects', () =>
+    // m2, m3 before the reconnect and one more after it: three refusals.
+    waitFor('third refusal', (s) => s.diag.rejected.some((r) => r.what === 'chat message refused: Muted' && r.count >= 3), 60_000),
+  );
+  await check(report, 'unmute takes effect at once (and the muted member had seen h2)', async () => {
+    await act({ type: 'muteChat', member, muted: false });
+    await waitFor('m3 and m4', (s) => has('m3: saw h2')(s) && has('m4: unmuted')(s), 20_000);
+  });
+  await check(report, 'chat off: members refused, the host still reaches everyone', async () => {
     await cfg({ enabled: false });
-    await waitFor('own config off', (s) => !s.chatConfig.enabled);
+    await waitFor('member refused (ChatDisabled)', rejected('ChatDisabled'), 20_000);
+    if (has('m5: while off')(await current())) throw new Error('got through while off');
+    await say('h3: host while off');
   });
-  await check(report, 'chat enabled OFF is enforced by the host', async () => {
-    await waitFor('member refused (Disabled)', rejected('Disabled'));
-    if (has('m2: while disabled')(await current())) throw new Error('a message got through while chat was off');
+  await check(report, 'a third window joins late while chat is off', async () => {
+    await invoke('dev_scenario_share', { code: (await current()).roomCode });
+    await waitFor('third member', (s) => s.members.length === 3, 90_000);
+    await sleep(8000); // the late joiner checks its disabled input meanwhile
   });
-  await check(report, 'chat enabled ON again', async () => {
+  await check(report, 'chat on again: members can send (they saw h3)', async () => {
     await cfg({ enabled: true });
-    await waitFor('m3', has('m3: chat back on'));
-  });
-  await check(report, 'hide chat from members ON', async () => {
-    await cfg({ hiddenFromMembers: true });
-    await waitFor('own config hidden', (s) => s.chatConfig.hiddenFromMembers);
-    await sleep(500);
-    await say('h2: hidden from members');
-    await waitFor('m4 (member confirms it did not see h2)', has('m4: hidden ack'));
-  });
-  await check(report, 'hide chat from members OFF', async () => {
-    await cfg({ hiddenFromMembers: false });
-    await waitFor('own config visible', (s) => !s.chatConfig.hiddenFromMembers);
+    await waitFor('m6, m7 and c1', (s) => has('m6: saw h3')(s) && has('m7: on again')(s) && has('c1: late checked')(s), 30_000);
   });
   await check(report, 'slow mode is enforced', async () => {
     await cfg({ slowModeSecs: 10 });
-    await waitFor('member refused (SlowMode)', rejected('SlowMode'));
+    await waitFor('member refused (SlowMode)', rejected('SlowMode'), 20_000);
     await cfg({ slowModeSecs: 0 });
-    await waitFor('own config slow off', (s) => s.chatConfig.slowModeSecs === 0);
   });
-  await check(report, 'delete message', async () => {
+  await check(report, 'delete and clear', async () => {
     await sleep(1500);
-    const s = await current();
-    const msg = s.chat.find((c) => c.text === 'm3: chat back on');
-    if (!msg) throw new Error('m3 not found');
+    const msg = (await current()).chat.find((c) => c.text === 'm7: on again');
+    if (!msg) throw new Error('m7 not found');
     await act({ type: 'deleteChat', id: msg.id });
-    await waitFor('m3 gone here', (x) => !has('m3: chat back on')(x));
-    await waitFor('member confirms deletion', has('m5: deleted ok'));
-  });
-  await check(report, 'clear chat', async () => {
+    await waitFor('member saw delete', has('m8: deleted ok'), 20_000);
     await act({ type: 'clearChat' });
-    await waitFor('own chat empty', (x) => texts(x).length === 0);
-    await waitFor('member confirms clear', has('m6: cleared ok'));
-  });
-  await check(report, 'mute in chat', async () => {
-    await act({ type: 'muteChat', member, muted: true });
-    await waitFor('member refused (Muted)', rejected('Muted'));
-    if (has('m7x: while muted')(await current())) throw new Error('a muted message got through');
-  });
-  await check(report, 'unmute in chat', async () => {
-    await act({ type: 'muteChat', member, muted: false });
-    await waitFor('m7', has('m7: unmuted'));
+    await waitFor('member saw clear', has('m9: cleared ok'), 20_000);
   });
 }
 
 async function member(report: Report) {
   await waitFor('in the room', (s) => s.phase === 'inRoom' && s.members.some((m) => m.isHost));
+  await check(report, 'input enabled at start', () => expectInput('start', 'enabled'));
   await check(report, 'chat member -> host (sent)', () => say('m1: hello host'));
   await check(report, 'chat host -> member', () => waitFor('h1', has('h1: hello member')));
-  await check(report, 'sees chat turned off, and its message is refused', async () => {
-    await waitFor('config off', (s) => !s.chatConfig.enabled);
-    await say('m2: while disabled');
-    await waitFor('own refusal (Disabled)', (s) => s.diag.rejected.some((r) => r.who === 'you' && r.what.endsWith('Disabled')));
+  await check(report, 'after mute: input disabled with "You are muted by the host"', async () => {
+    await waitFor('muted state', (s) => s.chatState.muted, 20_000);
+    await expectInput('muted', 'muted');
   });
-  await check(report, 'sees chat turned on again and can send', async () => {
-    await waitFor('config on', (s) => s.chatConfig.enabled);
-    await say('m3: chat back on');
-    await waitFor('own echo m3', has('m3: chat back on'));
+  await check(report, 'a send while muted is refused without an error', async () => {
+    await say('m2: while muted');
+    await waitFor('own refusal', (s) => s.diag.rejected.some((r) => r.who === 'you' && r.what.endsWith('Muted')), 15_000);
+    await expectInput('muted after refusal', 'muted');
   });
-  await check(report, 'hidden chat: does not receive the host message', async () => {
-    await waitFor('config hidden', (s) => s.chatConfig.hiddenFromMembers);
-    await sleep(2500);
-    if (has('h2: hidden from members')(await current())) throw new Error('received a hidden message');
-    await say('m4: hidden ack');
-    await waitFor('own echo m4', has('m4: hidden ack'));
+  await check(report, 'a muted member still sees chat', async () => {
+    await waitFor('h2', has('h2: to everyone while muted'), 20_000);
+    await say('m3: saw h2'); // refused while muted (the host counts it); resent after unmute
+  });
+  await check(report, 'after a reconnect while muted: still disabled', async () => {
+    await invoke('dev_reconnect');
+    await sleep(1500);
+    await waitFor('back in the room', (s) => s.phase === 'inRoom', 30_000);
+    await expectInput('muted after reconnect', 'muted');
+    await say('m3: saw h2 (still muted)');
+  });
+  await check(report, 'after unmute: input enabled again', async () => {
+    await waitFor('unmuted', (s) => !s.chatState.muted, 30_000);
+    await expectInput('unmuted', 'enabled');
+    await say('m3: saw h2');
+    await say('m4: unmuted');
+  });
+  await check(report, 'after chat off: input disabled with "Chat is turned off by the host"', async () => {
+    await waitFor('chat off', (s) => !s.chatState.enabled, 20_000);
+    await expectInput('chat off', 'off');
+    await say('m5: while off');
+    await waitFor('own refusal', (s) => s.diag.rejected.some((r) => r.who === 'you' && r.what.endsWith('ChatDisabled')), 15_000);
+    await waitFor('h3', has('h3: host while off'), 20_000);
+  });
+  await check(report, 'after chat on: input enabled again', async () => {
+    await waitFor('chat on', (s) => s.chatState.enabled, 180_000);
+    await expectInput('chat on', 'enabled');
+    await say('m6: saw h3');
+    await sleep(1300);
+    await say('m7: on again');
+    await sleep(1300);
   });
   await check(report, 'slow mode refuses a quick second message', async () => {
-    await waitFor('config visible', (s) => !s.chatConfig.hiddenFromMembers);
-    await waitFor('slow mode on', (s) => s.chatConfig.slowModeSecs > 0);
-    await say('m5a: slow one');
+    await waitFor('slow mode on', (s) => s.chatState.slowModeSecs > 0, 20_000);
+    await say('m7a: slow one');
     await sleep(300);
-    await say('m5b: slow two');
-    await waitFor('own refusal (SlowMode)', (s) => s.diag.rejected.some((r) => r.who === 'you' && r.what.endsWith('SlowMode')));
-    await waitFor('slow mode off', (s) => s.chatConfig.slowModeSecs === 0);
+    await say('m7b: slow two');
+    await waitFor('own refusal (SlowMode)', (s) => s.diag.rejected.some((r) => r.who === 'you' && r.what.endsWith('SlowMode')), 15_000);
+    await waitFor('slow mode off', (s) => s.chatState.slowModeSecs === 0, 20_000);
   });
-  await check(report, 'sees the deleted message disappear', async () => {
-    await waitFor('m3 deleted', (s) => !has('m3: chat back on')(s));
+  await check(report, 'sees delete and clear', async () => {
+    await waitFor('m7 deleted', (s) => !has('m7: on again')(s), 20_000);
     await sleep(1200);
-    await say('m5: deleted ok');
-  });
-  await check(report, 'sees the chat cleared', async () => {
-    await waitFor('chat cleared', (s) => texts(s).length === 0);
+    await say('m8: deleted ok');
+    await waitFor('cleared', (s) => texts(s).length === 0, 20_000);
     await sleep(1200);
-    await say('m6: cleared ok');
-  });
-  await check(report, 'muted: own message is refused', async () => {
-    await waitFor('muted', (s) => s.members.some((m) => m.isYou && m.chatMuted));
-    await say('m7x: while muted');
-    await waitFor('own refusal (Muted)', (s) => s.diag.rejected.some((r) => r.who === 'you' && r.what.endsWith('Muted')));
-  });
-  await check(report, 'unmuted: can send again', async () => {
-    await waitFor('unmuted', (s) => s.members.some((m) => m.isYou && !m.chatMuted));
-    await sleep(1200);
-    await say('m7: unmuted');
-    await waitFor('own echo m7', has('m7: unmuted'));
+    await say('m9: cleared ok');
   });
 }
 
+/** Window c joins while chat is off: its snapshot must already disable the input. */
+async function lateChat(report: Report) {
+  // Join only once the host has turned chat off (it publishes the code then).
+  let code: string | null = null;
+  const end = Date.now() + 240_000;
+  while (!code && Date.now() < end) {
+    code = await invoke<string | null>('dev_scenario_shared');
+    if (!code) await sleep(300);
+  }
+  if (!code) throw new Error('no room code from the host');
+  await room.join('Late C', code, null);
+  await waitFor('in the room', (s) => s.phase === 'inRoom' && s.members.some((m) => m.isHost), 60_000);
+  await check(report, 'joined late while chat is off: input disabled with the right text', async () => {
+    await waitFor('chat off in snapshot', (s) => !s.chatState.enabled, 10_000);
+    await expectInput('late join while off', 'off');
+  });
+  await check(report, 'the late joiner sees the host message sent while chat was off', () => waitFor('h3', has('h3: host while off'), 20_000));
+  // Report to the host: members cannot send while off, so wait for chat on.
+  await waitFor('chat on', (s) => s.chatState.enabled, 180_000);
+  await check(report, 'chat on again: the late joiner input is enabled', () => expectInput('late chat on', 'enabled'));
+  await say('c1: late checked');
+}
 // ------------------------------------------------------------------ 'rooms' scenario ---
 
 interface Snap {
@@ -278,6 +330,7 @@ export async function maybeRunScenario() {
       if (cfg.role === 'host') await roomsHost(report, cfg.media);
       else await roomsMember(report, cfg.media);
     } else if (cfg.role === 'host') await host(report);
+    else if (cfg.role === 'late') await lateChat(report);
     else await member(report);
     report('DONE');
   } catch {

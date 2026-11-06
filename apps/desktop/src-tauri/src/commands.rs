@@ -277,6 +277,7 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             crate::room::dev_scenario,
             crate::room::dev_scenario_report,
             crate::room::dev_window,
+            crate::room::dev_reconnect,
             crate::room::dev_scenario_share,
             crate::room::dev_scenario_shared,
             crate::bridge::bridge_attach,

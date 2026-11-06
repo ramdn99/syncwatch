@@ -364,6 +364,11 @@ impl RoomSession {
         self.peer.next_deadline()
     }
 
+    /// Member: the current link to the host (debug reconnect hook).
+    pub fn host_link_peer(&self) -> Option<PeerId> {
+        self.host_link
+    }
+
     /// Host: the transport peer of an authenticated member (for bulk flow control).
     pub fn member_peer(&self, m: MemberId) -> Option<PeerId> {
         self.link_of_member(m)

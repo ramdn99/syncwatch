@@ -656,33 +656,55 @@ fn locked_room_refuses_new_members_but_not_the_seated_ones() {
 }
 
 #[test]
-fn revoked_chat_permission_is_enforced_by_the_host() {
+fn a_muted_member_is_refused_by_the_host_and_stays_muted_after_reconnecting() {
     let mut w = World::new();
     let h = w.host("Hana", 1, None);
     let m = w.join("Mo", 2, None);
     w.run_for(300_000);
     let mid = w.members(h).into_iter().find(|i| !i.is_host).unwrap().id;
-    let mut p = Permissions::ALL;
-    p.can_chat = false;
-    w.ui_action(
-        h,
-        UiAction::SetPermissions {
-            member: mid,
-            permissions: p,
-        },
-    );
+    w.ui_action(h, UiAction::Moderate(Moderation::Mute(mid)));
     w.run_for(300_000);
+    let my_state = |w: &World| {
+        w.nodes[m].ui.iter().rev().find_map(|u| match u {
+            RoomUi::Core(UiEvent::ChatState(s)) => Some(*s),
+            _ => None,
+        })
+    };
+    assert!(
+        my_state(&w).is_some_and(|s| s.muted),
+        "pushed to the member at once"
+    );
     chat(&mut w, m, "should not arrive");
     assert!(w.chats(h).is_empty());
     assert!(w.nodes[m].ui.iter().any(|u| matches!(
         u,
         RoomUi::Core(UiEvent::ChatRejected {
-            reason: ChatRejectReason::NoPermission,
+            reason: ChatRejectReason::Muted,
             ..
         })
     )));
+    // The link drops and comes back: the reconnect snapshot still says muted.
+    let link = w.host_link_of(m);
+    w.input(
+        m,
+        Input::Transport(TransportEvent::Closed {
+            peer: link,
+            reason: "test".into(),
+        }),
+    );
+    w.settle();
+    w.run_for(1_000_000);
+    assert!(w.in_room(m));
+    assert!(
+        my_state(&w).is_some_and(|s| s.muted),
+        "still muted after the reconnect"
+    );
+    w.ui_action(h, UiAction::Moderate(Moderation::Unmute(mid)));
+    w.run_for(300_000);
+    assert!(my_state(&w).is_some_and(|s| !s.muted));
+    chat(&mut w, m, "unmuted");
+    assert_eq!(w.chats(h), vec!["unmuted"]);
 }
-
 #[test]
 fn reconnecting_banner_only_for_real_interruptions_and_it_clears() {
     let mut w = World::new();
@@ -848,7 +870,7 @@ fn joining_a_local_file_room_shows_choose_my_file_once_without_any_permission() 
         h,
         UiAction::ApplyPreset {
             preset: Preset::OnlyMe,
-            custom: Permissions::CHAT_ONLY,
+            custom: Permissions::NONE,
         },
     );
     w.ui_action(
@@ -955,7 +977,7 @@ fn members_see_their_own_permissions_live() {
     let mid = w.members(h).into_iter().find(|i| !i.is_host).unwrap().id;
     let mut p = Permissions::ALL;
     p.can_seek = false;
-    p.can_chat = false;
+    p.can_change_speed = false;
     w.ui_action(
         h,
         UiAction::SetPermissions {
@@ -969,11 +991,11 @@ fn members_see_their_own_permissions_live() {
         h,
         UiAction::ApplyPreset {
             preset: Preset::OnlyMe,
-            custom: Permissions::CHAT_ONLY,
+            custom: Permissions::NONE,
         },
     );
     w.run_for(200_000);
-    assert_eq!(mine(&w), Some(Permissions::CHAT_ONLY));
+    assert_eq!(mine(&w), Some(Permissions::NONE));
 }
 
 #[test]
@@ -987,7 +1009,6 @@ fn the_host_records_rejections_per_member_for_diagnostics() {
         h,
         UiAction::SetChatConfig(ChatConfig {
             enabled: false,
-            hidden_from_members: false,
             slow_mode_secs: 0,
         }),
     );
@@ -1003,7 +1024,7 @@ fn the_host_records_rejections_per_member_for_diagnostics() {
         .collect();
     assert_eq!(
         rec,
-        vec![(Some(mid), "chat message refused: Disabled".to_owned())]
+        vec![(Some(mid), "chat message refused: ChatDisabled".to_owned())]
     );
 }
 

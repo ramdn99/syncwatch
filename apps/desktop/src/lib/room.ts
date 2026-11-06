@@ -14,7 +14,6 @@ export interface Perms {
   canSeek: boolean;
   canChangeMedia: boolean;
   canChangeSpeed: boolean;
-  canChat: boolean;
 }
 
 export interface RoomMember {
@@ -69,7 +68,8 @@ export interface RoomState {
   members: RoomMember[];
   myPermissions: Perms;
   chat: RoomChat[];
-  chatConfig: { enabled: boolean; hiddenFromMembers: boolean; slowModeSecs: number };
+  /** My chat state as the host last told me (the only source for whether I can send). */
+  chatState: { enabled: boolean; slowModeSecs: number; muted: boolean };
   hostWords: [string, string, string, string] | null;
   hostLink: LinkState | null;
   needPassword: { wrong: boolean; retryAfterMs: number } | null;
@@ -111,7 +111,7 @@ export interface EntryOutcome {
 
 export const PASSWORD_IGNORED_TEXT = 'This room has no password, so the one you typed was ignored.';
 
-const NO_PERMS: Perms = { canPlayPause: false, canSeek: false, canChangeMedia: false, canChangeSpeed: false, canChat: false };
+const NO_PERMS: Perms = { canPlayPause: false, canSeek: false, canChangeMedia: false, canChangeSpeed: false };
 
 export const EMPTY_ROOM: RoomState = {
   active: false,
@@ -125,7 +125,7 @@ export const EMPTY_ROOM: RoomState = {
   members: [],
   myPermissions: NO_PERMS,
   chat: [],
-  chatConfig: { enabled: true, hiddenFromMembers: false, slowModeSecs: 0 },
+  chatState: { enabled: true, slowModeSecs: 0, muted: false },
   hostWords: null,
   hostLink: null,
   needPassword: null,
@@ -155,7 +155,7 @@ export type RoomAction =
   | { type: 'muteChat'; member: number; muted: boolean }
   | { type: 'deleteChat'; id: number }
   | { type: 'clearChat' }
-  | { type: 'chatConfig'; enabled: boolean; hiddenFromMembers: boolean; slowModeSecs: number }
+  | { type: 'chatConfig'; enabled: boolean; slowModeSecs: number }
   | { type: 'localMute'; member: number; muted: boolean }
   | { type: 'waitForEveryone'; on: boolean }
   | { type: 'proceedWithMismatch' }
@@ -178,7 +178,7 @@ export const ROOM_ACTION_EXAMPLES: { [K in RoomAction['type']]: Extract<RoomActi
   setPermissions: {
     type: 'setPermissions',
     member: 2,
-    permissions: { canPlayPause: true, canSeek: false, canChangeMedia: false, canChangeSpeed: true, canChat: true },
+    permissions: { canPlayPause: true, canSeek: false, canChangeMedia: false, canChangeSpeed: true },
   },
   preset: { type: 'preset', preset: 'onlyMe' },
   kick: { type: 'kick', member: 2 },
@@ -188,7 +188,7 @@ export const ROOM_ACTION_EXAMPLES: { [K in RoomAction['type']]: Extract<RoomActi
   muteChat: { type: 'muteChat', member: 2, muted: true },
   deleteChat: { type: 'deleteChat', id: 41 },
   clearChat: { type: 'clearChat' },
-  chatConfig: { type: 'chatConfig', enabled: false, hiddenFromMembers: true, slowModeSecs: 10 },
+  chatConfig: { type: 'chatConfig', enabled: false, slowModeSecs: 10 },
   localMute: { type: 'localMute', member: 2, muted: true },
   waitForEveryone: { type: 'waitForEveryone', on: true },
   proceedWithMismatch: { type: 'proceedWithMismatch' },
@@ -297,10 +297,28 @@ const PERM_NAMES: [keyof Perms, string][] = [
   ['canSeek', 'seek'],
   ['canChangeSpeed', 'change speed'],
   ['canChangeMedia', 'change the source'],
-  ['canChat', 'chat'],
 ];
 
-/** "You can: chat, seek" summary of a member's own permissions. */
+/** My chat status for the status line: the host always 'on'; muted wins over chat off. */
+export function chatStatus(rs: Pick<RoomState, 'isHost' | 'chatState'>): 'on' | 'muted' | 'off' {
+  if (rs.isHost) return 'on';
+  if (rs.chatState.muted) return 'muted';
+  return rs.chatState.enabled ? 'on' : 'off';
+}
+
+/** Why I cannot send right now (null = I can). These are normal states, not errors. */
+export function chatBlockedReason(rs: Pick<RoomState, 'isHost' | 'chatState'>): string | null {
+  switch (chatStatus(rs)) {
+    case 'muted':
+      return 'You are muted by the host';
+    case 'off':
+      return 'Chat is turned off by the host';
+    default:
+      return null;
+  }
+}
+
+/** "You can: seek, change speed" summary of a member's own permissions. */
 export function permsSummary(p: Perms): string[] {
   return PERM_NAMES.filter(([k]) => p[k]).map(([, name]) => name);
 }

@@ -127,18 +127,26 @@ pub enum Moderation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatConfig {
+    /// Global switch: when off, only the host can send (everyone still sees all messages).
     pub enabled: bool,
-    /// Members receive no chat (only their own echo); the host still sees everything.
-    pub hidden_from_members: bool,
     /// 0 = off.
     pub slow_mode_secs: u16,
+}
+
+/// The chat state of ONE member, pushed by the host to that member on every change (mute,
+/// unmute, chat on/off, slow mode) and carried in every join/reconnect snapshot. The member's
+/// UI derives whether it can chat from this alone. The host is never muted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ChatState {
+    pub config: ChatConfig,
+    /// This member is muted by the host (keyed by identity; survives reconnects).
+    pub muted: bool,
 }
 
 impl Default for ChatConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            hidden_from_members: false,
             slow_mode_secs: 0,
         }
     }
@@ -183,8 +191,8 @@ pub enum Notice {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChatRejectReason {
-    Disabled,
-    NoPermission,
+    /// Chat is turned off for members (the host can still send).
+    ChatDisabled,
     Muted,
     Empty,
     TooLong,
@@ -229,7 +237,8 @@ pub struct Snapshot {
     pub members: Vec<MemberInfo>,
     pub your_permissions: Permissions,
     pub chat: Vec<ChatMessage>,
-    pub chat_config: ChatConfig,
+    /// Your chat state (global switch, slow mode, whether you are muted).
+    pub chat_state: ChatState,
 }
 
 /// Everything that moves with the host role (spec section 9 "Host transfer").
@@ -246,6 +255,8 @@ pub struct HostHandover {
     pub chat: Vec<ChatMessage>,
     pub chat_config: ChatConfig,
     pub chat_next_seq: u64,
+    /// Muted identities (the mute list moves with the host role).
+    pub muted: Vec<Identity>,
     pub bans: Vec<Identity>,
     pub locked: bool,
     pub next_external_id: u32,
@@ -272,7 +283,8 @@ pub enum Command {
     },
     Members(Vec<MemberInfo>),
     ChatModeration(Moderation),
-    ChatConfig(ChatConfig),
+    /// To one member: its chat state changed (sent on every mute/unmute/config change).
+    ChatState(ChatState),
     ReadyGate(GateInfo),
     Notice(Notice),
     Kicked {

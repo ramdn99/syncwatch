@@ -224,7 +224,8 @@ pub enum UiEvent {
     },
     ChatDeleted(ChatId),
     ChatCleared,
-    ChatConfig(ChatConfig),
+    /// My chat state changed (or arrived with a snapshot): can I send, am I muted.
+    ChatState(ChatState),
     Members(Vec<MemberInfo>),
     Permissions(Permissions),
     Gate(GateInfo),

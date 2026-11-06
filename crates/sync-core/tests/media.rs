@@ -289,7 +289,7 @@ fn choose_my_file_works_without_can_change_media() {
         HOST,
         UiAction::ApplyPreset {
             preset: Preset::OnlyMe,
-            custom: Permissions::CHAT_ONLY,
+            custom: Permissions::NONE,
         },
     );
     let mut c = NodeConfig::named("NoPerms");
@@ -534,16 +534,12 @@ fn presets_and_defaults_for_new_joiners() {
         },
     );
     w.run_for(300_000);
-    assert_eq!(member(&w, ids[0]).perms, Permissions::CHAT_ONLY);
-    assert!(
-        member(&w, ids[0]).perms.can_chat,
-        "chat stays on by default"
-    );
+    assert_eq!(member(&w, ids[0]).perms, Permissions::NONE);
     let mut c = NodeConfig::named("New");
     c.file = Some(World::sample_identity());
     let n = w.add_member(c);
     w.run_for(500_000);
-    assert_eq!(member(&w, n).perms, Permissions::CHAT_ONLY);
+    assert_eq!(member(&w, n).perms, Permissions::NONE);
     w.ui(
         HOST,
         UiAction::ApplyPreset {

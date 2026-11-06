@@ -122,7 +122,7 @@ pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Ice coturn -AutoRoom
 |---|---|
 | `-AutoRoom` | window a creates a room, window b joins it |
 | `-Password x` | the auto room uses this password |
-| `-Scenario chat` | scripted end-to-end check through the real UI command path in both windows. It covers: chat both ways, Chat enabled off/on, Hide chat from members, slow mode, delete, clear, mute/unmute. Prints PASS/FAIL per step |
+| `-Scenario chat` | three windows through the real UI command path: chat both ways, mute (refused, still sees chat, still muted after a reconnect), unmute, Chat enabled off/on (only the host can send while off), a late joiner while chat is off, slow mode, delete, clear. Checks the member's chat input in its own window (disabled with the right text, enabled again). Prints PASS/FAIL per step |
 | `-Scenario sync` | real players: play/pause/seek/speed by host and permitted member, refused member seek, audio/subtitle switch, external subtitle + audio sent and selected; prints latencies and position agreement |
 | `-Scenario chattime` | chat chips at 0:10, 5:30 and 1:02:03 of a playing 1 h+ video, paused position, no-media message, ordering with two simultaneous senders |
 | `-Scenario late` | three windows: a late joiner with the mismatch file lands at the host position with the same tracks; a member missing the file does not block |

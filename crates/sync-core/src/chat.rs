@@ -74,9 +74,10 @@ pub fn sanitize_name(name: &str) -> String {
 #[derive(Debug, Clone, Copy)]
 pub struct Submit<'a> {
     pub sender: MemberId,
+    /// Mutes are keyed by identity, so they survive reconnects and host changes.
+    pub sender_identity: Identity,
     pub display_name: &'a str,
     pub is_host: bool,
-    pub can_chat: bool,
     pub mono_us: i64,
     pub wall_ms: i64,
     pub media_epoch: MediaEpoch,
@@ -91,7 +92,7 @@ pub struct ChatEngine {
     pub config: ChatConfig,
     history: VecDeque<ChatMessage>,
     next_seq: u64,
-    muted: HashSet<MemberId>,
+    muted: HashSet<Identity>,
     recent: HashMap<MemberId, VecDeque<i64>>,
     last_accepted: HashMap<MemberId, i64>,
 }
@@ -101,7 +102,7 @@ impl ChatEngine {
         history: Vec<ChatMessage>,
         config: ChatConfig,
         next_seq: u64,
-        muted: Vec<MemberId>,
+        muted: Vec<Identity>,
     ) -> Self {
         Self {
             config,
@@ -113,15 +114,14 @@ impl ChatEngine {
     }
 
     pub fn submit(&mut self, s: Submit<'_>, text: &str) -> Result<ChatMessage, ChatRejectReason> {
+        // The host is never muted and can always send. Members: muted first (if both apply
+        // the member is told it is muted), then the global switch.
         if !s.is_host {
-            if !self.config.enabled {
-                return Err(ChatRejectReason::Disabled);
-            }
-            if self.muted.contains(&s.sender) {
+            if self.muted.contains(&s.sender_identity) {
                 return Err(ChatRejectReason::Muted);
             }
-            if !s.can_chat {
-                return Err(ChatRejectReason::NoPermission);
+            if !self.config.enabled {
+                return Err(ChatRejectReason::ChatDisabled);
             }
         }
         let text = sanitize_text(text)?;
@@ -167,6 +167,7 @@ impl ChatEngine {
         Ok(msg)
     }
 
+    /// Delete / Clear. (Mute and unmute are resolved to identities by the host: set_muted.)
     pub fn moderate(&mut self, m: Moderation) -> bool {
         match m {
             Moderation::Delete(id) => {
@@ -178,16 +179,24 @@ impl ChatEngine {
                 self.history.clear();
                 true
             }
-            Moderation::Mute(who) => self.muted.insert(who),
-            Moderation::Unmute(who) => self.muted.remove(&who),
+            Moderation::Mute(_) | Moderation::Unmute(_) => false,
         }
     }
 
-    pub fn is_muted(&self, m: MemberId) -> bool {
-        self.muted.contains(&m)
+    /// Returns true when the state changed.
+    pub fn set_muted(&mut self, who: Identity, muted: bool) -> bool {
+        if muted {
+            self.muted.insert(who)
+        } else {
+            self.muted.remove(&who)
+        }
     }
 
-    pub fn muted(&self) -> Vec<MemberId> {
+    pub fn is_muted(&self, who: &Identity) -> bool {
+        self.muted.contains(who)
+    }
+
+    pub fn muted(&self) -> Vec<Identity> {
         self.muted.iter().copied().collect()
     }
 

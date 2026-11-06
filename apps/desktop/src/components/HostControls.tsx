@@ -1,13 +1,13 @@
 import { useState } from 'react';
 import type { Track, TrackSelection } from '../lib/player';
-import { permsSummary, type RoomAction, type RoomState } from '../lib/room';
+import { chatStatus, permsSummary, type RoomAction, type RoomState } from '../lib/room';
 import { TrackList } from './TrackList';
 
 type Preset = 'everyone' | 'onlyMe';
 
 export interface HostControlsProps {
   isHost: boolean;
-  room: Pick<RoomState, 'locked' | 'chatConfig' | 'myPermissions' | 'externals' | 'declined' | 'active'>;
+  room: Pick<RoomState, 'locked' | 'chatState' | 'myPermissions' | 'isHost' | 'externals' | 'declined' | 'active'>;
   /** Host: send external files above the 1 GB audio / 20 MB subtitle ceilings. */
   noLimit?: boolean;
   onNoLimit?: (on: boolean) => void;
@@ -25,7 +25,7 @@ export function HostControls(p: HostControlsProps) {
   const { isHost, room } = p;
   const [preset, setPreset] = useState<Preset | null>(null);
   const [waitForEveryone, setWaitForEveryone] = useState(false);
-  const cc = room.chatConfig;
+  const cc = { enabled: room.chatState.enabled, slowModeSecs: room.chatState.slowModeSecs };
   const canChangeSource = isHost || room.myPermissions.canChangeMedia;
   return (
     <div className="space-y-3 p-3">
@@ -63,7 +63,7 @@ export function HostControls(p: HostControlsProps) {
           <span className="block text-xs text-muted">Local file or torrent magnet</span>
         </button>
       )}
-      {!isHost && <MyPermissions perms={room.myPermissions} />}
+      {!isHost && <MyPermissions perms={room.myPermissions} chat={chatStatus(room)} />}
       {p.hasMissingFile && (
         <button type="button" className="w-full rounded-md border border-border px-3 py-1.5 text-left text-sm hover:border-accent" onClick={p.onChooseFile}>
           Choose a different file...
@@ -108,16 +108,7 @@ export function HostControls(p: HostControlsProps) {
               />
               Chat enabled
             </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={cc.hiddenFromMembers}
-                onChange={(e) => p.onAction({ type: 'chatConfig', ...cc, hiddenFromMembers: e.target.checked })}
-                className="accent-[#E8A33D]"
-              />
-              Hide chat from members
-            </label>
-            <label className="flex items-center gap-2">
+<label className="flex items-center gap-2">
               Slow mode
               <select
                 value={cc.slowModeSecs}
@@ -142,7 +133,7 @@ export function HostControls(p: HostControlsProps) {
 }
 
 /** A member's own current permissions, read-only, updated live when the host changes them. */
-export function MyPermissions({ perms }: { perms: RoomState['myPermissions'] }) {
+export function MyPermissions({ perms, chat = 'on' }: { perms: RoomState['myPermissions']; chat?: 'on' | 'muted' | 'off' }) {
   const can = permsSummary(perms);
   return (
     <div className="rounded-md bg-elevated px-3 py-2 text-xs" aria-label="Your permissions" data-testid="my-permissions">
@@ -156,6 +147,10 @@ export function MyPermissions({ perms }: { perms: RoomState['myPermissions'] }) 
           ))}
         </ul>
       )}
+      <p className="mt-1" data-testid="my-chat-status">
+        <span className="text-muted">Chat: </span>
+        <span className={chat === 'on' ? 'text-text' : 'text-warning'}>{chat === 'on' ? 'on' : chat === 'muted' ? 'muted' : 'off'}</span>
+      </p>
       <p className="mt-1 text-muted">Tracks and permissions are set by the host.</p>
     </div>
   );
