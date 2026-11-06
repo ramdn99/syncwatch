@@ -461,3 +461,50 @@ fn no_rate_limiter_and_control_latency_stays_bounded() {
     );
     let _ = World::sample_identity();
 }
+
+#[test]
+fn transfer_resumes_after_a_disconnect() {
+    let (mut w, ids) = room(1, 29);
+    let m = ids[0];
+    let audio: Vec<u8> = (0..4_000_000u32).map(|i| (i % 251) as u8).collect();
+    let a = w.host_add_external(ExternalKind::Audio, "dub.mka", "mka", audio.clone());
+    w.run_for(300_000);
+    let partial = w.nodes[m].ext_files.get(&a).map(Vec::len).unwrap_or(0);
+    assert!(
+        partial > 0 && partial < audio.len(),
+        "download under way ({partial} bytes)"
+    );
+    // The link drops for a few seconds, then the member reconnects (seat kept).
+    w.disconnect(m);
+    w.run_for(3_000_000);
+    w.nodes[m].connected = true;
+    let (id, identity) = (w.nodes[m].id, w.nodes[m].identity);
+    let h = w.host_idx();
+    w.deliver_event(
+        h,
+        Event::PeerJoined {
+            member: id,
+            identity,
+            display_name: "again".into(),
+        },
+    );
+    w.run_for(5_000_000);
+    assert_eq!(
+        w.nodes[m].ext_files.get(&a),
+        Some(&audio),
+        "complete and identical"
+    );
+    assert!(w.nodes[m].ext_complete.contains(&a));
+    let resumed = w.nodes[m].sent.iter().any(|(_, msg)| {
+        matches!(msg, Message::FileRequest { external_id, offset } if *external_id == a && *offset > 0)
+    });
+    assert!(
+        resumed,
+        "the download resumed from its offset instead of starting over"
+    );
+    assert!(
+        w.nodes[m].violations.is_empty(),
+        "{:?}",
+        w.nodes[m].violations
+    );
+}

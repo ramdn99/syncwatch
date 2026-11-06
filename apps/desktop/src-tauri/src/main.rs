@@ -10,6 +10,7 @@ mod native;
 mod netlab;
 mod paths;
 mod room;
+mod roommedia;
 #[cfg(test)]
 mod secrets_for_tests;
 

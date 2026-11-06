@@ -40,7 +40,7 @@ describe('diagnostics text', () => {
       active: true,
       isHost: true,
       phase: 'inRoom',
-      chat: [{ id: 1, sender: 2, name: 'Mo', isHost: false, text: 'my secret chat text', wallMs: 0, mediaTimeMs: null, divider: null }],
+      chat: [{ id: 1, sender: 2, name: 'Mo', isHost: false, text: 'my secret chat text', wallMs: 0, mediaTimeMs: null, mediaEpoch: 0, divider: null }],
       diag: {
         signalingHost: '127.0.0.1:8787',
         signalingConnected: true,

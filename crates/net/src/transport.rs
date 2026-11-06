@@ -6,13 +6,16 @@ use syncwatch_protocol::signaling::SignalData;
 /// Local handle of one peer connection inside the bridge.
 pub type PeerId = u32;
 
-/// Data channels per peer: reliable+ordered (control, chat, file chunks) and
-/// unordered+no-retransmit (heartbeats, clock pings).
+/// Data channels per peer: reliable+ordered (control, chat), unordered+no-retransmit
+/// (heartbeats, clock pings) and a reliable bulk channel (external-file chunks).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Lane {
     Reliable = 0,
     Unreliable = 1,
+    /// Reliable+ordered channel for external-file chunks only. A separate SCTP stream, so
+    /// bulk bytes never queue in front of control and chat messages.
+    Bulk = 2,
 }
 
 impl Lane {
@@ -20,6 +23,7 @@ impl Lane {
         match v {
             0 => Some(Lane::Reliable),
             1 => Some(Lane::Unreliable),
+            2 => Some(Lane::Bulk),
             _ => None,
         }
     }

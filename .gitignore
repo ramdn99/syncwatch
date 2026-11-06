@@ -46,3 +46,6 @@ apps/desktop/public/fonts/
 # local graphify knowledge graph and Claude Code hooks (not committed)
 graphify-out/
 .claude/settings.json
+
+# Stray temp files of dev runs
+/.tmp

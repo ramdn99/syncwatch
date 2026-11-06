@@ -37,7 +37,7 @@ type Command =
 
 interface Peer {
   pc: RTCPeerConnection;
-  lanes: [RTCDataChannel, RTCDataChannel];
+  lanes: [RTCDataChannel, RTCDataChannel, RTCDataChannel];
   pending: RTCIceCandidateInit[];
   remoteSet: boolean;
   opened: boolean;
@@ -104,7 +104,7 @@ function sendData(peer: number, lane: number, payload: ArrayBuffer) {
 }
 
 function reportCredit(id: number, p: Peer) {
-  sendJson({ ev: 'buffered', peer: id, rx: p.rx, buffered: p.lanes[0].bufferedAmount + p.lanes[1].bufferedAmount });
+  sendJson({ ev: 'buffered', peer: id, rx: p.rx, buffered: p.lanes[0].bufferedAmount + p.lanes[1].bufferedAmount + p.lanes[2].bufferedAmount });
 }
 
 function closePeer(id: number, reason: string, notify = true) {
@@ -151,7 +151,9 @@ function createPeer(id: number, offerer: boolean, ice: IceConfig) {
   const pc = new RTCPeerConnection({ iceServers: ice.iceServers, iceTransportPolicy: ice.relayOnly ? 'relay' : 'all' });
   const reliable = pc.createDataChannel('r', { negotiated: true, id: 0, ordered: true });
   const unreliable = pc.createDataChannel('u', { negotiated: true, id: 1, ordered: false, maxRetransmits: 0 });
-  const p: Peer = { pc, lanes: [reliable, unreliable], pending: [], remoteSet: false, opened: false, dropped: false, rx: 0 };
+  // External-file chunks: their own SCTP stream, so they never delay control messages.
+  const bulk = pc.createDataChannel('b', { negotiated: true, id: 2, ordered: true });
+  const p: Peer = { pc, lanes: [reliable, unreliable, bulk], pending: [], remoteSet: false, opened: false, dropped: false, rx: 0 };
   peers.set(id, p);
   p.lanes.forEach((ch, lane) => {
     ch.binaryType = 'arraybuffer';

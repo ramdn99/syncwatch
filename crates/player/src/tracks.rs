@@ -75,6 +75,9 @@ pub struct Track {
     pub forced: bool,
     /// Channel count for audio, if known.
     pub channels: Option<i64>,
+    /// For external tracks: the file mpv loaded it from (maps room externals to local ids).
+    #[serde(default, skip_serializing)]
+    pub external_filename: Option<String>,
 }
 
 impl Track {
@@ -151,6 +154,7 @@ where
             default: f(format!("{p}/default")),
             forced: f(format!("{p}/forced")),
             channels: i(format!("{p}/demux-channel-count")),
+            external_filename: s(format!("{p}/external-filename")),
         });
     }
     out
@@ -231,6 +235,7 @@ mod tests {
             default: false,
             forced: false,
             channels: None,
+            external_filename: None,
         };
         assert_eq!(t.label(), "Track 7");
     }

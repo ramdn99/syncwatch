@@ -21,7 +21,7 @@ use syncwatch_net::*;
 use syncwatch_player::Player;
 use syncwatch_protocol::signaling::normalize_room_code;
 use syncwatch_protocol::*;
-use syncwatch_sync_core::{Clock, Event, LocalFileEvent, PlayerCmd, UiAction, UiEvent};
+use syncwatch_sync_core::{Clock, Event, LocalFileEvent, UiAction, UiEvent};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 
@@ -145,6 +145,7 @@ pub struct ChatDto {
     text: String,
     wall_ms: i64,
     media_time_ms: Option<i64>,
+    media_epoch: u64,
     /// A "Now playing" divider instead of a message.
     divider: Option<String>,
 }
@@ -232,6 +233,42 @@ pub struct RoomStateDto {
     /// The member typed a password but the room has none (it was ignored).
     password_ignored: bool,
     diag: DiagDto,
+    /// The room's current media epoch (chat chips of older epochs are not seekable).
+    media_epoch: u64,
+    media_duration_ms: Option<i64>,
+    gate: GateDto,
+    externals: Vec<ExternalDto>,
+    /// Host: members who declined an external file.
+    declined: Vec<String>,
+    /// Late joiner / reconnect: loading and catching up.
+    joining: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GateDto {
+    active: bool,
+    waiting: Vec<GateWaitDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GateWaitDto {
+    member: u32,
+    name: String,
+    reason: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalDto {
+    id: u32,
+    kind: &'static str,
+    name: String,
+    size: u64,
+    /// Member: bytes received so far (None = not downloading).
+    received: Option<u64>,
+    failed: bool,
 }
 
 fn media_text(m: MediaStatus) -> &'static str {
@@ -349,6 +386,44 @@ impl Mirror {
                 what,
                 count: 1,
             }),
+        }
+    }
+
+    /// The manifest as the UI shows it (names, sizes, my progress).
+    fn set_manifest(&mut self, manifest: &[ExternalEntry]) {
+        let old = std::mem::take(&mut self.s.externals);
+        self.s.externals = manifest
+            .iter()
+            .map(|e| {
+                let prev = old.iter().find(|o| o.id == e.external_id.0);
+                ExternalDto {
+                    id: e.external_id.0,
+                    kind: match e.kind {
+                        ExternalKind::Audio => "audio",
+                        ExternalKind::Subtitle => "sub",
+                    },
+                    name: e.display_name.clone(),
+                    size: e.size,
+                    received: prev.and_then(|p| p.received),
+                    failed: prev.is_some_and(|p| p.failed),
+                }
+            })
+            .collect();
+    }
+
+    fn declined(&mut self, member: u32, id: ExternalId) {
+        let who = self.name_of(member);
+        let file = self
+            .s
+            .externals
+            .iter()
+            .find(|e| e.id == id.0)
+            .map(|e| e.name.clone())
+            .unwrap_or_else(|| format!("file {}", id.0));
+        let line = format!("{who} declined {file}");
+        self.event(line.clone());
+        if !self.s.declined.contains(&line) {
+            self.s.declined.push(line);
         }
     }
 
@@ -480,6 +555,56 @@ impl Mirror {
 
     fn apply_core(&mut self, ev: UiEvent) {
         match ev {
+            UiEvent::Joining => {
+                self.event("joining: loading and catching up");
+                self.s.joining = true;
+            }
+            UiEvent::Gate(g) => {
+                if g.active != self.s.gate.active {
+                    self.event(if g.active {
+                        "waiting for members (ready gate)"
+                    } else {
+                        "ready gate released"
+                    });
+                }
+                self.s.gate = GateDto {
+                    active: g.active,
+                    waiting: g
+                        .waiting
+                        .iter()
+                        .map(|(m, r)| GateWaitDto {
+                            member: m.0,
+                            name: self.name_of(m.0),
+                            reason: match r {
+                                NotReadyReason::MissingFile => "missing the file",
+                                NotReadyReason::Verifying => "verifying the file",
+                                NotReadyReason::Downloading => "downloading",
+                                NotReadyReason::Buffering => "buffering",
+                                NotReadyReason::Loading => "loading",
+                            },
+                        })
+                        .collect(),
+                };
+            }
+            UiEvent::ExternalProgress {
+                external_id,
+                received,
+                ..
+            } => {
+                if let Some(e) = self.s.externals.iter_mut().find(|e| e.id == external_id.0) {
+                    e.received = Some(received);
+                }
+            }
+            UiEvent::ExternalFailed(id) => {
+                self.event(format!("external file {} failed verification", id.0));
+                if let Some(e) = self.s.externals.iter_mut().find(|e| e.id == id.0) {
+                    e.failed = true;
+                }
+            }
+            UiEvent::TrackUnresolved { kind } => {
+                self.event(format!("the host's {kind:?} track is not in your file"));
+                self.toast("The host's selected track does not exist in your copy of the video.");
+            }
             UiEvent::Joined { me } => {
                 self.s.me = Some(me.0);
                 self.rebuild_members();
@@ -503,6 +628,7 @@ impl Mirror {
                     text: c.text,
                     wall_ms: c.host_wall_ms,
                     media_time_ms: c.media_time_ms,
+                    media_epoch: c.media_epoch.0,
                     divider: None,
                 };
                 match self
@@ -576,6 +702,7 @@ impl Mirror {
                         text: String::new(),
                         wall_ms: 0,
                         media_time_ms: None,
+                        media_epoch: 0,
                         divider: Some(format!("Now playing: {t}")),
                     });
                 }
@@ -616,6 +743,13 @@ impl Mirror {
 enum Cmd {
     Action(Action),
     Core(Event),
+    /// Host: select a track by its local player id (None = off).
+    SelectTrack {
+        kind: syncwatch_player::TrackKind,
+        track_id: Option<i64>,
+    },
+    /// Host: a validated, hashed external file to add to the room.
+    AddExternal(crate::roommedia::PreparedExternal, ExternalKind),
 }
 
 pub struct RoomManager {
@@ -626,6 +760,13 @@ pub struct RoomManager {
     /// The local file this member chose (never sent anywhere).
     chosen: Mutex<Option<PathBuf>>,
     sessions: std::sync::atomic::AtomicU32,
+    /// Player events for the active room.
+    player_tx: Mutex<Option<mpsc::UnboundedSender<syncwatch_player::PlayerEvent>>>,
+    /// Root of the per-room caches.
+    rooms_cache: PathBuf,
+    /// (The per-room caches live in the app cache folder under rooms, one folder per room.)
+    /// The next added external file must not go to relayed members (host choice).
+    skip_next_relayed: std::sync::atomic::AtomicBool,
 }
 
 /// Clears EVERYTHING a room leaves behind in this app process: the player is stopped and
@@ -658,6 +799,21 @@ impl RoomManager {
             state: Mutex::new(RoomStateDto::default()),
             chosen: Mutex::new(None),
             sessions: std::sync::atomic::AtomicU32::new(0),
+            player_tx: Mutex::new(None),
+            rooms_cache: {
+                // Leftovers from a crash: nothing from an old room may survive.
+                let dir = paths.cache.join("rooms");
+                let _ = std::fs::remove_dir_all(&dir);
+                dir
+            },
+            skip_next_relayed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Player events reach the active room through this (called by the player event thread).
+    pub fn player_event(&self, ev: &syncwatch_player::PlayerEvent) {
+        if let Some(tx) = self.player_tx.lock().ok().and_then(|g| g.clone()) {
+            let _ = tx.send(ev.clone());
         }
     }
 
@@ -820,8 +976,12 @@ async fn start(app: AppHandle, name: String, mode: Mode) -> Result<EntryOutcome,
     };
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (tr_tx, tr_rx) = mpsc::unbounded_channel();
+    let (pl_tx, pl_rx) = mpsc::unbounded_channel();
     if let Ok(mut g) = m.cmd.lock() {
         *g = Some(cmd_tx);
+    }
+    if let Ok(mut g) = m.player_tx.lock() {
+        *g = Some(pl_tx);
     }
     if let Ok(mut g) = m.transport.lock() {
         *g = Some(tr_tx);
@@ -831,14 +991,18 @@ async fn start(app: AppHandle, name: String, mode: Mode) -> Result<EntryOutcome,
     let session_id = m.sessions.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
+        let chans = Chans {
+            cmd: cmd_rx,
+            tr: tr_rx,
+            pl: pl_rx,
+        };
         let ended = drive(
             app2.clone(),
             cfg,
             mode,
             sig,
             DriveIds { url, session_id },
-            cmd_rx,
-            tr_rx,
+            chans,
         )
         .await;
         let m = app2.state::<RoomManager>();
@@ -850,6 +1014,9 @@ async fn start(app: AppHandle, name: String, mode: Mode) -> Result<EntryOutcome,
             *g = None;
         }
         if let Ok(mut g) = m.transport.lock() {
+            *g = None;
+        }
+        if let Ok(mut g) = m.player_tx.lock() {
             *g = None;
         }
     });
@@ -880,82 +1047,137 @@ struct DriveIds {
     session_id: u32,
 }
 
+/// The driver's receivers.
+struct Chans {
+    cmd: mpsc::UnboundedReceiver<Cmd>,
+    tr: mpsc::UnboundedReceiver<TransportEvent>,
+    pl: mpsc::UnboundedReceiver<syncwatch_player::PlayerEvent>,
+}
+
+/// Everything the driver loop owns besides the session.
+struct Rt {
+    app: AppHandle,
+    bridge: Arc<Bridge>,
+    player: Arc<syncwatch_player::mpv::MpvPlayer>,
+    sig: Option<SignalingConn>,
+    mirror: Mirror,
+    media: crate::roommedia::MediaCtx,
+    /// Host: files (by blake3) the host chose not to send to relayed members (quota).
+    skip_relayed: std::collections::HashSet<[u8; 32]>,
+    /// Member: manifest entries already checked against the per-room cache.
+    checked_cache: std::collections::HashSet<ExternalId>,
+}
+
+/// Position reports to sync-core (the drift controller and the chat timestamps).
+const POSITION_EVERY: Duration = Duration::from_millis(100);
+/// Upper bound of chunks queued per loop turn (the bridge credit is the real limit).
+const UPLOAD_BURST: usize = 256;
+
 async fn drive(
     app: AppHandle,
     cfg: SessionConfig,
     mode: Mode,
     sig: SignalingConn,
     ids: DriveIds,
-    mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
-    mut tr_rx: mpsc::UnboundedReceiver<TransportEvent>,
+    mut ch: Chans,
 ) -> Option<EndReason> {
     let DriveIds { url, session_id } = ids;
     let epoch = Instant::now();
-    let bridge = Arc::clone(&*app.state::<Arc<Bridge>>());
-    let mut sig = Some(sig);
+    let rooms_cache = app.state::<RoomManager>().rooms_cache.clone();
+    let mut rt = Rt {
+        bridge: Arc::clone(&*app.state::<Arc<Bridge>>()),
+        player: Arc::clone(&app.state::<AppState>().player),
+        app: app.clone(),
+        sig: Some(sig),
+        mirror: Mirror::default(),
+        media: crate::roommedia::MediaCtx::new(rooms_cache.join(session_id.to_string())),
+        skip_relayed: Default::default(),
+        checked_cache: Default::default(),
+    };
     let mut reconnect_at: Option<Instant> = None;
     let mut backoff = Duration::from_secs(1);
-    let mut mirror = Mirror::default();
-    mirror.s.active = true;
-    mirror.s.session_id = session_id;
-    mirror.t0 = Some(epoch);
-    mirror.s.diag.signaling_host = signaling_host(&url);
-    mirror.s.diag.signaling_connected = true;
-    mirror.event("signaling connected");
+    rt.mirror.s.active = true;
+    rt.mirror.s.session_id = session_id;
+    rt.mirror.t0 = Some(epoch);
+    rt.mirror.s.diag.signaling_host = signaling_host(&url);
+    rt.mirror.s.diag.signaling_connected = true;
+    rt.mirror.event("signaling connected");
     let (mut session, outs) = match mode {
         Mode::Create { password } => {
-            mirror.s.has_password = password.is_some();
+            rt.mirror.s.has_password = password.is_some();
             RoomSession::create(cfg, password, clock(epoch))
         }
         Mode::Join { room, password } => RoomSession::join(cfg, room, password, clock(epoch)),
     };
-    let mut ended = exec(&app, &bridge, &mut sig, &mut mirror, &session, outs).await;
-    publish(&app, &mut mirror, &session);
+    let mut ended = exec(&mut rt, &session, outs).await;
+    publish(&app, &mut rt, &session);
     let mut last_soak = Instant::now();
+    let mut last_pos = Instant::now();
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     while !ended {
         let input = tokio::select! {
-            m = recv_sig(&mut sig) => match m {
+            m = recv_sig(&mut rt.sig) => match m {
                 Ok(m) => Some(Input::Signaling(m)),
                 Err(()) => {
                     tracing::warn!("signaling connection lost; reconnecting");
-                    mirror.s.diag.signaling_connected = false;
-                    mirror.event("signaling connection lost; reconnecting");
-                    sig = None;
+                    rt.mirror.s.diag.signaling_connected = false;
+                    rt.mirror.event("signaling connection lost; reconnecting");
+                    rt.sig = None;
                     reconnect_at = Some(Instant::now() + backoff);
                     None
                 }
             },
-            ev = tr_rx.recv() => ev.map(Input::Transport),
-            c = cmd_rx.recv() => match c {
+            ev = ch.tr.recv() => ev.map(Input::Transport),
+            pe = ch.pl.recv() => pe.and_then(|ev| {
+                crate::roommedia::player_obs(&rt.media, &*rt.player, &ev)
+                    .map(|o| Input::Core(Event::Player(o)))
+            }),
+            c = ch.cmd.recv() => match c {
                 Some(Cmd::Action(a)) => Some(Input::Action(a)),
                 Some(Cmd::Core(e)) => {
                     if matches!(e, Event::LocalFile(LocalFileEvent::Verifying)) {
-                        mirror.file_chosen();
+                        rt.mirror.file_chosen();
                     }
                     Some(Input::Core(e))
+                }
+                Some(Cmd::SelectTrack { kind, track_id }) => {
+                    select_track_action(&rt, kind, track_id).map(|a| Input::Action(Action::Ui(a)))
+                }
+                Some(Cmd::AddExternal(p, kind)) => {
+                    rt.mirror.event(format!("external file added: {}", p.display_name));
+                    if rt.app.state::<RoomManager>().skip_next_relayed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        rt.skip_relayed.insert(p.blake3);
+                    }
+                    rt.media.host_prepared(p.blake3, p.path.clone());
+                    Some(Input::Action(Action::Ui(UiAction::AddExternal {
+                        kind,
+                        display_name: p.display_name,
+                        format: p.format,
+                        size: p.size,
+                        blake3: p.blake3,
+                    })))
                 }
                 None => Some(Input::Action(Action::Leave)),
             },
             _ = tick.tick() => Some(Input::Tick),
         };
-        if sig.is_none() && reconnect_at.is_some_and(|t| Instant::now() >= t) {
+        if rt.sig.is_none() && reconnect_at.is_some_and(|t| Instant::now() >= t) {
             match SignalingConn::connect(&url).await {
                 Ok(s) => {
                     tracing::info!("signaling reconnected");
-                    mirror.s.diag.signaling_connected = true;
-                    mirror.s.diag.signaling_reconnects += 1;
-                    mirror.event("signaling reconnected");
-                    sig = Some(s);
+                    rt.mirror.s.diag.signaling_connected = true;
+                    rt.mirror.s.diag.signaling_reconnects += 1;
+                    rt.mirror.event("signaling reconnected");
+                    rt.sig = Some(s);
                     reconnect_at = None;
                     backoff = Duration::from_secs(1);
                     let outs = session.handle(clock(epoch), Input::SignalingReconnected);
-                    ended |= exec(&app, &bridge, &mut sig, &mut mirror, &session, outs).await;
+                    ended |= exec(&mut rt, &session, outs).await;
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "signaling reconnect failed");
-                    mirror.event(format!("signaling reconnect failed: {e}"));
+                    rt.mirror.event(format!("signaling reconnect failed: {e}"));
                     backoff = (backoff * 2).min(Duration::from_secs(30));
                     reconnect_at = Some(Instant::now() + backoff);
                 }
@@ -963,27 +1185,148 @@ async fn drive(
         }
         if let Some(input) = input {
             let outs = session.handle(clock(epoch), input);
-            ended |= exec(&app, &bridge, &mut sig, &mut mirror, &session, outs).await;
+            ended |= exec(&mut rt, &session, outs).await;
         }
-        publish(&app, &mut mirror, &session);
+        // The real player's position feeds sync-core (drift correction, ready gate, chat).
+        if !ended && last_pos.elapsed() >= POSITION_EVERY {
+            last_pos = Instant::now();
+            if let Some(o) = crate::roommedia::position_obs(&*rt.player) {
+                let outs = session.handle(clock(epoch), Input::Core(Event::Player(o)));
+                ended |= exec(&mut rt, &session, outs).await;
+            }
+        }
+        if !ended {
+            ended |= after_step(&mut rt, &mut session, epoch).await;
+            pump_uploads(&mut rt, &session);
+        }
+        publish(&app, &mut rt, &session);
         if last_soak.elapsed() >= Duration::from_secs(5) {
             last_soak = Instant::now();
-            write_soak(&mirror, epoch, false);
+            write_soak(&rt.mirror, epoch, false);
         }
     }
-    mirror.s.active = false;
-    publish(&app, &mut mirror, &session);
-    write_soak(&mirror, epoch, true);
+    rt.mirror.s.active = false;
+    publish(&app, &mut rt, &session);
+    write_soak(&rt.mirror, epoch, true);
+    // The per-room cache and every pending transfer go with the room.
+    rt.media.clear();
     tracing::info!("room session ended");
-    mirror.s.ended.clone()
+    rt.mirror.s.ended.clone()
 }
 
+/// Host: room-level selection for a local player track (None = off).
+fn select_track_action(
+    rt: &Rt,
+    kind: syncwatch_player::TrackKind,
+    track_id: Option<i64>,
+) -> Option<UiAction> {
+    let sel = match track_id {
+        None => Selection::Off,
+        Some(id) => {
+            let t = rt
+                .player
+                .tracks()
+                .into_iter()
+                .find(|t| t.kind == kind && t.id == id)?;
+            Selection::Track(rt.media.track_ref(&t)?)
+        }
+    };
+    match kind {
+        syncwatch_player::TrackKind::Audio => Some(UiAction::SelectAudio(sel)),
+        syncwatch_player::TrackKind::Sub => Some(UiAction::SelectSub(sel)),
+        syncwatch_player::TrackKind::Video => None,
+    }
+}
+
+/// Manifest bookkeeping after each step: the host maps its prepared files to manifest ids;
+/// a member reuses identical files already in the per-room cache instead of downloading.
+async fn after_step(rt: &mut Rt, session: &mut RoomSession, epoch: Instant) -> bool {
+    let manifest = session.peer().local().tracks.desired.manifest.clone();
+    rt.mirror.set_manifest(&manifest);
+    if session.is_host() {
+        rt.media.sync_manifest(&manifest);
+        return false;
+    }
+    let mut ended = false;
+    for e in &manifest {
+        if rt.checked_cache.insert(e.external_id) && rt.media.cached_identical(e) {
+            tracing::info!(
+                id = e.external_id.0,
+                "identical external file already cached; no transfer"
+            );
+            let outs = session.handle(
+                clock(epoch),
+                Input::Core(Event::ExternalCached(e.external_id)),
+            );
+            ended |= exec(rt, session, outs).await;
+        }
+    }
+    ended
+}
+
+/// Streams external-file chunks as fast as the bridge's bulk credit allows (no rate limiter;
+/// chunks use their own data channel, so control and chat are never queued behind them).
+fn pump_uploads(rt: &mut Rt, session: &RoomSession) {
+    let mut i = 0;
+    while i < rt.media.uploads.len() {
+        let (to, id) = (rt.media.uploads[i].to, rt.media.uploads[i].id);
+        let Some(peer) = session.member_peer(to) else {
+            i += 1;
+            continue;
+        };
+        let hash = session
+            .peer()
+            .local()
+            .tracks
+            .desired
+            .manifest
+            .iter()
+            .find(|e| e.external_id == id)
+            .map(|e| e.blake3);
+        if hash.is_some_and(|h| rt.skip_relayed.contains(&h)) && session.member_relayed(to) {
+            tracing::info!(
+                member = to.0,
+                id = id.0,
+                "not sending to a relayed member (host's choice)"
+            );
+            rt.media.uploads.remove(i);
+            continue;
+        }
+        let mut sent = 0;
+        let mut finished = false;
+        while sent < UPLOAD_BURST && rt.bridge.can_send_bulk(peer) {
+            match rt.media.next_chunk(i) {
+                Some(msg) => {
+                    for o in session.send_to_member(to, &msg) {
+                        if let Output::Send { peer, lane, data } = o {
+                            let _ = rt.bridge.send(peer, lane, data);
+                        }
+                    }
+                    sent += 1;
+                }
+                None => {
+                    finished = true;
+                    break;
+                }
+            }
+        }
+        if finished {
+            rt.media.uploads.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
 /// Debug builds: SYNCWATCH_DEV_SOAK_FILE receives banner counters (scripts/dev/two-windows.ps1).
 fn write_soak(mirror: &Mirror, epoch: Instant, done: bool) {
     if !cfg!(debug_assertions) {
         return;
     }
-    let Ok(path) = std::env::var("SYNCWATCH_DEV_SOAK_FILE") else {
+    // An empty value (the dev script sets it for every window) means "no soak file".
+    let Some(path) = std::env::var("SYNCWATCH_DEV_SOAK_FILE")
+        .ok()
+        .filter(|p| !p.is_empty())
+    else {
         return;
     };
     let members_disconnected = mirror.s.members.iter().filter(|m| !m.connected).count();
@@ -1006,7 +1349,20 @@ fn write_soak(mirror: &Mirror, epoch: Instant, done: bool) {
 }
 
 /// Pushes the UI mirror to the window when it changed.
-fn publish(app: &AppHandle, mirror: &mut Mirror, session: &RoomSession) {
+fn publish(app: &AppHandle, rt: &mut Rt, session: &RoomSession) {
+    let mirror = &mut rt.mirror;
+    let local = session.peer().local();
+    mirror.s.media_epoch = local.room.media_epoch.0;
+    let ps = rt.player.state();
+    mirror.s.media_duration_ms = ps
+        .duration
+        .map(|d| (d * 1000.0) as i64)
+        .or(local.duration_ms);
+    if mirror.s.joining
+        && (local.descriptor.is_none() || ps.file_loaded || local.media == MediaStatus::Missing)
+    {
+        mirror.s.joining = false;
+    }
     mirror.s.is_host = session.is_host();
     if session.is_host() {
         mirror.s.me = Some(session.peer().local().me.0);
@@ -1036,77 +1392,109 @@ fn publish(app: &AppHandle, mirror: &mut Mirror, session: &RoomSession) {
 }
 
 /// Executes session outputs. Returns true when the session ended.
-async fn exec(
-    app: &AppHandle,
-    bridge: &Arc<Bridge>,
-    sig: &mut Option<SignalingConn>,
-    mirror: &mut Mirror,
-    session: &RoomSession,
-    outs: Vec<Output>,
-) -> bool {
+async fn exec(rt: &mut Rt, session: &RoomSession, outs: Vec<Output>) -> bool {
     let mut ended = false;
     for o in outs {
         match o {
             Output::Signaling(m) => {
-                if let Some(s) = sig.as_mut()
+                if let Some(s) = rt.sig.as_mut()
                     && s.send(&m).await.is_err()
                 {
-                    *sig = None;
+                    rt.sig = None;
                 }
             }
             Output::CreatePeer { peer, role, ice } => {
-                if let Err(e) = bridge.create_peer(peer, role, ice) {
+                if let Err(e) = rt.bridge.create_peer(peer, role, ice) {
                     tracing::warn!(error = %e, "could not create a peer connection");
                 }
             }
             Output::RemoteSignal { peer, data } => {
-                let _ = bridge.remote_signal(peer, data);
+                let _ = rt.bridge.remote_signal(peer, data);
             }
             Output::Send { peer, lane, data } => {
-                let _ = bridge.send(peer, lane, data);
+                let _ = rt.bridge.send(peer, lane, data);
             }
-            Output::ClosePeer(peer) => bridge.close_peer(peer),
-            Output::Player(cmd) => player_cmd(app, cmd),
-            Output::Core(e) => {
-                tracing::debug!(effect = ?std::mem::discriminant(&e), "effect for a later milestone")
+            Output::ClosePeer(peer) => rt.bridge.close_peer(peer),
+            Output::Player(cmd) => {
+                let chosen = rt
+                    .app
+                    .state::<RoomManager>()
+                    .chosen
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.clone());
+                // The host's own new external file: sync-core asks to add it in the same step
+                // that created its manifest id, so map prepared files to ids first.
+                if matches!(cmd, syncwatch_sync_core::PlayerCmd::AddExternal { .. })
+                    && session.is_host()
+                {
+                    rt.media
+                        .sync_manifest(&session.peer().local().tracks.desired.manifest);
+                }
+                rt.media.player_cmd(&*rt.player, chosen.as_deref(), cmd);
             }
-            Output::Ui(u) => mirror.apply(u),
+            Output::Core(e) => core_effect(rt, session, e),
+            Output::Ui(u) => rt.mirror.apply(u),
             Output::Ended(r) => {
                 tracing::info!(reason = ?r, "left the room");
-                mirror.event(format!("session ended: {r:?}"));
-                mirror.s.ended = Some(r);
+                rt.mirror.event(format!("session ended: {r:?}"));
+                rt.mirror.s.ended = Some(r);
                 ended = true;
             }
         }
     }
-    let _ = session;
     ended
 }
 
-/// Player commands from the room. Milestone 5 loads the chosen file; synchronized playback
-/// control of the real player is Milestone 6.
-fn player_cmd(app: &AppHandle, cmd: PlayerCmd) {
-    match cmd {
-        PlayerCmd::LoadLocal => {
-            let path = app
-                .state::<RoomManager>()
-                .chosen
-                .lock()
-                .ok()
-                .and_then(|g| g.clone());
-            if let Some(p) = path {
-                let st = app.state::<AppState>();
-                if let Err(e) = st.player.load(&p.to_string_lossy()) {
-                    tracing::warn!(error = %e, "could not load the chosen file");
-                }
+/// Effects for the app: external-file storage and uploads (torrents: Milestone 7).
+fn core_effect(rt: &mut Rt, session: &RoomSession, e: syncwatch_sync_core::Effect) {
+    use syncwatch_sync_core::Effect as E;
+    let format_of = |id: ExternalId| {
+        session
+            .peer()
+            .local()
+            .tracks
+            .desired
+            .manifest
+            .iter()
+            .find(|m| m.external_id == id)
+            .map(|m| m.format.clone())
+            .unwrap_or_default()
+    };
+    match e {
+        E::WriteExternalChunk {
+            external_id,
+            offset,
+            data,
+        } => {
+            if let Err(err) =
+                rt.media
+                    .write_chunk(external_id, &format_of(external_id), offset, &data)
+            {
+                tracing::warn!(error = %err, "could not write to the room cache");
             }
         }
-        other => {
-            tracing::debug!(cmd = ?other, "player command (synchronized playback: Milestone 6)")
+        E::ExternalComplete { external_id } => {
+            rt.media.complete(external_id);
+            rt.mirror
+                .event(format!("external file {} verified", external_id.0));
         }
+        E::DiscardExternal { external_id } => rt.media.discard(external_id),
+        E::StartUpload {
+            to,
+            external_id,
+            offset,
+        } => rt.media.start_upload(to, external_id, offset),
+        E::CancelUpload { to, external_id } => {
+            rt.media.cancel_upload(to, external_id);
+            rt.mirror.declined(to.0, external_id);
+        }
+        E::StartTorrent { .. } | E::StopTorrent { .. } => {
+            tracing::info!("torrent effects arrive in Milestone 7");
+        }
+        other => tracing::debug!(effect = ?std::mem::discriminant(&other), "unhandled effect"),
     }
 }
-
 // ---------------------------------------------------------------------------- commands ------
 
 #[tauri::command]
@@ -1219,6 +1607,25 @@ pub enum RoomActionIn {
     },
     /// The member's file differs from the host's; continue anyway.
     ProceedWithMismatch,
+    // --- playback (requests for members; the host validates and broadcasts) ---
+    Play,
+    Pause,
+    Seek {
+        ms: i64,
+    },
+    SetSpeed {
+        permille: u32,
+    },
+    ResumeWithoutWaiting,
+    /// Member: stop downloading one external file (the host sees "declined").
+    CancelDownload {
+        external_id: u32,
+    },
+    /// Host: subtitle or audio delay in milliseconds.
+    SetDelay {
+        kind: String,
+        ms: i32,
+    },
 }
 
 impl RoomActionIn {
@@ -1240,6 +1647,13 @@ impl RoomActionIn {
             RoomActionIn::LocalMute { .. } => "localMute",
             RoomActionIn::WaitForEveryone { .. } => "waitForEveryone",
             RoomActionIn::ProceedWithMismatch => "proceedWithMismatch",
+            RoomActionIn::Play => "play",
+            RoomActionIn::Pause => "pause",
+            RoomActionIn::Seek { .. } => "seek",
+            RoomActionIn::SetSpeed { .. } => "setSpeed",
+            RoomActionIn::ResumeWithoutWaiting => "resumeWithoutWaiting",
+            RoomActionIn::CancelDownload { .. } => "cancelDownload",
+            RoomActionIn::SetDelay { .. } => "setDelay",
         }
     }
 }
@@ -1297,6 +1711,22 @@ fn to_ui_action(action: RoomActionIn) -> Result<UiAction, String> {
         },
         RoomActionIn::WaitForEveryone { on } => UiAction::SetWaitForEveryone(on),
         RoomActionIn::ProceedWithMismatch => UiAction::ProceedWithMismatch,
+        RoomActionIn::Play => UiAction::Play,
+        RoomActionIn::Pause => UiAction::Pause,
+        RoomActionIn::Seek { ms } => UiAction::Seek(ms.max(0)),
+        RoomActionIn::SetSpeed { permille } => UiAction::SetSpeed(permille.clamp(250, 4000)),
+        RoomActionIn::ResumeWithoutWaiting => UiAction::ResumeWithoutWaiting,
+        RoomActionIn::CancelDownload { external_id } => {
+            UiAction::CancelExternalDownload(ExternalId(external_id))
+        }
+        RoomActionIn::SetDelay { kind, ms } => {
+            let ms = ms.clamp(-600_000, 600_000);
+            match kind.as_str() {
+                "audio" => UiAction::SetAudioDelay(ms),
+                "sub" => UiAction::SetSubDelay(ms),
+                _ => return Err("Unknown delay kind.".into()),
+            }
+        }
     })
 }
 
@@ -1322,6 +1752,88 @@ pub async fn room_choose_file(app: AppHandle, path: String) -> Result<(), String
     };
     app.state::<RoomManager>()
         .send(Cmd::Core(Event::LocalFile(ev)))
+}
+
+/// Host: select an audio or subtitle track by its local player id (null = off). Applied on
+/// every member immediately, with no seek.
+#[tauri::command]
+pub fn room_select_track(
+    m: State<'_, RoomManager>,
+    kind: syncwatch_player::TrackKind,
+    track_id: Option<i64>,
+) -> Result<(), String> {
+    m.send(Cmd::SelectTrack { kind, track_id })
+}
+
+/// Result of `room_add_external`: either added, or a warning the host must confirm first.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddExternalOutcome {
+    added: bool,
+    /// Members whose path goes through a relay (a large file uses their Metered quota).
+    relayed_members: Vec<String>,
+    size: u64,
+    converted_from: Option<String>,
+}
+
+/// Host: add an external subtitle or audio file. policy: "ask" (warn first when a large file
+/// would go to relayed members), "all" or "skipRelayed".
+#[tauri::command]
+pub async fn room_add_external(
+    app: AppHandle,
+    kind: String,
+    path: String,
+    no_limit: bool,
+    policy: String,
+) -> Result<AddExternalOutcome, String> {
+    let kind = match kind.as_str() {
+        "sub" => ExternalKind::Subtitle,
+        "audio" => ExternalKind::Audio,
+        _ => return Err("Unknown file kind.".into()),
+    };
+    let src = PathBuf::from(&path);
+    if !src.is_file() {
+        return Err("That file could not be found.".into());
+    }
+    let m = app.state::<RoomManager>();
+    let s = m.state.lock().map(|g| g.clone()).unwrap_or_default();
+    if !s.active || !s.is_host {
+        return Err("Only the host can add audio or subtitle files.".into());
+    }
+    let room_dir = m.rooms_cache.join(s.session_id.to_string());
+    let prepared = tauri::async_runtime::spawn_blocking(move || {
+        crate::roommedia::prepare_external(&room_dir, &src, kind, no_limit)
+    })
+    .await
+    .map_err(|_| "That file could not be read.".to_owned())??;
+    let relayed: Vec<String> = s
+        .members
+        .iter()
+        .filter(|mm| !mm.is_you && mm.link == Some(LinkState::Relayed))
+        .map(|mm| mm.name.clone())
+        .collect();
+    let size = prepared.size;
+    let converted_from = prepared.converted_from.clone();
+    if policy == "ask" && size > crate::roommedia::RELAYED_WARN_BYTES && !relayed.is_empty() {
+        let _ = std::fs::remove_file(&prepared.path);
+        return Ok(AddExternalOutcome {
+            added: false,
+            relayed_members: relayed,
+            size,
+            converted_from,
+        });
+    }
+    if policy == "skipRelayed" {
+        m.skip_next_relayed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    m.send(Cmd::AddExternal(prepared, kind))?;
+    Ok(AddExternalOutcome {
+        added: true,
+        relayed_members: Vec::new(),
+        size,
+        converted_from,
+    })
 }
 
 /// Host or a member with can_change_media: make this local file the room's media.
@@ -1354,6 +1866,8 @@ pub struct DevScenario {
     role: String,
     /// A video the scenario may load (SYNCWATCH_DEV_SCENARIO_MEDIA; only read, never written).
     media: Option<String>,
+    /// Extra files (SYNCWATCH_DEV_SCENARIO_EXTRA, ';'-separated; only read).
+    extra: Vec<String>,
 }
 
 fn dev_shared_file() -> Option<PathBuf> {
@@ -1397,7 +1911,43 @@ pub fn dev_scenario() -> Option<DevScenario> {
     let media = std::env::var("SYNCWATCH_DEV_SCENARIO_MEDIA")
         .ok()
         .filter(|s| !s.is_empty());
-    Some(DevScenario { name, role, media })
+    let role = std::env::var("SYNCWATCH_DEV_SCENARIO_ROLE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(role);
+    let extra = std::env::var("SYNCWATCH_DEV_SCENARIO_EXTRA")
+        .map(|s| {
+            s.split(';')
+                .filter(|p| !p.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(DevScenario {
+        name,
+        role,
+        media,
+        extra,
+    })
+}
+
+/// Debug builds: window state for the popup regression scenario. Uses the window API (no
+/// mouse or keyboard input). op: "minimize", "restore" or "query"; returns whether the
+/// main window is minimized and whether the video window is visible.
+#[tauri::command]
+pub fn dev_window(app: AppHandle, op: String) -> Result<(bool, bool), String> {
+    if !cfg!(debug_assertions) {
+        return Err("debug builds only".into());
+    }
+    let w = app.get_webview_window("main").ok_or("no main window")?;
+    match op.as_str() {
+        "minimize" => w.minimize().map_err(|e| e.to_string())?,
+        "restore" => w.unminimize().map_err(|e| e.to_string())?,
+        _ => {}
+    }
+    let minimized = w.is_minimized().map_err(|e| e.to_string())?;
+    let video_visible = app.state::<AppState>().video_visible();
+    Ok((minimized, video_visible))
 }
 
 /// Debug builds: appends one result line of the scenario to SYNCWATCH_DEV_SCENARIO_FILE.
@@ -1497,7 +2047,14 @@ mod tests {
         action: RoomActionIn,
     }
 
-    const ALL_VARIANTS: [&str; 14] = [
+    const ALL_VARIANTS: [&str; 21] = [
+        "play",
+        "pause",
+        "seek",
+        "setSpeed",
+        "resumeWithoutWaiting",
+        "cancelDownload",
+        "setDelay",
         "chat",
         "setPermissions",
         "preset",
@@ -1560,6 +2117,9 @@ mod tests {
             state: Mutex::new(RoomStateDto::default()),
             chosen: Mutex::new(None),
             sessions: std::sync::atomic::AtomicU32::new(0),
+            player_tx: Mutex::new(None),
+            rooms_cache: std::env::temp_dir().join("sw-test-rooms"),
+            skip_next_relayed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 

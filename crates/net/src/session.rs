@@ -267,6 +267,9 @@ impl RoomSession {
     ) -> (Self, Vec<Output>) {
         let mut hc = HostConfig::new(cfg.key.public(), &cfg.display_name);
         hc.max_members = cfg.max_members as usize;
+        // The app enforces the external-file ceilings itself (with the host's No-limit option).
+        hc.max_external_sub = None;
+        hc.max_external_audio = None;
         let peer = Peer::host(hc, clock.mono_us);
         let max = cfg.max_members;
         let s = Self::new(cfg, peer, password, true);
@@ -351,6 +354,29 @@ impl RoomSession {
         self.peer.next_deadline()
     }
 
+    /// Host: the transport peer of an authenticated member (for bulk flow control).
+    pub fn member_peer(&self, m: MemberId) -> Option<PeerId> {
+        self.link_of_member(m)
+    }
+
+    /// Host: whether that member's selected path goes through a TURN relay.
+    pub fn member_relayed(&self, m: MemberId) -> bool {
+        self.link_of_member(m)
+            .and_then(|id| self.links.get(&id))
+            .and_then(|l| l.info.as_ref())
+            .is_some_and(|i| i.relayed)
+    }
+
+    /// Host: one room message to one member (used to stream external-file chunks, which the
+    /// driver paces by the bridge's bulk credit, not by a rate limiter).
+    pub fn send_to_member(&self, m: MemberId, msg: &Message) -> Vec<Output> {
+        let mut out = Vec::new();
+        if let Some(id) = self.link_of_member(m) {
+            self.send_room(id, msg, &mut out);
+        }
+        out
+    }
+
     pub fn handle(&mut self, clock: Clock, input: Input) -> Vec<Output> {
         let mut out = Vec::new();
         if self.ended {
@@ -429,9 +455,10 @@ impl RoomSession {
                 let mut data = Vec::with_capacity(b.len() + 1);
                 data.push(FRAME_ROOM);
                 data.extend(b);
-                let lane = match msg.channel() {
-                    Channel::Reliable => Lane::Reliable,
-                    Channel::Unreliable => Lane::Unreliable,
+                let lane = match (msg.channel(), msg.priority()) {
+                    (_, proto::Priority::Bulk) => Lane::Bulk,
+                    (Channel::Reliable, _) => Lane::Reliable,
+                    (Channel::Unreliable, _) => Lane::Unreliable,
                 };
                 out.push(Output::Send { peer, lane, data });
             }

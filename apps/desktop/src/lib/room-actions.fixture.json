@@ -92,5 +92,45 @@
     "action": {
       "type": "proceedWithMismatch"
     }
+  },
+  {
+    "action": {
+      "type": "play"
+    }
+  },
+  {
+    "action": {
+      "type": "pause"
+    }
+  },
+  {
+    "action": {
+      "type": "seek",
+      "ms": 330000
+    }
+  },
+  {
+    "action": {
+      "type": "setSpeed",
+      "permille": 1250
+    }
+  },
+  {
+    "action": {
+      "type": "resumeWithoutWaiting"
+    }
+  },
+  {
+    "action": {
+      "type": "cancelDownload",
+      "externalId": 3
+    }
+  },
+  {
+    "action": {
+      "type": "setDelay",
+      "kind": "sub",
+      "ms": -250
+    }
   }
 ]

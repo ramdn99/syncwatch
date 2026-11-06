@@ -243,6 +243,9 @@ fn event_loop(mpv: &Mpv, shared: &Mutex<Shared>, stop: &AtomicBool, tx: &Sender<
                 let _ = tx.send(PlayerEvent::FileLoaded { tracks });
                 let _ = tx.send(PlayerEvent::State(state));
             }
+            Event::PlaybackRestart => {
+                let _ = tx.send(PlayerEvent::SeekDone);
+            }
             Event::EndFile(r) => {
                 let reason = end_reason(r);
                 if reason != EndReason::Redirect {
@@ -364,7 +367,7 @@ impl Player for MpvPlayer {
             .set_property(kind.select_property(), selection.to_mpv_value().as_str())
             .map_err(cmd_err)
     }
-    fn add_external(&self, kind: TrackKind, path: &Path) -> Result<()> {
+    fn add_external(&self, kind: TrackKind, path: &Path, select: bool) -> Result<()> {
         let p = path_to_mpv(path)?;
         let cmd = match kind {
             TrackKind::Sub => "sub-add",
@@ -375,7 +378,9 @@ impl Player for MpvPlayer {
                 ));
             }
         };
-        self.mpv.command(cmd, &[&p, "select"]).map_err(cmd_err)
+        // `auto`: added but not selected (in a room only the host's selection decides).
+        let flag = if select { "select" } else { "auto" };
+        self.mpv.command(cmd, &[&p, flag]).map_err(cmd_err)
     }
     fn set_sub_delay(&self, seconds: f64) -> Result<()> {
         self.mpv.set_property("sub-delay", seconds).map_err(cmd_err)

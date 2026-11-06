@@ -21,6 +21,13 @@ pub struct AppState {
     vulkan: String,
 }
 
+impl AppState {
+    /// Whether the mpv video window is currently shown (debug checks).
+    pub fn video_visible(&self) -> bool {
+        self.surface.is_video_visible()
+    }
+}
+
 /// Friendly, user-facing error string for commands.
 type CmdResult<T> = Result<T, String>;
 
@@ -150,7 +157,7 @@ fn player_add_external(state: State<'_, AppState>, kind: TrackKind, path: String
     if !p.is_file() {
         return Err("That file could not be found.".into());
     }
-    state.player.add_external(kind, &p).map_err(friendly)
+    state.player.add_external(kind, &p, true).map_err(friendly)
 }
 
 fn forward_events(app: AppHandle, rx: std::sync::mpsc::Receiver<PlayerEvent>) {
@@ -162,6 +169,10 @@ fn forward_events(app: AppHandle, rx: std::sync::mpsc::Receiver<PlayerEvent>) {
                     tracing::info!(tracks = tracks.len(), "file loaded");
                 }
                 let shutdown = matches!(ev, PlayerEvent::Shutdown);
+                // The active room (sync-core) observes the real player.
+                if let Some(rooms) = app.try_state::<crate::room::RoomManager>() {
+                    rooms.player_event(&ev);
+                }
                 let _ = app.emit("player-event", &ev);
                 if shutdown {
                     break;
@@ -261,8 +272,11 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             crate::room::room_action,
             crate::room::room_choose_file,
             crate::room::room_set_local_media,
+            crate::room::room_select_track,
+            crate::room::room_add_external,
             crate::room::dev_scenario,
             crate::room::dev_scenario_report,
+            crate::room::dev_window,
             crate::room::dev_scenario_share,
             crate::room::dev_scenario_shared,
             crate::bridge::bridge_attach,

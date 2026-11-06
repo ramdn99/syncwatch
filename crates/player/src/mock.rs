@@ -160,7 +160,7 @@ impl Player for MockPlayer {
         let _ = self.tx.send(PlayerEvent::TracksChanged { tracks });
         Ok(())
     }
-    fn add_external(&self, kind: TrackKind, path: &Path) -> Result<()> {
+    fn add_external(&self, kind: TrackKind, path: &Path, _select: bool) -> Result<()> {
         self.record(MockCall::AddExternal(kind, path_to_mpv(path)?));
         Ok(())
     }
@@ -197,6 +197,7 @@ mod tests {
             default: false,
             forced: false,
             channels: None,
+            external_filename: None,
         }
     }
 

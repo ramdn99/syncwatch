@@ -40,6 +40,8 @@ export interface RoomChat {
   text: string;
   wallMs: number;
   mediaTimeMs: number | null;
+  /** The media this message was stamped for (chips of older media are not seekable). */
+  mediaEpoch: number;
   divider: string | null;
 }
 
@@ -78,6 +80,19 @@ export interface RoomState {
   ended: EndReason | null;
   passwordIgnored: boolean;
   diag: RoomDiag;
+  mediaEpoch: number;
+  mediaDurationMs: number | null;
+  gate: { active: boolean; waiting: { member: number; name: string; reason: string }[] };
+  externals: { id: number; kind: 'audio' | 'sub'; name: string; size: number; received: number | null; failed: boolean }[];
+  declined: string[];
+  joining: boolean;
+}
+
+export interface AddExternalOutcome {
+  added: boolean;
+  relayedMembers: string[];
+  size: number;
+  convertedFrom: string | null;
 }
 
 export interface RoomDiag {
@@ -121,6 +136,12 @@ export const EMPTY_ROOM: RoomState = {
   ended: null,
   passwordIgnored: false,
   diag: { signalingHost: '', signalingConnected: false, signalingReconnects: 0, events: [], rejected: [] },
+  mediaEpoch: 0,
+  mediaDurationMs: null,
+  gate: { active: false, waiting: [] },
+  externals: [],
+  declined: [],
+  joining: false,
 };
 
 export type RoomAction =
@@ -137,7 +158,14 @@ export type RoomAction =
   | { type: 'chatConfig'; enabled: boolean; hiddenFromMembers: boolean; slowModeSecs: number }
   | { type: 'localMute'; member: number; muted: boolean }
   | { type: 'waitForEveryone'; on: boolean }
-  | { type: 'proceedWithMismatch' };
+  | { type: 'proceedWithMismatch' }
+  | { type: 'play' }
+  | { type: 'pause' }
+  | { type: 'seek'; ms: number }
+  | { type: 'setSpeed'; permille: number }
+  | { type: 'resumeWithoutWaiting' }
+  | { type: 'cancelDownload'; externalId: number }
+  | { type: 'setDelay'; kind: 'audio' | 'sub'; ms: number };
 
 /**
  * One example of EVERY room action, exactly as the UI sends it. The Record type makes the
@@ -164,6 +192,13 @@ export const ROOM_ACTION_EXAMPLES: { [K in RoomAction['type']]: Extract<RoomActi
   localMute: { type: 'localMute', member: 2, muted: true },
   waitForEveryone: { type: 'waitForEveryone', on: true },
   proceedWithMismatch: { type: 'proceedWithMismatch' },
+  play: { type: 'play' },
+  pause: { type: 'pause' },
+  seek: { type: 'seek', ms: 330_000 },
+  setSpeed: { type: 'setSpeed', permille: 1250 },
+  resumeWithoutWaiting: { type: 'resumeWithoutWaiting' },
+  cancelDownload: { type: 'cancelDownload', externalId: 3 },
+  setDelay: { type: 'setDelay', kind: 'sub', ms: -250 },
 };
 
 /** The arguments object passed to invoke('room_action', ...). */
@@ -181,6 +216,11 @@ export const room = {
   action: (action: RoomAction) => call<void>('room_action', roomActionArgs(action)),
   chooseFile: (path: string) => call<void>('room_choose_file', { path }),
   setLocalMedia: (path: string) => call<void>('room_set_local_media', { path }),
+  /** Host: select a track by its local player id (null = off). */
+  selectTrack: (kind: 'audio' | 'sub', trackId: number | null) => call<void>('room_select_track', { kind, trackId }),
+  /** Host: add an external file. policy: 'ask' warns before large files go to relayed members. */
+  addExternal: (kind: 'audio' | 'sub', path: string, noLimit: boolean, policy: 'ask' | 'all' | 'skipRelayed') =>
+    call<AddExternalOutcome>('room_add_external', { kind, path, noLimit, policy }),
 };
 
 export function onRoomState(cb: (s: RoomState) => void): () => void {

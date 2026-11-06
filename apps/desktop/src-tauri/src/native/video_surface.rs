@@ -235,6 +235,12 @@ mod imp {
             self.video
         }
 
+        /// Whether the video window is shown right now (debug checks).
+        pub fn is_video_visible(&self) -> bool {
+            // SAFETY: read-only query on our own window handle.
+            unsafe { IsWindowVisible(HWND(self.video as *mut core::ffi::c_void)).as_bool() }
+        }
+
         fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
             self.inner.lock().unwrap_or_else(|p| p.into_inner())
         }

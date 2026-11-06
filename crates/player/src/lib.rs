@@ -72,6 +72,8 @@ pub enum PlayerEvent {
     State(PlaybackState),
     /// Playback of the current file ended.
     EndFile { reason: EndReason },
+    /// A seek (or the start of playback) finished: mpv `playback-restart`.
+    SeekDone,
     /// The player engine shut down.
     Shutdown,
 }
@@ -96,7 +98,8 @@ pub trait Player: Send + Sync {
     /// Selects an audio or subtitle track by mpv track id, or turns it off.
     fn select_track(&self, kind: TrackKind, selection: TrackSelection) -> Result<()>;
     /// Adds an external audio or subtitle file and selects it.
-    fn add_external(&self, kind: TrackKind, path: &Path) -> Result<()>;
+    /// `select`: also select it (standalone player); rooms pass false (the host selects).
+    fn add_external(&self, kind: TrackKind, path: &Path, select: bool) -> Result<()>;
     fn set_sub_delay(&self, seconds: f64) -> Result<()>;
     fn set_audio_delay(&self, seconds: f64) -> Result<()>;
     /// Current tracks (cached from the last event).

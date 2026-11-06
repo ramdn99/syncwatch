@@ -22,6 +22,8 @@ syncwatch-ice-config = { path = "../../../crates/ice-config" }
 blake3.workspace = true
 syncwatch-net = { path = "../../../crates/net" }
 syncwatch-sync-core = { workspace = true }
+chardetng = { version = "=1.0.0", default-features = false }
+encoding_rs = "=0.8.42"
 tokio = { version = "1.53.3", features = ["sync", "time"] }
 serde.workspace = true
 serde_json.workspace = true

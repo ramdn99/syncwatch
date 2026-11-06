@@ -12,7 +12,8 @@ import { mapKey } from './lib/shortcuts';
 import { MissingFilePanel, PasswordPrompt } from './components/RoomDialogs';
 import { DiagnosticsDialog, type UiErrorEntry } from './components/Diagnostics';
 import { EMPTY_ROOM, endText, formatCode, friendlyError, onRoomState, PASSWORD_IGNORED_TEXT, room, type RoomAction, type RoomState } from './lib/room';
-import type { MockChatMessage } from './mock/data';
+import { chatLines, markerSeconds } from './lib/chat';
+import type { TrackSelection } from './lib/player';
 
 const EMPTY_STATE: PlaybackState = {
   paused: true,
@@ -45,6 +46,8 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
   const [diagOpen, setDiagOpen] = useState(false);
   const [uiErrors, setUiErrors] = useState<UiErrorEntry[]>([]);
   const [ignoredDismissed, setIgnoredDismissed] = useState(false);
+  const [noLimit, setNoLimit] = useState(false);
+  const [relayedAsk, setRelayedAsk] = useState<{ kind: 'audio' | 'sub'; path: string; members: string[]; size: number } | null>(null);
   const [overlayInput, setOverlayInput] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [changeSource, setChangeSource] = useState<{ path?: string } | null>(null);
@@ -81,21 +84,11 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
 
   const inRoom = rs.active || rs.ended != null;
   const isHost = inRoom ? rs.isHost : viewAsHost;
-  const chat: MockChatMessage[] = useMemo(
-    () =>
-      rs.chat.map((c, i) => ({
-        id: c.divider ? `d${i}` : String(c.id),
-        senderId: String(c.sender),
-        senderName: c.name,
-        isHost: c.isHost,
-        colorIndex: c.sender,
-        text: c.text,
-        wallTime: c.wallMs ? new Date(c.wallMs).toTimeString().slice(0, 5) : '',
-        mediaTimeMs: c.mediaTimeMs,
-        divider: c.divider ?? undefined,
-      })),
-    [rs.chat],
-  );
+  const durationMs = rs.mediaDurationMs ?? (state.duration != null ? Math.round(state.duration * 1000) : null);
+  // Chips: stamped by the host from the room timeline; seekable only for the current media and
+  // for people allowed to seek.
+  const chat = useMemo(() => chatLines(rs.chat, rs, durationMs), [rs, durationMs]);
+  const positionMs = state.fileLoaded && state.timePos != null ? Math.round(state.timePos * 1000) : null;
   // Every failed command shows a friendly message and keeps the real error for Diagnostics.
   const reportError = (e: unknown) => {
     const f = friendlyError(e);
@@ -103,6 +96,21 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
     setUiErrors((l) => [...l.slice(-49), { at: Date.now(), text: f.detail }]);
   };
   const act = (a: RoomAction) => void room.action(a).catch(reportError);
+  // Playback controls: in a room they are REQUESTS (the host validates and everyone, the
+  // requester included, applies the host's command); outside a room they drive the player.
+  const ctl = {
+    togglePause: () => (rs.active ? act({ type: state.paused ? 'play' : 'pause' }) : void run(player.setPaused(!state.paused))),
+    seekTo: (s: number) => (rs.active ? act({ type: 'seek', ms: Math.max(0, Math.round(s * 1000)) }) : void run(player.seek(s))),
+    seekBy: (d: number) =>
+      rs.active
+        ? act({ type: 'seek', ms: Math.max(0, Math.round(((stateRef.current.timePos ?? 0) + d) * 1000)) })
+        : void run(player.seekBy(d)),
+    selectTrack: (k: 'audio' | 'sub', sel: TrackSelection) => {
+      if (!rs.active) return void run(player.selectTrack(k, sel));
+      if (!rs.isHost) return setError('Only the host changes audio and subtitle tracks.');
+      void room.selectTrack(k, sel.mode === 'id' ? sel.id : null).catch(reportError);
+    },
+  };
   const verifying = rs.fileStatus === 'verifying';
   // Open until the member picks a file (Rust closes it for good), or dismissed with Later.
   const showPanel = rs.missingFile != null && rs.missingFile.panelOpen && rs.missingFile.seq !== dismissedPanel;
@@ -240,7 +248,19 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
       multiple: false,
       filters: [{ name: kind === 'sub' ? 'Subtitles' : 'Audio', extensions: kind === 'sub' ? SUB_EXT : AUDIO_EXT }],
     });
-    if (typeof path === 'string') void run(player.addExternal(kind, path));
+    if (typeof path !== 'string') return;
+    if (!rs.active) return void run(player.addExternal(kind, path));
+    if (!rs.isHost) return setError('Only the host adds audio or subtitle files.');
+    await addExternal(kind, path, 'ask');
+  };
+  const addExternal = async (kind: 'audio' | 'sub', path: string, policy: 'ask' | 'all' | 'skipRelayed') => {
+    try {
+      const out = await room.addExternal(kind, path, noLimit, policy);
+      if (!out.added) setRelayedAsk({ kind, path, members: out.relayedMembers, size: out.size });
+      else if (out.convertedFrom) setToasts((x) => [...x, { id: Date.now(), text: `Subtitle converted to UTF-8 from ${out.convertedFrom}.` }]);
+    } catch (e) {
+      reportError(e);
+    }
   };
 
   // Drag-and-drop a video onto the window.
@@ -282,9 +302,9 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
     const list = tracks.filter((t) => t.kind === kind);
     if (list.length === 0) return;
     const i = list.findIndex((t) => t.selected);
-    if (kind === 'sub' && i === list.length - 1) return void run(player.selectTrack('sub', { mode: 'off' }));
+    if (kind === 'sub' && i === list.length - 1) return ctl.selectTrack('sub', { mode: 'off' });
     const next = list[(i + 1) % list.length];
-    if (next) void run(player.selectTrack(kind, { mode: 'id', id: next.id }));
+    if (next) ctl.selectTrack(kind, { mode: 'id', id: next.id });
   };
 
   // --- shortcuts ------------------------------------------------------------------------
@@ -296,13 +316,13 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
       const s = stateRef.current;
       switch (action) {
         case 'togglePause':
-          void run(player.setPaused(!s.paused));
+          ctl.togglePause();
           break;
         case 'seekBack':
-          void run(player.seekBy(-5));
+          ctl.seekBy(-5);
           break;
         case 'seekForward':
-          void run(player.seekBy(5));
+          ctl.seekBy(5);
           break;
         case 'volumeUp':
           void run(player.setVolume(Math.min(100, s.volume + 5)));
@@ -377,7 +397,7 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
     target.addEventListener('pointerup', up);
   };
 
-  const markers = chat.filter((m) => m.mediaTimeMs != null && !m.divider).map((m) => (m.mediaTimeMs ?? 0) / 1000);
+  const markers = markerSeconds(chat);
 
   return (
     <div className="flex h-full flex-col">
@@ -452,6 +472,18 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
           </button>
         </div>
       )}
+      {rs.active && rs.gate.active && (
+        <div role="status" className="flex flex-wrap items-center gap-3 bg-info/15 px-3 py-1.5 text-sm text-info" data-testid="gate">
+          <span className="flex-1">
+            Waiting for {rs.gate.waiting.length ? rs.gate.waiting.map((w) => `${w.name} (${w.reason})`).join(', ') : 'everyone'}...
+          </span>
+          {rs.isHost && (
+            <button type="button" className="text-text underline" onClick={() => act({ type: 'resumeWithoutWaiting' })}>
+              Resume without them
+            </button>
+          )}
+        </div>
+      )}
       {error && (
         <div role="alert" className="flex items-center gap-3 bg-danger/15 px-3 py-1.5 text-sm text-danger">
           <span className="flex-1">{error}</span>
@@ -468,7 +500,8 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
                 ref={chatInputRef}
                 messages={chat}
                 onCollapse={() => setPrefs((p) => ({ ...p, leftCollapsed: true }))}
-                onChipClick={(s) => void run(player.seek(s))}
+                positionMs={positionMs}
+                onChipClick={(s) => ctl.seekTo(s)}
                 onSend={sendChat}
                 onDelete={rs.active && rs.isHost ? (id) => act({ type: 'deleteChat', id: Number(id) }) : undefined}
                 disabledReason={chatDisabled}
@@ -483,8 +516,8 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
           state={state}
           fullscreen={fullscreen}
           markers={markers}
-          onTogglePause={() => void run(player.setPaused(!state.paused))}
-          onSeek={(s) => void run(player.seek(s))}
+          onTogglePause={ctl.togglePause}
+          onSeek={(s) => ctl.seekTo(s)}
           onVolume={(v) => void run(player.setVolume(v))}
           onToggleMute={() => void run(player.setMute(!state.mute))}
           onToggleFullscreen={() => toggleFullscreen()}
@@ -499,6 +532,11 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
               onChoose={() => void chooseMyFile()}
               onClose={() => setDismissedPanel(rs.missingFile?.seq ?? 0)}
             />
+          )}
+          {rs.active && rs.joining && (
+            <div className="absolute left-1/2 top-4 z-10 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1 text-sm" role="status">
+              Joining... catching up with the room
+            </div>
           )}
           {fullscreen && <ChatOverlay messages={chat} inputOpen={overlayInput} onCloseInput={() => setOverlayInput(false)} onSend={sendChat} />}
         </VideoArea>
@@ -519,7 +557,9 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
                   hasMissingFile={rs.missingFile != null}
                   onChangeSource={() => setChangeSource({})}
                   onChooseFile={() => void chooseMyFile()}
-                  onSelectTrack={(k, s) => void run(player.selectTrack(k, s))}
+                  onSelectTrack={(k, s) => ctl.selectTrack(k, s)}
+                  noLimit={noLimit}
+                  onNoLimit={setNoLimit}
                   onAddTrack={(k) => void addTrack(k)}
                   onAction={act}
                 />
@@ -546,6 +586,46 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
             <div className="flex justify-end">
               <button type="button" className="rounded-md bg-accent px-4 py-2 font-semibold text-on-accent hover:bg-accent-hover" onClick={onLeave}>
                 Back to home
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {relayedAsk && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" role="alertdialog" aria-labelledby="relayed-title">
+          <div className="w-[28rem] space-y-3 rounded-xl border border-border bg-elevated p-5">
+            <h2 id="relayed-title" className="font-brand text-lg font-bold">
+              Large file to relayed members
+            </h2>
+            <p className="text-sm text-muted">
+              This file is {(relayedAsk.size / 1e6).toFixed(0)} MB. {relayedAsk.members.join(', ')} {relayedAsk.members.length === 1 ? 'is' : 'are'} connected
+              through a relay, so sending it to them uses your relay quota.
+            </p>
+            <div className="flex flex-wrap justify-end gap-2">
+              <button type="button" className="rounded-md px-3 py-2 text-muted hover:text-text" onClick={() => setRelayedAsk(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded-md border border-border px-3 py-2 hover:border-accent"
+                onClick={() => {
+                  const a = relayedAsk;
+                  setRelayedAsk(null);
+                  void addExternal(a.kind, a.path, 'skipRelayed');
+                }}
+              >
+                Skip relayed members
+              </button>
+              <button
+                type="button"
+                className="rounded-md bg-accent px-3 py-2 font-semibold text-on-accent"
+                onClick={() => {
+                  const a = relayedAsk;
+                  setRelayedAsk(null);
+                  void addExternal(a.kind, a.path, 'all');
+                }}
+              >
+                Send to everyone
               </button>
             </div>
           </div>

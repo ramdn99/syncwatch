@@ -6,16 +6,16 @@
 import { invoke } from '@tauri-apps/api/core';
 import { onRoomState, room, type RoomAction, type RoomState } from '../lib/room';
 
-type Report = (line: string) => void;
+export type Report = (line: string) => void;
 
 let latest: RoomState | null = null;
 
-async function current(): Promise<RoomState> {
+export async function current(): Promise<RoomState> {
   latest = await room.state();
   return latest;
 }
 
-async function waitFor(label: string, pred: (s: RoomState) => boolean, timeoutMs = 20_000): Promise<RoomState> {
+export async function waitFor(label: string, pred: (s: RoomState) => boolean, timeoutMs = 20_000): Promise<RoomState> {
   const end = Date.now() + timeoutMs;
   for (;;) {
     const s = await current();
@@ -25,15 +25,15 @@ async function waitFor(label: string, pred: (s: RoomState) => boolean, timeoutMs
   }
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const texts = (s: RoomState) => s.chat.filter((c) => !c.divider).map((c) => c.text);
-const has = (t: string) => (s: RoomState) => texts(s).includes(t);
+export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+export const texts = (s: RoomState) => s.chat.filter((c) => !c.divider).map((c) => c.text);
+export const has = (t: string) => (s: RoomState) => texts(s).includes(t);
 const rejected = (what: string) => (s: RoomState) => s.diag.rejected.some((r) => r.what === `chat message refused: ${what}`);
 let clientId = 1;
 const say = (text: string) => room.action({ type: 'chat', clientId: clientId++, text });
-const act = (a: RoomAction) => room.action(a);
+export const act = (a: RoomAction) => room.action(a);
 
-async function check(report: Report, name: string, f: () => Promise<unknown>) {
+export async function check(report: Report, name: string, f: () => Promise<unknown>) {
   try {
     await f();
     report(`PASS ${name}`);
@@ -249,13 +249,28 @@ export async function maybeRunScenario() {
   // React StrictMode runs effects twice in development: run the scenario only once.
   if (started) return;
   started = true;
-  const cfg = await invoke<{ name: string; role: string; media: string | null } | null>('dev_scenario').catch(() => null);
-  if (!cfg || (cfg.name !== 'chat' && cfg.name !== 'rooms')) return;
+  const cfg = await invoke<{ name: string; role: string; media: string | null; extra: string[] } | null>('dev_scenario').catch(() => null);
+  if (!cfg || !['chat', 'rooms', 'sync', 'chattime', 'late', 'popup'].includes(cfg.name)) return;
   const report: Report = (line) => void invoke('dev_scenario_report', { line });
   onRoomState((s) => (latest = s));
   report(`START ${cfg.role}`);
   try {
-    if (cfg.name === 'rooms') {
+    const m6 = await import('./scenario6');
+    const media = cfg.media ?? '';
+    if (cfg.name === 'sync') {
+      if (cfg.role === 'host') await m6.syncHost(report, media, cfg.extra);
+      else await m6.syncMember(report, media);
+    } else if (cfg.name === 'popup') {
+      if (cfg.role === 'host') await m6.popupHost(report, media);
+      else await m6.popupMember(report, media);
+    } else if (cfg.name === 'chattime') {
+      if (cfg.role === 'host') await m6.chatTimeHost(report, media);
+      else await m6.chatTimeMember(report, media);
+    } else if (cfg.name === 'late') {
+      if (cfg.role === 'host') await m6.lateHost(report, media);
+      else if (cfg.role === 'late') await m6.lateJoiner(report, cfg.extra[0] ?? '', media);
+      else await m6.lateMember(report, media);
+    } else if (cfg.name === 'rooms') {
       if (!cfg.media) throw new Error('no media for the rooms scenario');
       if (cfg.role === 'host') await roomsHost(report, cfg.media);
       else await roomsMember(report, cfg.media);
