@@ -172,6 +172,75 @@ pwsh -NoProfile -File scripts/dev/net-lab.ps1 -Ice metered -Seconds 10 -MB 1 -Re
 | `-BenchMB N` | also measure raw data-channel speed inside one bridge page (no IPC) |
 | `-Release` | optimized build (debug assertions stay on so the dev-only lab code is included) |
 
+## 5c. Torrents (Milestone 7)
+
+Tests run in process on 127.0.0.1 only, with an in-process librqbit seeder plus fake HTTP and
+UDP trackers that record every announce:
+
+```
+cargo test -p syncwatch-torrent
+```
+
+The throttled playback-window comparison (`playback_window`) takes about 40 s.
+
+The lab uses two real windows. qBittorrent is the only seeder, throttled, with its embedded
+tracker on 127.0.0.1. Only the script drives it (never the app), and it uses our own generated
+test torrent:
+
+```
+pwsh -NoProfile -File scripts/dev/make-test-media.ps1
+pwsh -NoProfile -File scripts/dev/torrent-lab.ps1
+pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -UpKiB 500 -KeepQbt
+```
+
+The manual Wireshark/TCPView checklist is `docs/checklists/torrent-stop.md`.
+
+| Variable (debug builds) | Effect |
+|---|---|
+| `SYNCWATCH_DEV_TORRENT_BIND=127.0.0.1` | The torrent engine listens on the loopback only (no firewall prompt during automated runs) |
+| `SYNCWATCH_DEV_TORRENT_DHT=0` | DHT off |
+
+## 5d. TLS dependency tree, cargo-deny, cargo-audit
+
+```
+pwsh -NoProfile -File scripts/check-tls-tree.ps1
+cargo deny --locked check bans advisories sources
+cargo audit
+pwsh -NoProfile -File scripts/ci.ps1
+```
+
+- `check-tls-tree.ps1` runs `cargo tree --target x86_64-pc-windows-msvc -i <crate>` and fails
+  if aws-lc-rs, aws-lc-sys, native-tls, openssl or openssl-sys is part of the Windows build.
+  `deny.toml` bans the same crates.
+- **OpenSSL in Cargo.lock is expected:** `crypto-hash` (librqbit's SHA-1) depends on OpenSSL on
+  Linux only. On Windows it uses the system CryptoAPI, so OpenSSL is never built for Windows.
+  `cargo tree -i openssl` therefore prints "nothing to print" rather than "did not match".
+- The rustls ring provider is installed once, at startup
+  (`syncwatch_ice_config::install_crypto_provider`). A test makes sure no other install exists.
+- **Ignored advisory: RUSTSEC-2026-0293.** It concerns `ringbuf` 0.4.8, pulled in through
+  `librqbit-utp` 0.7.0. It is unreachable for us, because librqbit-utp only stores `u8` there
+  and uTP is off (`TcpOnly`). The reasons are in `deny.toml` and `.cargo/audit.toml`.
+
+### Upgrading librqbit
+
+librqbit and all its sub-crates are pinned to the same version in `crates/torrent/Cargo.toml`:
+librqbit-core, -sha1-wrapper, -upnp, -tracker-comms, -dht, -bencode, -buffers,
+-clone-to-owned, -lsd and -peer-protocol. Otherwise `^` resolution mixes versions.
+
+1. Pick a release that is at least two weeks old (crates.io dates).
+2. Bump every `=9.x.y` pin together.
+3. Do not enable librqbit's `rust-tls`, `default-tls` or `sha1-ring` features. They pull in
+   aws-lc-rs or native-tls. Keep `default-features = false`.
+4. Re-read the parts the ADRs depend on, and update ADRs 0009 and 0010 if they changed:
+   - `torrent_state/streaming.rs` (32 MiB window, stream interleaving);
+   - `piece_tracker.rs` and `file_info.rs` (background order);
+   - `session.rs` (`pause`, `delete`, `stop`, `make_peer_rx`);
+   - tracker-comms (does it send "stopped" now?).
+5. Run `scripts/check-tls-tree.ps1`, `cargo deny` and `cargo audit`. Check whether
+   RUSTSEC-2026-0293 still applies: if librqbit-utp moved to ringbuf 0.5.2 or later, remove the
+   ignore from both files.
+6. Run `cargo test -p syncwatch-torrent` and `scripts/dev/torrent-lab.ps1`.
+
 ## 6. Secret scan
 
 ```

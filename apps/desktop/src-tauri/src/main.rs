@@ -13,6 +13,7 @@ mod room;
 mod roommedia;
 #[cfg(test)]
 mod secrets_for_tests;
+mod torrent;
 
 use paths::AppPaths;
 

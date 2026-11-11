@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import logoUrl from './assets/logo-lockup.svg';
 import { ChatOverlay } from './components/ChatOverlay';
 import { ChangeSourceDialog } from './components/ChangeSourceDialog';
+import { BufferingOverlay, ConfirmMagnetDialog, TorrentBlock } from './components/TorrentPanels';
 import { ChatPanel } from './components/ChatPanel';
 import { HostControls } from './components/HostControls';
 import { MembersPanel } from './components/MembersPanel';
@@ -518,7 +519,9 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
           onToggleFullscreen={() => toggleFullscreen()}
           onOpenFile={() => void openFile()}
           emptyState={rs.active ? roomEmptyState(rs) : undefined}
+          downloaded={rs.active && rs.torrent ? { ranges: rs.torrent.ranges, size: rs.torrent.size } : null}
         >
+          {rs.active && rs.torrent?.buffering && <BufferingOverlay buffering={rs.torrent.buffering} />}
           {showPanel && rs.missingFile && (
             <MissingFilePanel
               file={rs.missingFile}
@@ -558,6 +561,11 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
                   onAddTrack={(k) => void addTrack(k)}
                   onAction={act}
                 />
+                {rs.active && (
+                  <div className="mt-3">
+                    <TorrentBlock torrent={rs.torrent} members={rs.members} isHost={isHost} />
+                  </div>
+                )}
               </Section>
             </div>
           </>
@@ -568,6 +576,16 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
           initialPath={changeSource.path}
           onClose={() => setChangeSource(null)}
           onLocalChosen={(p) => void run(rs.active ? room.setLocalMedia(p) : player.open(p))}
+          inRoom={rs.active}
+          onTorrentChosen={(magnet, f) => void run(room.setTorrentMedia(magnet, f.index, f.path, f.size))}
+        />
+      )}
+      {rs.active && rs.confirmMagnet && (
+        <ConfirmMagnetDialog
+          name={rs.confirmMagnet.name}
+          size={rs.confirmMagnet.size}
+          onAccept={() => act({ type: 'acceptMagnet' })}
+          onDecline={() => act({ type: 'declineMagnet' })}
         />
       )}
       {rs.active && rs.needPassword && <PasswordPrompt wrong={rs.needPassword.wrong} retryAfterMs={rs.needPassword.retryAfterMs} onLeave={leave} />}

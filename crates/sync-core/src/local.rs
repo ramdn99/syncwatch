@@ -35,6 +35,8 @@ pub struct Local {
     pending_mismatch: Option<FileIdentity>,
     torrent_started: Option<Infohash>,
     torrent_streaming: bool,
+    /// Torrent progress reported to the host (whole percent steps).
+    torrent: Option<TorrentProgress>,
     awaiting_magnet: bool,
     // --- playback following ---
     obs: Option<Obs>,
@@ -69,6 +71,7 @@ impl Local {
             pending_mismatch: None,
             torrent_started: None,
             torrent_streaming: false,
+            torrent: None,
             awaiting_magnet: false,
             obs: None,
             applied_paused: None,
@@ -102,6 +105,7 @@ impl Local {
             buffering: self.buffering,
             tracks: track_override.unwrap_or(self.tracks.status),
             rtt_ms,
+            torrent: self.torrent,
         }
     }
 
@@ -142,6 +146,7 @@ impl Local {
         self.loaded = false;
         self.load_requested = false;
         self.torrent_streaming = false;
+        self.torrent = None;
         self.awaiting_magnet = false;
         self.pending_mismatch = None;
         self.obs = None;
@@ -216,6 +221,10 @@ impl Local {
         self.awaiting_magnet = false;
         self.torrent_started = Some(t.infohash);
         self.media = MediaStatus::Downloading { permille: 0 };
+        self.torrent = Some(TorrentProgress {
+            phase: TorrentPhase::Metadata,
+            permille: 0,
+        });
         out.push(Effect::StartTorrent {
             infohash: t.infohash,
             file_index: t.file_index,
@@ -279,7 +288,9 @@ impl Local {
             return;
         }
         match ev {
-            TorrentEvent::Progress { permille } => {
+            TorrentEvent::Progress { phase, permille } => {
+                let permille = permille.min(1000) / 10 * 10;
+                self.torrent = Some(TorrentProgress { phase, permille });
                 if !self.torrent_streaming {
                     self.media = MediaStatus::Downloading { permille };
                 }
@@ -297,7 +308,13 @@ impl Local {
                     );
                 }
             }
-            TorrentEvent::Unavailable => self.media = MediaStatus::Unavailable,
+            TorrentEvent::Unavailable => {
+                self.media = MediaStatus::Unavailable;
+                self.torrent = Some(TorrentProgress {
+                    phase: TorrentPhase::Failed,
+                    permille: self.torrent.map(|t| t.permille).unwrap_or(0),
+                });
+            }
         }
     }
 

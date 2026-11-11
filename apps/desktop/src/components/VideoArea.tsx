@@ -15,6 +15,8 @@ export interface VideoAreaProps {
   onOpenFile: () => void;
   /** In a room: what to show while no video is loaded (null = the room cannot pick one). */
   emptyState?: { title: string; body: string; action: string | null };
+  /** Torrent rooms: downloaded byte ranges of the file, drawn on the seek bar. */
+  downloaded?: { ranges: [number, number][]; size: number } | null;
   children?: ReactNode;
 }
 
@@ -85,7 +87,7 @@ export const VideoArea = forwardRef<HTMLDivElement, VideoAreaProps>(function Vid
         onClick={(e) => e.stopPropagation()}
         onDoubleClick={(e) => e.stopPropagation()}
       >
-        <SeekBar pct={pct} duration={duration} markers={markers} cacheAhead={state.cacheAhead} pos={pos} onSeek={props.onSeek} />
+        <SeekBar pct={pct} duration={duration} markers={markers} cacheAhead={state.cacheAhead} pos={pos} onSeek={props.onSeek} downloaded={props.downloaded ?? null} />
         <div className="mt-2 flex items-center gap-3">
           <IconButton label={state.paused ? 'Play (Space)' : 'Pause (Space)'} onClick={props.onTogglePause}>
             {state.paused ? '▶' : '❚❚'}
@@ -124,7 +126,21 @@ function IconButton(props: { label: string; onClick: () => void; children: React
   );
 }
 
-function SeekBar(props: { pct: number; pos: number; duration: number; markers: number[]; cacheAhead: number | null; onSeek: (s: number) => void }) {
+/** Byte ranges -> percent spans of the bar (bytes map to time proportionally). */
+export function rangeSpans(d: { ranges: [number, number][]; size: number } | null): { left: number; width: number }[] {
+  if (!d || d.size <= 0) return [];
+  return d.ranges.map(([a, b]) => ({ left: (100 * a) / d.size, width: (100 * Math.max(0, b - a)) / d.size }));
+}
+
+function SeekBar(props: {
+  pct: number;
+  pos: number;
+  duration: number;
+  markers: number[];
+  cacheAhead: number | null;
+  onSeek: (s: number) => void;
+  downloaded: { ranges: [number, number][]; size: number } | null;
+}) {
   const barRef = useRef<HTMLDivElement>(null);
   const { duration } = props;
   const seekAt = (clientX: number) => {
@@ -150,6 +166,9 @@ function SeekBar(props: { pct: number; pos: number; duration: number; markers: n
       }}
     >
       <div className="absolute inset-x-0 top-1.5 h-1 rounded-full bg-white/20 group-hover:h-1.5">
+        {rangeSpans(props.downloaded).map((s, i) => (
+          <div key={i} className="absolute inset-y-0 bg-white/30" style={{ left: `${s.left}%`, width: `${s.width}%` }} data-testid="downloaded-range" aria-hidden />
+        ))}
         <div className="absolute inset-y-0 left-0 rounded-full bg-white/25" style={{ width: `${cachePct}%` }} />
         <div className="absolute inset-y-0 left-0 rounded-full bg-accent" style={{ width: `${props.pct}%` }} />
       </div>

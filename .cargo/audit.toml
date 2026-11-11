@@ -1,0 +1,5 @@
+# cargo-audit configuration. Keep in sync with deny.toml [advisories].ignore (same reasons).
+[advisories]
+# ringbuf 0.4.8 via librqbit-utp 0.7.0: unreachable (u8-only ring buffer; uTP disabled, our
+# sessions listen TcpOnly). See deny.toml and docs/build-guide.md "Upgrading librqbit".
+ignore = ["RUSTSEC-2026-0293"]

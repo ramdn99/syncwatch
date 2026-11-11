@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useEffect, useState } from 'react';
 import { parseMagnet } from '../lib/magnet';
 import { inTauri } from '../lib/player';
+import { fmtBytes, TORRENT_NOTICE, torrents, type TorrentInfo } from '../lib/room';
 
 // Change source (spec section 6): local file OR torrent magnet, in either direction, without
 // leaving the room. The Rust parser is authoritative; the TS mirror gives instant feedback.
@@ -31,6 +32,10 @@ export function ChangeSourceDialog(props: {
   initialPath?: string;
   onClose: () => void;
   onLocalChosen: (path: string) => void;
+  /** In a room: torrents are possible (they always play in a room). */
+  inRoom?: boolean;
+  /** Host picked file `index` of a magnet. */
+  onTorrentChosen?: (magnet: string, file: { index: number; path: string; size: number }) => void;
 }) {
   const [tab, setTab] = useState<'local' | 'magnet'>('local');
   const [path, setPath] = useState<string | null>(props.initialPath ?? null);
@@ -38,8 +43,45 @@ export function ChangeSourceDialog(props: {
   const [prepared, setPrepared] = useState<Prepared | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [info, setInfo] = useState<TorrentInfo | null>(null);
+  const [fileIndex, setFileIndex] = useState<number | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const [noticeOk, setNoticeOk] = useState(false);
+  const [noticeSaved, setNoticeSaved] = useState(false);
+
+  useEffect(() => {
+    if (!inTauri()) return;
+    void torrents
+      .settings()
+      .then((s) => setNoticeSaved(s.noticeAccepted))
+      .catch(() => {});
+  }, []);
 
   const mirror = magnet.trim() ? parseMagnet(magnet) : null;
+
+  // Metadata progress: the file list comes from peers (can take a while, or never).
+  const fetchFiles = async () => {
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+    setFileIndex(null);
+    setElapsed(0);
+    const t0 = Date.now();
+    const timer = window.setInterval(() => setElapsed(Math.floor((Date.now() - t0) / 1000)), 500);
+    try {
+      const i = await torrents.metadata(magnet.trim());
+      setInfo(i);
+      setFileIndex(i.files.find((f) => f.video)?.index ?? null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      window.clearInterval(timer);
+      setBusy(false);
+    }
+  };
+
+  const chosenFile = info?.files.find((f) => f.index === fileIndex) ?? null;
+  const canUseTorrent = chosenFile != null && (noticeSaved || noticeOk);
 
   const prepare = async (source: { kind: 'local'; path: string } | { kind: 'magnet'; text: string }) => {
     setBusy(true);
@@ -82,6 +124,18 @@ export function ChangeSourceDialog(props: {
   }, [tab]);
 
   const confirm = () => {
+    if (tab === 'magnet') {
+      if (!chosenFile || !canUseTorrent) return;
+      if (!noticeSaved) {
+        void torrents
+          .settings()
+          .then((s) => torrents.saveSettings({ ...s, noticeAccepted: true }))
+          .catch(() => {});
+      }
+      props.onTorrentChosen?.(magnet.trim(), chosenFile);
+      props.onClose();
+      return;
+    }
     if (prepared?.kind === 'local' && path) {
       props.onLocalChosen(path);
       props.onClose();
@@ -113,6 +167,7 @@ export function ChangeSourceDialog(props: {
               onClick={() => {
                 setTab(t);
                 setPrepared(null);
+                setInfo(null);
                 setError(null);
               }}
             >
@@ -141,6 +196,7 @@ export function ChangeSourceDialog(props: {
               onChange={(e) => {
                 setMagnet(e.target.value);
                 setPrepared(null);
+                setInfo(null);
                 setError(null);
               }}
             />
@@ -151,9 +207,50 @@ export function ChangeSourceDialog(props: {
                   <span className="text-muted">Name:</span> {mirror.magnet.dn ?? <span className="text-muted">(not given)</span>}
                 </p>
                 <p className="font-mono text-xs text-muted">infohash {mirror.magnet.infohash}</p>
-                <button type="button" disabled={busy} className="mt-2 rounded-md bg-surface px-3 py-1 hover:bg-border" onClick={() => void prepare({ kind: 'magnet', text: magnet })}>
-                  Check magnet
-                </button>
+                {props.inRoom ? (
+                  <button type="button" disabled={busy} className="mt-2 rounded-md bg-surface px-3 py-1 hover:bg-border" onClick={() => void fetchFiles()}>
+                    Get file list
+                  </button>
+                ) : (
+                  <p className="mt-2 text-warning">Torrents play in a room. Create or join a room first.</p>
+                )}
+              </div>
+            )}
+            {busy && (
+              <p className="text-sm text-muted" role="status" data-testid="magnet-progress">
+                Getting the file list from peers... {elapsed} s
+              </p>
+            )}
+            {info && (
+              <div className="space-y-1" data-testid="magnet-files">
+                <p className="text-sm font-medium">{info.name}</p>
+                <ul className="max-h-48 space-y-0.5 overflow-y-auto rounded-md border border-border p-1 text-sm" role="radiogroup" aria-label="Files in the torrent">
+                  {info.files.map((f) => (
+                    <li key={f.index}>
+                      <label className={`flex items-center gap-2 rounded px-2 py-1 ${f.video ? 'hover:bg-surface' : 'text-muted'}`}>
+                        <input
+                          type="radio"
+                          name="torrent-file"
+                          disabled={!f.video}
+                          checked={fileIndex === f.index}
+                          onChange={() => setFileIndex(f.index)}
+                        />
+                        <span className="min-w-0 flex-1 truncate" title={f.path}>
+                          {f.path}
+                        </span>
+                        <span className="tabular text-xs text-muted">{fmtBytes(f.size)}</span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+                {!info.files.some((f) => f.video) && <p className="text-sm text-warning">This torrent has no video file SyncWatch can play.</p>}
+                <p className="text-xs text-muted">Only the selected file is downloaded.</p>
+                {!noticeSaved && (
+                  <label className="flex items-start gap-2 text-xs text-warning">
+                    <input type="checkbox" checked={noticeOk} onChange={(e) => setNoticeOk(e.target.checked)} />
+                    <span>{TORRENT_NOTICE}</span>
+                  </label>
+                )}
               </div>
             )}
           </div>
@@ -179,7 +276,7 @@ export function ChangeSourceDialog(props: {
           </button>
           <button
             type="button"
-            disabled={!prepared || prepared.kind !== 'local' || busy}
+            disabled={busy || (tab === 'magnet' ? !canUseTorrent : !prepared || prepared.kind !== 'local')}
             className="rounded-md bg-accent px-4 py-2 text-sm font-semibold text-on-accent hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
             onClick={confirm}
           >

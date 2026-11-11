@@ -204,6 +204,11 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             let (bridge, events) = crate::bridge::Bridge::start(app.handle())?;
             app.manage(Arc::clone(&bridge));
             app.manage(crate::room::RoomManager::new(&conn_paths));
+            // The torrent engine actor (idle: no session, no sockets until a torrent starts).
+            let tp = conn_paths.clone();
+            app.manage(tauri::async_runtime::block_on(async move {
+                crate::torrent::TorrentService::start(&tp)
+            }));
             if let Some(events) = crate::netlab::maybe_start(app.handle(), bridge, events) {
                 crate::room::RoomManager::forward_transport(app.handle().clone(), events);
                 crate::room::dev_autoroom(app.handle());
@@ -264,6 +269,10 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             crate::connection::open_help_link,
             crate::media::magnet_inspect,
             crate::media::prepare_change_media,
+            crate::torrent::torrent_metadata,
+            crate::torrent::torrent_settings_get,
+            crate::torrent::torrent_settings_set,
+            crate::room::room_set_torrent_media,
             crate::room::room_create,
             crate::room::room_join,
             crate::room::room_state,

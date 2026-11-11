@@ -8,6 +8,7 @@ members = [
   "crates/player",
   "crates/syncwatch-sim",
   "crates/signaling-server",
+  "crates/torrent",
   "apps/desktop/src-tauri",
 ]
 

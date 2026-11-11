@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { connection, type ConnectionStatus, type TestReport } from '../lib/connection';
 import { settingsText, statusText } from '../strings/connection-help';
 import { Results } from './ConnectionSetup';
+import { TorrentSettingsSection } from '../components/TorrentSettings';
 
 export function SettingsConnection({ status, onReplace, onBack }: { status: ConnectionStatus; onReplace: () => void; onBack: () => void }) {
   const [busy, setBusy] = useState(false);
@@ -91,6 +92,7 @@ export function SettingsConnection({ status, onReplace, onBack }: { status: Conn
           </label>
           <p className="mt-3 text-xs text-muted">{settingsText.torrentNote}</p>
         </section>
+        <TorrentSettingsSection />
       </div>
     </div>
   );

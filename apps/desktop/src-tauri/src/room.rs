@@ -21,7 +21,7 @@ use syncwatch_net::*;
 use syncwatch_player::Player;
 use syncwatch_protocol::signaling::normalize_room_code;
 use syncwatch_protocol::*;
-use syncwatch_sync_core::{Clock, Event, LocalFileEvent, UiAction, UiEvent};
+use syncwatch_sync_core::{Clock, Event, LocalFileEvent, TorrentEvent, UiAction, UiEvent};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 
@@ -129,6 +129,62 @@ pub struct MemberDto {
     chat_muted: bool,
     permissions: PermsDto,
     words: Option<[&'static str; 4]>,
+    /// Torrent rooms: this member's download phase and whole-percent progress.
+    torrent: Option<TorrentMemberDto>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TorrentMemberDto {
+    phase: &'static str,
+    permille: u16,
+}
+
+fn phase_text(p: TorrentPhase) -> &'static str {
+    match p {
+        TorrentPhase::Metadata => "metadata",
+        TorrentPhase::Downloading => "downloading",
+        TorrentPhase::Streaming => "streaming",
+        TorrentPhase::NoPeers => "noPeers",
+        TorrentPhase::Complete => "complete",
+        TorrentPhase::Failed => "failed",
+    }
+}
+
+/// This window's own torrent download (progress block, seek bar, buffering overlay).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TorrentDto {
+    phase: &'static str,
+    have_bytes: u64,
+    size: u64,
+    down_bps: u64,
+    up_bps: u64,
+    peers: u32,
+    eta_secs: Option<u64>,
+    /// Downloaded byte ranges [start, end).
+    ranges: Vec<[u64; 2]>,
+    buffering: Option<BufferingDto>,
+    /// Only the playback stream runs (window short / just seeked).
+    exclusive: bool,
+    /// Set once complete: "Downloading and sharing have stopped. No further traffic."
+    complete_message: Option<&'static str>,
+    error: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BufferingDto {
+    have: u64,
+    total: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmMagnetDto {
+    name: String,
+    size: u64,
+    infohash: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -260,6 +316,10 @@ pub struct RoomStateDto {
     declined: Vec<String>,
     /// Late joiner / reconnect: loading and catching up.
     joining: bool,
+    /// Torrent rooms: our own download.
+    torrent: Option<TorrentDto>,
+    /// Member: the host's magnet waits for our confirmation (name and size shown).
+    confirm_magnet: Option<ConfirmMagnetDto>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -362,6 +422,10 @@ impl Mirror {
                     buffering: i.buffering,
                     tracks_in_sync: matches!(i.tracks, TrackSyncStatus::InSync),
                     chat_muted: i.chat_muted,
+                    torrent: i.torrent.map(|t| TorrentMemberDto {
+                        phase: phase_text(t.phase),
+                        permille: t.permille,
+                    }),
                     permissions: i.permissions.into(),
                     words: self.words.get(&i.id.0).copied(),
                 }
@@ -758,6 +822,20 @@ impl Mirror {
                 }
                 self.s.media_title = title;
                 self.s.file_status = None;
+                self.s.torrent = None;
+                self.s.confirm_magnet = None;
+            }
+            UiEvent::ConfirmMagnet {
+                name,
+                size,
+                infohash,
+            } => {
+                self.event(format!("the host shared a torrent: {name}"));
+                self.s.confirm_magnet = Some(ConfirmMagnetDto {
+                    name,
+                    size,
+                    infohash: infohash.to_hex(),
+                });
             }
             UiEvent::Notice(Notice::RequestDenied { reason }) => {
                 self.reject(None, "you".into(), format!("request refused: {reason:?}"));
@@ -1062,6 +1140,9 @@ async fn start(app: AppHandle, name: String, mode: Mode) -> Result<EntryOutcome,
             tr: tr_rx,
             bulk: bk_rx,
             pl: pl_rx,
+            tor: app2
+                .state::<Arc<crate::torrent::TorrentService>>()
+                .attach_room(),
         };
         let ended = drive(
             app2.clone(),
@@ -1121,6 +1202,8 @@ struct Chans {
     /// External-file chunks (served only when nothing else is waiting).
     bulk: mpsc::UnboundedReceiver<TransportEvent>,
     pl: mpsc::UnboundedReceiver<syncwatch_player::PlayerEvent>,
+    /// Torrent engine events (the engine is process-wide; one room listens at a time).
+    tor: mpsc::UnboundedReceiver<syncwatch_torrent::EngineEvent>,
 }
 
 /// Everything the driver loop owns besides the session.
@@ -1137,6 +1220,10 @@ struct Rt {
     checked_cache: std::collections::HashSet<ExternalId>,
     /// To notice becoming the host (succession): our downloaded externals become host files.
     was_host: bool,
+    torrents: Arc<crate::torrent::TorrentService>,
+    /// The room's torrent this window downloads / plays (at most one).
+    torrent: Option<syncwatch_protocol::Infohash>,
+    torrent_duration_sent: bool,
 }
 
 /// Position reports to sync-core (the drift controller and the chat timestamps).
@@ -1165,6 +1252,9 @@ async fn drive(
         skip_relayed: Default::default(),
         checked_cache: Default::default(),
         was_host: false,
+        torrents: Arc::clone(&*app.state::<Arc<crate::torrent::TorrentService>>()),
+        torrent: None,
+        torrent_duration_sent: false,
     };
     let mut reconnect_at: Option<Instant> = None;
     let mut backoff = Duration::from_secs(1);
@@ -1209,8 +1299,14 @@ async fn drive(
                 crate::roommedia::player_obs(&rt.media, &*rt.player, &ev)
                     .map(|o| Input::Core(Event::Player(o)))
             }),
+            te = ch.tor.recv() => te.and_then(|e| on_engine_event(&mut rt, e)),
             c = ch.cmd.recv() => match c {
-                Some(Cmd::Action(a)) => Some(Input::Action(a)),
+                Some(Cmd::Action(a)) => {
+                    if matches!(a, Action::Ui(UiAction::AcceptMagnet | UiAction::DeclineMagnet)) {
+                        rt.mirror.s.confirm_magnet = None;
+                    }
+                    Some(Input::Action(a))
+                }
                 Some(Cmd::Core(e)) => {
                     if matches!(e, Event::LocalFile(LocalFileEvent::Verifying)) {
                         rt.mirror.file_chosen();
@@ -1297,6 +1393,14 @@ async fn drive(
             write_soak(&rt.mirror, epoch, false);
         }
     }
+    // Leaving: our torrent stops completely (tracker "stopped", engine down when idle).
+    if let Some(ih) = rt.torrent.take() {
+        rt.torrents
+            .engine
+            .stop(ih, syncwatch_torrent::StopReason::Leave)
+            .await;
+    }
+    rt.torrents.detach_room();
     rt.mirror.s.active = false;
     publish(&app, &mut rt, &session);
     write_soak(&rt.mirror, epoch, true);
@@ -1332,7 +1436,110 @@ fn select_track_action(
 
 /// Manifest bookkeeping after each step: the host maps its prepared files to manifest ids;
 /// a member reuses identical files already in the per-room cache instead of downloading.
+/// Torrent engine events -> the UI mirror and sync-core (ADR 0009/0010). Events of an old
+/// torrent (after a source switch) only reach the diagnostics.
+fn on_engine_event(rt: &mut Rt, ev: syncwatch_torrent::EngineEvent) -> Option<Input> {
+    use syncwatch_torrent::{EngineEvent as E, Phase};
+    let current = |ih: &Infohash| rt.torrent == Some(*ih);
+    match ev {
+        E::Status { infohash, status } if current(&infohash) => {
+            let phase = match status.phase {
+                Phase::Metadata => TorrentPhase::Metadata,
+                Phase::Downloading => TorrentPhase::Downloading,
+                Phase::Streaming => TorrentPhase::Streaming,
+                Phase::NoPeers => TorrentPhase::NoPeers,
+                Phase::Complete => TorrentPhase::Complete,
+                Phase::Failed => TorrentPhase::Failed,
+            };
+            let permille = (status.have_bytes.min(status.size) * 1000)
+                .checked_div(status.size)
+                .unwrap_or(0) as u16;
+            let prev_msg = rt
+                .mirror
+                .s
+                .torrent
+                .as_ref()
+                .and_then(|t| t.complete_message);
+            rt.mirror.s.torrent = Some(TorrentDto {
+                phase: phase_text(phase),
+                have_bytes: status.have_bytes,
+                size: status.size,
+                down_bps: status.down_bps,
+                up_bps: status.up_bps,
+                peers: status.peers,
+                eta_secs: status.eta_secs,
+                ranges: status.ranges.iter().map(|(a, b)| [*a, *b]).collect(),
+                buffering: status.buffering.map(|b| BufferingDto {
+                    have: b.have,
+                    total: b.total,
+                }),
+                exclusive: status.exclusive,
+                complete_message: prev_msg,
+                error: None,
+            });
+            Some(Input::Core(Event::Torrent(TorrentEvent::Progress {
+                phase,
+                permille,
+            })))
+        }
+        E::Playable { infohash, url } if current(&infohash) => {
+            // The URL carries a 128-bit token: keep it out of every log line (mpv included).
+            if let Some(token) = url.split('/').rev().nth(1) {
+                crate::logging::register_secret(token);
+            }
+            rt.media.torrent_url = Some(url);
+            rt.mirror
+                .event("torrent playable (streaming while downloading)");
+            Some(Input::Core(Event::Torrent(TorrentEvent::Playable)))
+        }
+        E::Complete { infohash } if current(&infohash) => {
+            rt.mirror.event(syncwatch_torrent::COMPLETE_MESSAGE);
+            if let Some(t) = rt.mirror.s.torrent.as_mut() {
+                t.complete_message = Some(syncwatch_torrent::COMPLETE_MESSAGE);
+            }
+            rt.mirror.toast(syncwatch_torrent::COMPLETE_MESSAGE);
+            None
+        }
+        E::Failed { infohash, error } if current(&infohash) => {
+            let text = crate::torrent::engine_error_text(&error);
+            rt.mirror.event(format!("torrent failed: {error}"));
+            rt.mirror.toast(text);
+            if let Some(t) = rt.mirror.s.torrent.as_mut() {
+                t.phase = "failed";
+                t.error = Some(text);
+            }
+            Some(Input::Core(Event::Torrent(TorrentEvent::Unavailable)))
+        }
+        E::Announced {
+            reason, results, ..
+        } => {
+            let ok = results.iter().filter(|(_, ok)| *ok).count();
+            rt.mirror.event(format!(
+                "trackers told \"stopped\" ({reason:?}): {ok} of {} answered",
+                results.len()
+            ));
+            None
+        }
+        E::EngineDown => {
+            rt.mirror
+                .event("torrent engine shut down: no DHT, no listeners, no sockets");
+            None
+        }
+        _ => None,
+    }
+}
+
 async fn after_step(rt: &mut Rt, session: &mut RoomSession, epoch: Instant) -> bool {
+    // The torrent's VBR byte map needs the duration once the player knows it.
+    if let (Some(ih), false, Some(d)) = (
+        rt.torrent,
+        rt.torrent_duration_sent,
+        rt.mirror.s.media_duration_ms,
+    ) && d > 0
+    {
+        rt.torrent_duration_sent = true;
+        rt.torrents.engine.duration(ih, Some(d as u64));
+    }
     let manifest = session.peer().local().tracks.desired.manifest.clone();
     rt.mirror.set_manifest(&manifest);
     if session.is_host() {
@@ -1537,6 +1744,10 @@ async fn exec(rt: &mut Rt, session: &RoomSession, outs: Vec<Output>) -> bool {
                     rt.media
                         .sync_manifest(&session.peer().local().tracks.desired.manifest);
                 }
+                // A room seek re-targets the torrent download before mpv even asks.
+                if let (syncwatch_sync_core::PlayerCmd::Seek(ms), Some(ih)) = (&cmd, rt.torrent) {
+                    rt.torrents.engine.seek(ih, (*ms).max(0) as u64);
+                }
                 rt.media.player_cmd(&*rt.player, chosen.as_deref(), cmd);
             }
             Output::Core(e) => core_effect(rt, session, e),
@@ -1595,8 +1806,40 @@ fn core_effect(rt: &mut Rt, session: &RoomSession, e: syncwatch_sync_core::Effec
             rt.media.cancel_upload(to, external_id);
             rt.mirror.declined(to.0, external_id);
         }
-        E::StartTorrent { .. } | E::StopTorrent { .. } => {
-            tracing::info!("torrent effects arrive in Milestone 7");
+        E::StartTorrent {
+            infohash,
+            file_index,
+        } => {
+            let media = match session.peer().local().descriptor.clone() {
+                Some(MediaDescriptor::Torrent(t))
+                    if t.infohash == infohash && t.file_index == file_index =>
+                {
+                    t
+                }
+                _ => return,
+            };
+            if let Some(old) = rt.torrent.replace(infohash)
+                && old != infohash
+            {
+                rt.torrents
+                    .engine
+                    .stop_nowait(old, syncwatch_torrent::StopReason::Switch);
+            }
+            rt.torrent_duration_sent = false;
+            rt.media.torrent_url = None;
+            rt.mirror.event(format!("torrent started: {}", media.name));
+            rt.torrents.engine.start(media);
+        }
+        E::StopTorrent { infohash } => {
+            if rt.torrent == Some(infohash) {
+                rt.torrent = None;
+                rt.media.torrent_url = None;
+            }
+            rt.mirror.event("torrent stopped (source changed)");
+            // Never blocks: the engine announces "stopped" in the background.
+            rt.torrents
+                .engine
+                .stop_nowait(infohash, syncwatch_torrent::StopReason::Switch);
         }
         other => tracing::debug!(effect = ?std::mem::discriminant(&other), "unhandled effect"),
     }
@@ -1722,6 +1965,9 @@ pub enum RoomActionIn {
         permille: u32,
     },
     ResumeWithoutWaiting,
+    /// Member: download the host's magnet (after seeing its name and size).
+    AcceptMagnet,
+    DeclineMagnet,
     /// Member: stop downloading one external file (the host sees "declined").
     CancelDownload {
         external_id: u32,
@@ -1759,6 +2005,8 @@ impl RoomActionIn {
             RoomActionIn::ResumeWithoutWaiting => "resumeWithoutWaiting",
             RoomActionIn::CancelDownload { .. } => "cancelDownload",
             RoomActionIn::SetDelay { .. } => "setDelay",
+            RoomActionIn::AcceptMagnet => "acceptMagnet",
+            RoomActionIn::DeclineMagnet => "declineMagnet",
         }
     }
 }
@@ -1819,6 +2067,8 @@ fn to_ui_action(action: RoomActionIn) -> Result<UiAction, String> {
         RoomActionIn::Seek { ms } => UiAction::Seek(ms.max(0)),
         RoomActionIn::SetSpeed { permille } => UiAction::SetSpeed(permille.clamp(250, 4000)),
         RoomActionIn::ResumeWithoutWaiting => UiAction::ResumeWithoutWaiting,
+        RoomActionIn::AcceptMagnet => UiAction::AcceptMagnet,
+        RoomActionIn::DeclineMagnet => UiAction::DeclineMagnet,
         RoomActionIn::CancelDownload { external_id } => {
             UiAction::CancelExternalDownload(ExternalId(external_id))
         }
@@ -1960,6 +2210,38 @@ pub async fn room_set_local_media(app: AppHandle, path: String) -> Result<(), St
         descriptor: MediaDescriptor::LocalFile(LocalMedia { name, identity }),
         own_file: true,
     })))
+}
+
+/// Host, Change source -> Torrent: the room plays file `file_index` of this magnet. Members
+/// confirm before downloading; the host's own download starts at once.
+#[tauri::command]
+pub fn room_set_torrent_media(
+    app: AppHandle,
+    magnet: String,
+    file_index: u32,
+    name: String,
+    size: u64,
+) -> Result<(), String> {
+    let m = syncwatch_protocol::magnet::parse(&magnet)
+        .map_err(|_| "This is not a valid magnet link.".to_owned())?;
+    // The display name is the file's last path component, sanitized like a local file name.
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(&name).to_owned();
+    let name = crate::media::file_name(std::path::Path::new(&base));
+    let descriptor = MediaDescriptor::Torrent(TorrentMedia {
+        infohash: m.infohash,
+        file_index,
+        name,
+        size,
+        magnet,
+    });
+    descriptor
+        .validate()
+        .map_err(|_| "This torrent cannot be used (name or link too long).".to_owned())?;
+    app.state::<RoomManager>()
+        .send(Cmd::Action(Action::Ui(UiAction::ChangeMedia {
+            descriptor,
+            own_file: false,
+        })))
 }
 
 /// Debug builds: the scripted two-window scenario to run (SYNCWATCH_DEV_SCENARIO), if any.
@@ -2163,7 +2445,9 @@ mod tests {
         action: RoomActionIn,
     }
 
-    const ALL_VARIANTS: [&str; 21] = [
+    const ALL_VARIANTS: [&str; 23] = [
+        "acceptMagnet",
+        "declineMagnet",
         "play",
         "pause",
         "seek",
@@ -2222,6 +2506,7 @@ mod tests {
             tracks: TrackSyncStatus::InSync,
             chat_muted: muted,
             connected,
+            torrent: None,
         }
     }
 

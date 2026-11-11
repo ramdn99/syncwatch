@@ -118,3 +118,23 @@ state becomes "waiting for peers" with a periodic retry (a new peer stream: reco
   - the signaling client tests;
   - `cargo audit` on the pinned versions;
   - the upgrade procedure is documented in the build guide.
+
+## Results (Milestone 7)
+
+- **Unit tests:** 25 in `crates/torrent`. They cover the policy (seek to the middle, rapid
+  repeated seeks, seek back, tail-first, wrap-around fill, a late joiner fetching the head,
+  property tests), the juggler with a fake driver, the range parser, validation, the cache and
+  the announce encoding.
+- **Throttled seeder** (`tests/playback_window.rs`, seeder limited to 1.5 MiB/s, the player
+  reads at 0.7 MiB/s):
+  - exclusive window: prebuffer after a seek in 2.09 s, **200 ms** of stall;
+  - control (tail and fill compete): 2.38 s, **1.95 s** of stall.
+- **Two windows with qBittorrent** (`scripts/dev/torrent-lab.ps1`, 700 KiB/s):
+  - both windows play from 22% downloaded;
+  - a seek to 50:00 (not downloaded) holds the room within 34 ms (gate, "loading" plus our
+    Buffering), and both resume in sync 9.5 s later (positions within 28 ms);
+  - a seek back takes 374-386 ms;
+  - positions agree within 118-188 ms while downloading.
+- **Lab detail:** everything runs on 127.0.0.1, so qBittorrent must allow several connections
+  from one IP (`enable_multi_connections_from_same_ip`). Otherwise libtorrent drops our
+  handshake. This applies to the lab only.

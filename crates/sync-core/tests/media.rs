@@ -651,3 +651,76 @@ fn reconnect_within_20_seconds_gets_the_same_seat() {
     );
     assert_eq!(host(&w).seat_of(&identity), Some(id));
 }
+
+/// The host's progress block: each member's torrent phase and whole-percent progress reach
+/// the member list (and a status update is sent only per whole percent).
+#[test]
+fn torrent_progress_reaches_the_host_in_whole_percent_steps() {
+    let (mut w, ids) = room(1, 68);
+    w.ui(
+        HOST,
+        UiAction::ChangeMedia {
+            descriptor: torrent(M1, "one.mkv"),
+            own_file: false,
+        },
+    );
+    w.run_for(1_000_000);
+    let member = w.nodes[ids[0]].id;
+    let status_of = |w: &World| {
+        w.nodes[HOST]
+            .ui_events()
+            .filter_map(|u| match u {
+                UiEvent::Members(v) => v.iter().find(|i| i.id == member).map(|i| i.torrent),
+                _ => None,
+            })
+            .last()
+            .flatten()
+    };
+    assert_eq!(
+        status_of(&w),
+        Some(TorrentProgress {
+            phase: TorrentPhase::Metadata,
+            permille: 0
+        }),
+        "accepting the magnet starts in the metadata phase"
+    );
+    let sent_before = w.nodes[ids[0]]
+        .sent
+        .iter()
+        .filter(|(_, m)| matches!(m, Message::Status(_)))
+        .count();
+    // 0.1% steps: only whole percents produce a status message.
+    for p in 120..=130u16 {
+        w.deliver_event(
+            ids[0],
+            Event::Torrent(TorrentEvent::Progress {
+                phase: TorrentPhase::Downloading,
+                permille: p,
+            }),
+        );
+    }
+    w.run_for(1_000_000);
+    let sent = w.nodes[ids[0]]
+        .sent
+        .iter()
+        .filter(|(_, m)| matches!(m, Message::Status(_)))
+        .count()
+        - sent_before;
+    assert!(sent <= 3, "at most one status per whole percent: {sent}");
+    assert_eq!(
+        status_of(&w),
+        Some(TorrentProgress {
+            phase: TorrentPhase::Downloading,
+            permille: 130
+        })
+    );
+    w.deliver_event(
+        ids[0],
+        Event::Torrent(TorrentEvent::Progress {
+            phase: TorrentPhase::Complete,
+            permille: 1000,
+        }),
+    );
+    w.run_for(1_000_000);
+    assert_eq!(status_of(&w).map(|t| t.phase), Some(TorrentPhase::Complete));
+}

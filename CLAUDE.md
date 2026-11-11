@@ -42,7 +42,8 @@ crates/net             PeerTransport trait, bridge IPC framing (binary, batched)
                        The bridge itself (hidden WebView2 window) is apps/desktop/src-tauri/src/bridge.rs
                        + apps/desktop/src/bridge/bridge.ts (WebRTC plumbing only, no timers)
 crates/player          Player trait; libmpv implementation (libmpv2 crate) and a mock (M1)
-crates/torrent         pure PiecePolicy + in-process librqbit adapter (M7)
+crates/torrent         pure PiecePolicy, stream juggler, loopback server, our "stopped" announce,
+                       librqbit 9.0.1 adapter (all sub-crates pinned, ADRs 0009/0010) (M7)
 crates/signaling-server axum WebSocket server, :8787 /ws, /healthz (M4)
 crates/syncwatch-sim   CLI with N virtual peers (M2)
 apps/desktop           Tauri 2 app: src-tauri (Rust) + React/TS/Tailwind UI (M1)
@@ -75,6 +76,13 @@ pwsh -NoProfile -File scripts/dev/two-windows.ps1 -AutoRoom   (host a + member b
 pwsh -NoProfile -File scripts/dev/make-test-media.ps1   (M6 test media, outside the repo; never writes test.mkv)
 pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario sync   (also chattime, late, popup, succession, chat, rooms)
 docker compose -f deploy/compose.dev.yml up -d --build   (signaling + local coturn; always down afterwards)
+cargo test -p syncwatch-torrent   (librqbit in process, fake trackers; ~1 min)
+pwsh -NoProfile -File scripts/dev/torrent-lab.ps1   (two windows + qBittorrent as the only local, throttled seeder; outside traffic monitor)
+pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario skiprelay -Ice coturn
+pwsh -NoProfile -File scripts/check-tls-tree.ps1   (Windows tree: no aws-lc/native-tls/OpenSSL)
+cargo deny --locked check bans advisories sources
+cargo audit
+pwsh -NoProfile -File scripts/ci.ps1
 pwsh -NoProfile -File scripts/verify-imports.ps1
 pwsh -NoProfile -File scripts/secret-scan.ps1 -Mode All
 ```

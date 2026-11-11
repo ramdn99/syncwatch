@@ -1,0 +1,45 @@
+[package]
+name = "syncwatch-torrent"
+description = "SyncWatch torrents: pure PiecePolicy, stream juggling plan, loopback server, librqbit adapter (ADRs 0009, 0010)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+syncwatch-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { version = "1.53.3", features = ["net", "time", "rt", "macros", "sync", "fs", "io-util"] }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "tokio"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+getrandom = "0.4.3"
+url = "2.5.8"
+bytes = "1.12.1"
+# Torrent engine, ADR 0009: librqbit 9.0.1 with EVERY sub-crate pinned (9.1.0 is < 2 weeks old
+# and would be picked by ^ resolution). No TLS feature of librqbit: its rust-tls feature pulls
+# aws-lc-rs. reqwest gets rustls without a provider here; the ring provider is installed once at
+# startup (syncwatch_ice_config::install_crypto_provider). SHA-1 = crypto-hash = Windows CryptoAPI.
+librqbit = { version = "=9.0.1", default-features = false }
+librqbit-core = "=9.0.1"
+librqbit-sha1-wrapper = "=9.0.1"
+librqbit-upnp = "=9.0.1"
+librqbit-tracker-comms = "=9.0.1"
+librqbit-dht = "=9.0.1"
+librqbit-bencode = "=9.0.1"
+librqbit-buffers = "=9.0.1"
+librqbit-clone-to-owned = "=9.0.1"
+librqbit-lsd = "=9.0.1"
+librqbit-peer-protocol = "=9.0.1"
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider"] }
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { version = "1.53.3", features = ["net", "time", "rt", "rt-multi-thread", "macros", "sync", "fs", "io-util"] }
+syncwatch-ice-config = { path = "../ice-config" }
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

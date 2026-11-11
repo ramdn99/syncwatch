@@ -29,6 +29,29 @@ export interface RoomMember {
   chatMuted: boolean;
   permissions: Perms;
   words: [string, string, string, string] | null;
+  /** Torrent rooms: this member's download phase and whole-percent progress. */
+  torrent: { phase: TorrentPhase; permille: number } | null;
+}
+
+export type TorrentPhase = 'metadata' | 'downloading' | 'streaming' | 'noPeers' | 'complete' | 'failed';
+
+/** This window's own torrent download. */
+export interface TorrentState {
+  phase: TorrentPhase;
+  haveBytes: number;
+  size: number;
+  downBps: number;
+  upBps: number;
+  peers: number;
+  etaSecs: number | null;
+  /** Downloaded byte ranges [start, end). */
+  ranges: [number, number][];
+  buffering: { have: number; total: number } | null;
+  /** Only the playback stream runs (window short or just seeked). */
+  exclusive: boolean;
+  /** "Downloading and sharing have stopped. No further traffic." once complete. */
+  completeMessage: string | null;
+  error: string | null;
 }
 
 export interface RoomChat {
@@ -86,6 +109,9 @@ export interface RoomState {
   externals: { id: number; kind: 'audio' | 'sub'; name: string; size: number; received: number | null; failed: boolean; withheld: boolean }[];
   declined: string[];
   joining: boolean;
+  torrent: TorrentState | null;
+  /** Member: the host's magnet waits for our confirmation. */
+  confirmMagnet: { name: string; size: number; infohash: string } | null;
 }
 
 export interface AddExternalOutcome {
@@ -142,6 +168,8 @@ export const EMPTY_ROOM: RoomState = {
   externals: [],
   declined: [],
   joining: false,
+  torrent: null,
+  confirmMagnet: null,
 };
 
 export type RoomAction =
@@ -165,7 +193,9 @@ export type RoomAction =
   | { type: 'setSpeed'; permille: number }
   | { type: 'resumeWithoutWaiting' }
   | { type: 'cancelDownload'; externalId: number }
-  | { type: 'setDelay'; kind: 'audio' | 'sub'; ms: number };
+  | { type: 'setDelay'; kind: 'audio' | 'sub'; ms: number }
+  | { type: 'acceptMagnet' }
+  | { type: 'declineMagnet' };
 
 /**
  * One example of EVERY room action, exactly as the UI sends it. The Record type makes the
@@ -199,6 +229,8 @@ export const ROOM_ACTION_EXAMPLES: { [K in RoomAction['type']]: Extract<RoomActi
   resumeWithoutWaiting: { type: 'resumeWithoutWaiting' },
   cancelDownload: { type: 'cancelDownload', externalId: 3 },
   setDelay: { type: 'setDelay', kind: 'sub', ms: -250 },
+  acceptMagnet: { type: 'acceptMagnet' },
+  declineMagnet: { type: 'declineMagnet' },
 };
 
 /** The arguments object passed to invoke('room_action', ...). */
@@ -221,7 +253,73 @@ export const room = {
   /** Host: add an external file. policy: 'ask' warns before large files go to relayed members. */
   addExternal: (kind: 'audio' | 'sub', path: string, noLimit: boolean, policy: 'ask' | 'all' | 'skipRelayed') =>
     call<AddExternalOutcome>('room_add_external', { kind, path, noLimit, policy }),
+  /** Host: the room plays file `fileIndex` of this magnet. */
+  setTorrentMedia: (magnet: string, fileIndex: number, name: string, size: number) =>
+    call<void>('room_set_torrent_media', { magnet, fileIndex, name, size }),
 };
+
+export interface TorrentFile {
+  index: number;
+  path: string;
+  size: number;
+  video: boolean;
+}
+
+export interface TorrentInfo {
+  infohash: string;
+  name: string;
+  files: TorrentFile[];
+}
+
+export interface TorrentSettings {
+  cacheDir: string | null;
+  capGb: number;
+  keepFinished: boolean;
+  port: number;
+  bind: string;
+  dht: boolean;
+  noticeAccepted: boolean;
+}
+
+export const torrents = {
+  /** Host: the magnet's file list (metadata only). */
+  metadata: (magnet: string) => call<TorrentInfo>('torrent_metadata', { magnet }),
+  settings: () => call<TorrentSettings>('torrent_settings_get'),
+  saveSettings: (settings: TorrentSettings) => call<void>('torrent_settings_set', { settings }),
+};
+
+/** The notice every user acknowledges once before sharing or downloading a torrent. */
+export const TORRENT_NOTICE =
+  'You are responsible for what you stream. Only use torrents you have the right to download and share. While a torrent downloads, other people in its swarm can see your IP address.';
+
+const PHASE_TEXT: Record<TorrentPhase, string> = {
+  metadata: 'getting file list',
+  downloading: 'downloading',
+  streaming: 'downloading',
+  noPeers: 'waiting for peers',
+  complete: 'complete',
+  failed: 'failed',
+};
+
+/** Short status for a member's torrent ("downloading 42%", "buffering", "complete"...). */
+export function torrentStatusText(t: { phase: TorrentPhase; permille: number } | null, buffering = false): string | null {
+  if (!t) return null;
+  if (buffering && t.phase !== 'complete') return 'buffering';
+  const pct = Math.floor(t.permille / 10);
+  return t.phase === 'downloading' || t.phase === 'streaming' || t.phase === 'noPeers' ? `${PHASE_TEXT[t.phase]} ${pct}%` : PHASE_TEXT[t.phase];
+}
+
+export const fmtBytes = (n: number) =>
+  n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(0, Math.round(n / 1e3))} KB`;
+
+export const fmtRate = (bps: number) => `${fmtBytes(bps)}/s`;
+
+export function fmtEta(secs: number | null): string {
+  if (secs == null) return '-';
+  if (secs < 60) return `${secs} s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)} min`;
+  return `${Math.floor(secs / 3600)} h ${Math.floor((secs % 3600) / 60)} min`;
+}
 
 export function onRoomState(cb: (s: RoomState) => void): () => void {
   if (!inTauri()) return () => {};

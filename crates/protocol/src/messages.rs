@@ -91,6 +91,27 @@ pub enum TrackSyncStatus {
     Downloading { permille: u16 },
 }
 
+/// A member's torrent download phase (spec section 10, host's progress block).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TorrentPhase {
+    Metadata,
+    Downloading,
+    /// Playing while downloading.
+    Streaming,
+    NoPeers,
+    /// 100% verified; downloading and sharing have stopped.
+    Complete,
+    Failed,
+}
+
+/// Torrent progress in member status reports: whole percent steps (permille rounded down to a
+/// multiple of 10) so a download sends at most ~100 updates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TorrentProgress {
+    pub phase: TorrentPhase,
+    pub permille: u16,
+}
+
 /// Member -> host status report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberStatus {
@@ -101,6 +122,8 @@ pub struct MemberStatus {
     pub buffering: bool,
     pub tracks: TrackSyncStatus,
     pub rtt_ms: Option<u32>,
+    /// Torrent rooms only.
+    pub torrent: Option<TorrentProgress>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +138,8 @@ pub struct MemberInfo {
     pub chat_muted: bool,
     /// False while a dropped member's seat is kept (shown as reconnecting).
     pub connected: bool,
+    /// Torrent rooms only.
+    pub torrent: Option<TorrentProgress>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

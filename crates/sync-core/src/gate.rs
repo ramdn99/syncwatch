@@ -85,6 +85,7 @@ mod tests {
             buffering,
             tracks: TrackSyncStatus::InSync,
             rtt_ms: None,
+            torrent: None,
         }
     }
 

@@ -302,14 +302,21 @@ export async function maybeRunScenario() {
   if (started) return;
   started = true;
   const cfg = await invoke<{ name: string; role: string; media: string | null; extra: string[] } | null>('dev_scenario').catch(() => null);
-  if (!cfg || !['chat', 'rooms', 'sync', 'chattime', 'late', 'popup', 'succession'].includes(cfg.name)) return;
+  if (!cfg || !['chat', 'rooms', 'sync', 'chattime', 'late', 'popup', 'succession', 'torrent', 'skiprelay'].includes(cfg.name)) return;
   const report: Report = (line) => void invoke('dev_scenario_report', { line });
   onRoomState((s) => (latest = s));
   report(`START ${cfg.role}`);
   try {
     const m6 = await import('./scenario6');
     const media = cfg.media ?? '';
-    if (cfg.name === 'sync') {
+    if (cfg.name === 'torrent') {
+      const m7 = await import('./scenario7');
+      if (cfg.role === 'host') await m7.torrentHost(report, media, cfg.extra[0] ?? '');
+      else await m7.torrentMember(report, cfg.extra[0] ?? '');
+    } else if (cfg.name === 'skiprelay') {
+      if (cfg.role === 'host') await m6.skipRelayedHost(report, media, cfg.extra);
+      else await m6.skipRelayedMember(report, media);
+    } else if (cfg.name === 'sync') {
       if (cfg.role === 'host') await m6.syncHost(report, media, cfg.extra);
       else await m6.syncMember(report, media);
     } else if (cfg.name === 'succession') {

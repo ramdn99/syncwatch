@@ -60,6 +60,8 @@ pub struct MediaCtx {
     /// mpv file name -> manifest id, for the external tracks we added.
     added: HashMap<String, ExternalId>,
     pub uploads: Vec<Upload>,
+    /// The torrent loopback URL (contains a secret token: never logged).
+    pub torrent_url: Option<String>,
 }
 
 impl MediaCtx {
@@ -302,10 +304,15 @@ impl MediaCtx {
                     Ok(())
                 }
             },
-            PlayerCmd::LoadTorrentStream { .. } => {
-                tracing::info!("torrent streaming arrives in Milestone 7");
-                Ok(())
-            }
+            PlayerCmd::LoadTorrentStream { .. } => match &self.torrent_url {
+                // The loopback server streams while downloading and serves the finished file
+                // from the same URL afterwards (no reload at completion).
+                Some(url) => player.load(url),
+                None => {
+                    tracing::warn!("torrent load requested before the stream was ready");
+                    Ok(())
+                }
+            },
             PlayerCmd::Stop => player.unload(),
             PlayerCmd::SetPaused(p) => player.set_paused(p),
             PlayerCmd::Seek(ms) => player.seek(ms.max(0) as f64 / 1000.0),

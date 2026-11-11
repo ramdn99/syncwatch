@@ -534,3 +534,49 @@ export async function successionMember(report: Report, media: string) {
   await say(`succ-done-${me.isHost ? 'host' : 'member'}`);
   await waitFor('both done', (x) => texts(x).includes('zqx succ-done-host') && texts(x).includes('zqx succ-done-member'), 30_000);
 }
+
+// ------------------------------------------------------------------- skip relayed (M7) ------
+
+/** Run with -Ice coturn (relay-only): the member is relayed, the host adds a file with
+ * "Skip relayed members"; the member's own window must say so instead of a stalled download. */
+export async function skipRelayedHost(report: Report, media: string, extras: string[]) {
+  const s0 = await waitFor('member joined', (s) => s.phase === 'inRoom' && s.members.length === 2, 60_000);
+  await check(report, 'the member is connected through the relay', async () => {
+    const m = (await waitFor('relayed link', (s) => s.members.some((x) => !x.isYou && x.link === 'relayed'), 30_000)).members.find((x) => !x.isYou);
+    report(`INFO member link: ${m?.link} (members ${s0.members.length})`);
+  });
+  await check(report, 'host loads the video', () => loadAsHost(media));
+  await check(report, 'member ready', () => waitFor('member ready', (s) => s.members.some((m) => !m.isYou && m.media === 'ready'), 60_000));
+  await check(report, 'host adds a file with "Skip relayed members"', async () => {
+    const r = await room.addExternal('audio', extras[0] ?? '', false, 'skipRelayed');
+    if (!r.added) throw new Error('not added');
+    report(`TS skip_added ${Date.now()}`);
+  });
+  await check(report, 'the member saw the message', () => waitFor('member saw it', said('withheld-seen'), 60_000));
+  await check(report, 'host lists the file normally', async () => {
+    const s = await current();
+    if (s.externals.length !== 1) throw new Error(`externals: ${s.externals.length}`);
+  });
+}
+
+export async function skipRelayedMember(report: Report, media: string) {
+  await waitFor('in the room', (s) => s.phase === 'inRoom' && s.members.some((m) => m.isHost), 60_000);
+  await check(report, 'member chooses the file', async () => {
+    await chooseAsMember(media);
+    await waitSnap('member file loaded', (s) => s.state.fileLoaded, 30_000);
+  });
+  await check(report, 'skipped member: "The host did not send this file to you" (no stalled download)', async () => {
+    await waitFor('withheld', (s) => s.externals.length === 1 && s.externals[0]!.withheld, 60_000);
+    report(`TS withheld_seen ${Date.now()}`);
+    const el = document.querySelector('[data-testid="external-withheld"]');
+    if (el?.textContent !== 'The host did not send this file to you') throw new Error(`DOM text: ${el?.textContent ?? 'missing'}`);
+    const s = await current();
+    if (s.externals[0]!.received != null) throw new Error('still shows a download');
+    if (document.body.textContent?.includes('%') && document.querySelector('[data-testid="external"] .text-warning')) throw new Error('progress shown');
+    await sleep(3000);
+    const later = await current();
+    if (later.externals[0]!.received != null || !later.externals[0]!.withheld) throw new Error('state changed');
+  });
+  await say('withheld-seen');
+  await sleep(3000);
+}

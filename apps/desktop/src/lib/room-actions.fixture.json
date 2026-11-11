@@ -130,5 +130,15 @@
       "kind": "sub",
       "ms": -250
     }
+  },
+  {
+    "action": {
+      "type": "acceptMagnet"
+    }
+  },
+  {
+    "action": {
+      "type": "declineMagnet"
+    }
   }
 ]

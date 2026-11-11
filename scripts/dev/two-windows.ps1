@@ -39,7 +39,7 @@ param(
     [string]$Password = '',
     [int]$Soak = 0,
     # Scripted end-to-end checks (debug builds): chat, rooms, sync, chattime, late (3 windows).
-    [ValidateSet('', 'chat', 'rooms', 'sync', 'chattime', 'late', 'popup', 'succession')][string]$Scenario = '',
+    [ValidateSet('', 'chat', 'rooms', 'sync', 'chattime', 'late', 'popup', 'succession', 'torrent', 'skiprelay')][string]$Scenario = '',
     [switch]$Docker,
     # Stop a stale Vite/node process of THIS repo that still holds port 1420.
     [switch]$FreePort,
@@ -87,15 +87,19 @@ foreach ($port in 1420, 8787) {
 # Scenario media (only read; never part of the repo).
 $scenarioMedia = switch ($Scenario) {
     'chattime' { Join-Path $MediaDir 'long.mkv' }
-    { $_ -in 'rooms', 'sync', 'late', 'popup', 'succession' } { if ($Media) { $Media } else { 'D:\media\test.mkv' } }
+    { $_ -in 'rooms', 'sync', 'late', 'popup', 'succession', 'skiprelay' } { if ($Media) { $Media } else { 'D:\media\test.mkv' } }
+    # torrent: the magnet (from scripts/dev/torrent-lab.ps1, which also runs the seeder).
+    'torrent' { $env:SYNCWATCH_LAB_MAGNET }
     default { '' }
 }
 $extra = switch ($Scenario) {
+    'torrent' { @($env:SYNCWATCH_LAB_FILE) }
     'sync' { @((Join-Path $MediaDir 'extra-cp1252.srt'), (Join-Path $MediaDir 'extra-audio.mka')) }
     'late' { @('D:\media\test-mismatch.mkv') }
+    'skiprelay' { @((Join-Path $MediaDir 'extra-audio.mka')) }
     default { @() }
 }
-foreach ($n in @($scenarioMedia) + $extra) {
+foreach ($n in $(if ($Scenario -eq 'torrent') { @() } else { @($scenarioMedia) + $extra })) {
     if ($n -and -not (Test-Path $n)) { Write-Host "Missing test file $n. Run: pwsh -NoProfile -File scripts/dev/make-test-media.ps1" -ForegroundColor Red; exit 1 }
 }
 

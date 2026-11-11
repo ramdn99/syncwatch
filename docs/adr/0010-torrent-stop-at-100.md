@@ -111,3 +111,33 @@ tokio task count goes back to its baseline.
   - it is sent on completion, and also when the user leaves the room, the source is switched,
     or the user cancels mid-download;
   - it is tested against a local fake tracker (HTTP and UDP).
+
+## Results (Milestone 7)
+
+- **`stop_everything_at_100`** (in process, 6 MiB, HTTP and UDP fake trackers):
+  - "stopped" was received by both trackers, with nothing from us afterwards;
+  - the seeder sent 0 bytes over 10 s and has 0 peers;
+  - our listen port is free, the engine is down, and the file is byte-exact over the loopback;
+  - a new engine on the same cache plays the file with no session, no tracker request and 0
+    bytes.
+- **Other engine tests:**
+  - `handoff_preserves_position`: one HTTP response spans the completion, byte-exact;
+  - `cancel_and_switch_stop_the_old_torrent_completely`: stop returns at once, the old seeder
+    gets 0 bytes, the partial data is deleted, and a magnet with no seeds times out;
+  - `cancel_while_resolving_is_immediate`;
+  - `uploads_while_downloading_without_a_cap`;
+  - `multi_file_downloads_only_the_selected_file`.
+- **Two windows with qBittorrent** (outside monitor, 1 s samples, about 17 s after both
+  completions, including a member rejoin):
+  - qBittorrent uploaded 0 more bytes and had 0 peers;
+  - no peer connection and no tracker connection to our processes;
+  - our processes held no UDP socket;
+  - the rejoin started no engine;
+  - each cache holds only `long.mkv`;
+  - qBittorrent sent 147.7 MiB in total for two downloads of the 73.8 MiB file.
+- **Fixed during the lab:** the first run showed our "stopped" announce's HTTP keep-alive
+  connection to the tracker staying open for about 8 s. The announce client now keeps no idle
+  connections (`pool_max_idle_per_host(0)`).
+- **Not done:** the optional realistic check with a public torrent (Sintel or Big Buck Bunny),
+  so the DHT behaviour on a real network is not measured. The Wireshark/TCPView checklist is in
+  `docs/checklists/torrent-stop.md`.

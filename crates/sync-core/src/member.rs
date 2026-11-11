@@ -97,6 +97,7 @@ impl MemberMachine {
                 tracks: known.map(|i| i.tracks).unwrap_or(TrackSyncStatus::InSync),
                 chat_muted: rules.muted.contains(&s.identity),
                 connected: false,
+                torrent: known.and_then(|i| i.torrent),
             });
             identities.push((s.id, s.identity));
         }

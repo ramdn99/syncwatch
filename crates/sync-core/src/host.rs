@@ -406,6 +406,7 @@ impl HostMachine {
             tracks: host_status.tracks,
             chat_muted: false,
             connected: true,
+            torrent: host_status.torrent,
         }];
         v.extend(
             self.members
@@ -424,6 +425,7 @@ impl HostMachine {
                         .unwrap_or(TrackSyncStatus::Applying),
                     chat_muted: self.chat.is_muted(&e.identity),
                     connected: e.connected,
+                    torrent: e.status.and_then(|s| s.torrent),
                 }),
         );
         v

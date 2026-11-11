@@ -90,6 +90,7 @@ pub enum LocalFileEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TorrentEvent {
     Progress {
+        phase: TorrentPhase,
         permille: u16,
     },
     /// Enough is downloaded to start streaming (head/tail + pre-buffer).

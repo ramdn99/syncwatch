@@ -60,7 +60,8 @@ fn init_options(cfg: &MpvConfig) -> Vec<(&'static str, String, bool)> {
         ("hwdec", cfg.hwdec.clone(), false),
         ("background-color", "#000000".into(), false),
         ("cache-pause", "yes".into(), false),
-        ("network-timeout", "60".into(), false),
+        // Torrent streams wait for pieces (seek past the frontier, slow swarm): never time out.
+        ("network-timeout", "600".into(), false),
         ("sub-font", "Noto Sans".into(), false),
         ("terminal", "no".into(), false),
         ("msg-level", "all=warn".into(), false),
