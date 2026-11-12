@@ -681,3 +681,24 @@ async fn member_without_a_path_to_the_swarm_starts_from_the_hosts_metadata() {
     host.stop(sw.seeder.infohash, StopReason::Leave).await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A member without metadata only plays a file it already finished: no fetch, no session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cached_only_start_never_touches_the_swarm() {
+    init();
+    let dir = tmp("cachedonly");
+    let (eng, mut ev) = EngineHandle::spawn(engine_cfg(dir.join("cache"), free_port()));
+    let ih = syncwatch_protocol::Infohash([5; 20]);
+    eng.start_cached_only(media(
+        ih,
+        0,
+        "x.mkv",
+        100,
+        magnet(&ih, "x.mkv", &["http://127.0.0.1:1/announce".into()]),
+    ));
+    let mut seen = Vec::new();
+    let any = wait_event(&mut ev, &mut seen, 3, |_| true).await;
+    assert!(any.is_none(), "nothing happens: {any:?}");
+    assert!(!eng.session_running().await, "no engine session");
+    let _ = std::fs::remove_dir_all(&dir);
+}

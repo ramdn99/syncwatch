@@ -204,3 +204,137 @@ export async function torrentMember(report: Report, fileName: string) {
   });
   await sleep(6000);
 }
+
+// ------------------------------------------------------- .torrent file, decline, late joiner --
+
+/** Every member's status (host view) satisfies `ok`. */
+const membersAll = (ok: (m: RoomState['members'][number]) => boolean) => (s: RoomState) => s.members.filter((m) => !m.isYou).every(ok);
+
+export async function torrentFileHost(report: Report, torrentFile: string, magnet: string, local: string) {
+  await waitFor('two members joined', (s) => s.phase === 'inRoom' && s.members.length === 3, 90_000);
+  let ih = '';
+  await check(report, '(b) the host opens a .torrent FILE: name, infohash, size and files at once (no network)', async () => {
+    const t0 = Date.now();
+    const info = await torrents.inspectFile(torrentFile);
+    report(`INFO .torrent inspected in ${Date.now() - t0} ms: ${info.name}, ${info.files.length} file(s), ${info.totalSize} bytes, ${info.trackers} tracker(s)`);
+    ih = info.infohash;
+    await room.setTorrentFile(info.infohash, info.files[0]!.index);
+    report(`TS t2_set ${Date.now()}`);
+  });
+  await check(report, '(g) a member who declines starts nothing; the host sees "declined"', () =>
+    waitFor('a member declined', (s) => s.members.some((m) => !m.isYou && m.media === 'declined'), 60_000),
+  );
+  await check(report, '(b) host and member play while downloading, in sync', async () => {
+    await waitSnap('host loaded', (s) => s.state.fileLoaded, 120_000);
+    await waitFor('member B ready', (s) => s.members.some((m) => m.name === 'Member B' && m.media === 'ready'), 120_000);
+    await act({ type: 'play' });
+    await waitSnap('host playing', playing, 30_000);
+    await sleep(3000);
+    await sample(report, 'fplay');
+  });
+  await check(report, "(d) the late joiner starts directly on the host's file", () => waitFor('c rejoined and ready', said('c-started'), 180_000));
+  await check(report, '(f) everyone completes the file', async () => {
+    await waitFor('own complete', (s) => s.torrent?.phase === 'complete', 400_000);
+    await waitFor('members complete', membersAll((m) => m.torrent?.phase === 'complete'), 400_000);
+    report(`TS t2_all_complete ${Date.now()}`);
+  });
+  await sleep(6000);
+  await check(report, '(e) switch: .torrent file -> magnet', async () => {
+    const info = await torrents.metadata(magnet);
+    const f = info.files.find((x) => x.path.endsWith('long.mkv'))!;
+    await room.setTorrentMedia(magnet, f.index, f.path, f.size);
+    report(`TS t1_set ${Date.now()}`);
+    await waitFor(
+      'members downloading T1',
+      membersAll((m) => m.torrent != null && (m.torrent.phase === 'downloading' || m.torrent.phase === 'streaming') && m.torrent.permille > 0),
+      120_000,
+    );
+    await sleep(5000);
+  });
+  await check(report, '(e) switch: magnet -> local file', async () => {
+    report(`TS t1_off ${Date.now()}`);
+    await room.setLocalMedia(local);
+    await waitSnap('local loaded', (s) => s.state.fileLoaded, 30_000);
+    await sleep(15_000);
+  });
+  await check(report, '(e) switch: local file -> back to the .torrent file (finished: no swarm)', async () => {
+    const info = await torrents.inspectFile(torrentFile);
+    if (info.infohash !== ih) throw new Error('different torrent');
+    report(`TS back_t2 ${Date.now()}`);
+    await room.setTorrentFile(info.infohash, info.files[0]!.index);
+    await waitFor('own complete again', (s) => s.torrent?.phase === 'complete', 30_000);
+    await waitFor('members complete again', membersAll((m) => m.torrent?.phase === 'complete'), 60_000);
+    await waitSnap('loaded again', (s) => s.state.fileLoaded, 30_000);
+  });
+  await sleep(10_000);
+  report(`TS final ${Date.now()}`);
+  await say('tf-done');
+}
+
+export async function torrentFileMember(report: Report) {
+  await check(report, "(b) member confirms the .torrent room and starts the host's file", async () => {
+    const s = await waitFor('confirm', (x) => x.confirmMagnet != null, 120_000);
+    report(`INFO B confirm: torrent "${s.confirmMagnet?.torrentName}", file ${s.confirmMagnet?.name} ${s.confirmMagnet?.size}`);
+    await act({ type: 'acceptMagnet' });
+    await waitSnap('B loaded', (x) => x.state.fileLoaded, 180_000);
+    report(`INFO B loaded at ${pct(await current())}% downloaded`);
+  });
+  await check(report, 'B follows play', async () => {
+    await waitSnap('B playing', playing, 60_000);
+    await sleep(3000);
+    await sample(report, 'fplay');
+  });
+  await check(report, '(e) B accepts the magnet after the switch', async () => {
+    await waitFor('confirm T1', (x) => x.confirmMagnet != null && x.confirmMagnet.name === 'long.mkv', 600_000);
+    await act({ type: 'acceptMagnet' });
+  });
+  await check(report, '(e) B accepts the .torrent again (finished file, no swarm)', async () => {
+    await waitFor('confirm T2 again', (x) => x.confirmMagnet != null && x.confirmMagnet.name !== 'long.mkv', 600_000);
+    await act({ type: 'acceptMagnet' });
+    await waitFor('B complete again', (x) => x.torrent?.phase === 'complete', 30_000);
+  });
+  await waitFor('done', said('tf-done'), 120_000);
+}
+
+export async function torrentFileLate(report: Report) {
+  await check(report, '(g) member C declines: nothing starts', async () => {
+    await waitFor('confirm', (x) => x.confirmMagnet != null, 120_000);
+    await act({ type: 'declineMagnet' });
+    await sleep(8000);
+    const s = await current();
+    if (s.torrent != null) throw new Error(`a download started: ${s.torrent.phase}`);
+    report(`TS c_declined ${Date.now()}`);
+  });
+  await check(report, "(d) C rejoins late and starts directly on the host's file", async () => {
+    const code = (await current()).roomCode;
+    if (!code) throw new Error('no room code');
+    await room.leave();
+    await waitFor('left', (s) => !s.active, 20_000);
+    await room.join('Member C', code, null);
+    const s = await waitFor('confirm again', (x) => x.confirmMagnet != null, 60_000);
+    report(`INFO C confirm after rejoin: ${s.confirmMagnet?.name} ${s.confirmMagnet?.size}`);
+    await act({ type: 'acceptMagnet' });
+    report(`TS c_accept ${Date.now()}`);
+    let sawSwarmLookup = false;
+    const end = Date.now() + 120_000;
+    for (;;) {
+      const r = await current();
+      if (r.torrent?.phase === 'metadata') sawSwarmLookup = true;
+      const sn = await snap();
+      if (sn.state.fileLoaded) break;
+      if (Date.now() > end) throw new Error(`C did not start (${r.torrent?.phase})`);
+      await sleep(150);
+    }
+    report(`TS c_loaded ${Date.now()}`);
+    if (sawSwarmLookup) throw new Error('C looked for the file list in the swarm');
+    await say('c-started');
+  });
+  await check(report, 'C accepts the magnet after the switch, then the .torrent again', async () => {
+    await waitFor('confirm T1', (x) => x.confirmMagnet != null && x.confirmMagnet.name === 'long.mkv', 600_000);
+    await act({ type: 'acceptMagnet' });
+    await waitFor('confirm T2 again', (x) => x.confirmMagnet != null && x.confirmMagnet.name !== 'long.mkv', 600_000);
+    await act({ type: 'acceptMagnet' });
+    await waitFor('C complete again', (x) => x.torrent?.phase === 'complete', 30_000);
+  });
+  await waitFor('done', said('tf-done'), 120_000);
+}

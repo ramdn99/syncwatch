@@ -302,14 +302,19 @@ export async function maybeRunScenario() {
   if (started) return;
   started = true;
   const cfg = await invoke<{ name: string; role: string; media: string | null; extra: string[] } | null>('dev_scenario').catch(() => null);
-  if (!cfg || !['chat', 'rooms', 'sync', 'chattime', 'late', 'popup', 'succession', 'torrent', 'skiprelay'].includes(cfg.name)) return;
+  if (!cfg || !['chat', 'rooms', 'sync', 'chattime', 'late', 'popup', 'succession', 'torrent', 'skiprelay', 'torrentfile'].includes(cfg.name)) return;
   const report: Report = (line) => void invoke('dev_scenario_report', { line });
   onRoomState((s) => (latest = s));
   report(`START ${cfg.role}`);
   try {
     const m6 = await import('./scenario6');
     const media = cfg.media ?? '';
-    if (cfg.name === 'torrent') {
+    if (cfg.name === 'torrentfile') {
+      const m7 = await import('./scenario7');
+      if (cfg.role === 'host') await m7.torrentFileHost(report, cfg.extra[0] ?? '', media, cfg.extra[1] ?? '');
+      else if (cfg.role === 'late') await m7.torrentFileLate(report);
+      else await m7.torrentFileMember(report);
+    } else if (cfg.name === 'torrent') {
       const m7 = await import('./scenario7');
       if (cfg.role === 'host') await m7.torrentHost(report, media, cfg.extra[0] ?? '');
       else await m7.torrentMember(report, cfg.extra[0] ?? '');

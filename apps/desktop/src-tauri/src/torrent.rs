@@ -216,6 +216,70 @@ pub struct TorrentInfoDto {
     infohash: String,
     name: String,
     files: Vec<TorrentFileDto>,
+    total_size: u64,
+    trackers: usize,
+    /// BEP 19 web seeds listed (librqbit 9.0.1 cannot use them).
+    web_seeds: usize,
+}
+
+fn info_dto(info: syncwatch_torrent::TorrentInfo) -> TorrentInfoDto {
+    let mut files: Vec<TorrentFileDto> = info
+        .files
+        .into_iter()
+        .map(|f| TorrentFileDto {
+            index: f.index,
+            path: f.path,
+            size: f.len,
+            video: f.video,
+        })
+        .collect();
+    // Videos first, largest first (the likely main file), then the rest.
+    files.sort_by(|a, b| b.video.cmp(&a.video).then(b.size.cmp(&a.size)));
+    TorrentInfoDto {
+        infohash: info.infohash.to_hex(),
+        name: info.name,
+        files,
+        total_size: info.total_size,
+        trackers: info.trackers,
+        web_seeds: info.web_seeds,
+    }
+}
+
+/// Host, Change source: a .torrent FILE. Read and validated locally (no network at all):
+/// size cap, bencode limits, safe paths, UTF-8, tracker caps. Its bytes are kept for the room.
+#[tauri::command]
+pub async fn torrent_inspect_file(app: AppHandle, path: String) -> Result<TorrentInfoDto, String> {
+    let svc = Arc::clone(&*app.state::<Arc<TorrentService>>());
+    let cap = svc.meta_cap();
+    let p = PathBuf::from(&path);
+    let len = std::fs::metadata(&p)
+        .map_err(|_| "That file could not be read.".to_owned())?
+        .len();
+    if len > cap as u64 {
+        return Err("This .torrent file is larger than the limit in Settings > Torrents.".into());
+    }
+    let bytes = tauri::async_runtime::spawn_blocking(move || std::fs::read(p))
+        .await
+        .map_err(|_| "That file could not be read.".to_owned())?
+        .map_err(|_| "That file could not be read.".to_owned())?;
+    let m = syncwatch_torrent::meta::inspect(&bytes, cap, None)
+        .map_err(|e| meta_error_text(&e).to_owned())?;
+    let info = syncwatch_torrent::TorrentInfo::from_meta(&m);
+    svc.cache_meta(info.infohash, info.torrent.clone());
+    Ok(info_dto(info))
+}
+
+pub fn meta_error_text(e: &syncwatch_torrent::meta::MetaError) -> &'static str {
+    use syncwatch_torrent::meta::MetaError as E;
+    match e {
+        E::TooLarge => "This .torrent file is larger than the limit in Settings > Torrents.",
+        E::Malformed => "This is not a valid .torrent file.",
+        E::TooDeep | E::TooMany => "This .torrent file is too complex and was refused.",
+        E::NotUtf8 => "A file name in this torrent is not valid text; it was refused.",
+        E::UnsafePath => "This torrent contains an unsafe file name or path and was refused.",
+        E::HashMismatch => "The torrent metadata does not belong to this torrent and was refused.",
+        E::NoFiles => "This torrent has no files.",
+    }
 }
 
 pub fn engine_error_text(e: &syncwatch_torrent::EngineError) -> &'static str {
@@ -250,23 +314,7 @@ pub async fn torrent_metadata(app: AppHandle, magnet: String) -> Result<TorrentI
         .await
         .map_err(|e| engine_error_text(&e).to_owned())?;
     svc.cache_meta(info.infohash, info.torrent.clone());
-    let mut files: Vec<TorrentFileDto> = info
-        .files
-        .into_iter()
-        .map(|f| TorrentFileDto {
-            index: f.index,
-            path: f.path,
-            size: f.len,
-            video: f.video,
-        })
-        .collect();
-    // Videos first, largest first (the likely main file), then the rest.
-    files.sort_by(|a, b| b.video.cmp(&a.video).then(b.size.cmp(&a.size)));
-    Ok(TorrentInfoDto {
-        infohash: info.infohash.to_hex(),
-        name: info.name,
-        files,
-    })
+    Ok(info_dto(info))
 }
 
 #[tauri::command]

@@ -81,6 +81,28 @@ cause, until a 90 s timeout.
   The host's progress block shows each member's phase, including "waiting for the host's file
   list".
 
+## .torrent files (same change set, second commit)
+
+- The host can pick a `.torrent` file instead of a magnet. It is read and validated locally with
+  no network: name, infohash, total size and files show at once. Its sanitized bytes are what
+  the host's engine adds and what members receive. Its trackers go into the room's magnet and
+  into the announces.
+- Changing source between magnet, file and local keeps the ADR 0010 rules. The old torrent
+  stops completely, with "stopped" sent to its trackers. A finished file comes back from the
+  cache with no swarm traffic.
+
+## Web seeds and a public check
+
+- librqbit 9.0.1 has no web-seed (BEP 19 `url-list`) support. Our parser keeps at most 8
+  validated http/https web-seed URLs, only so that the count can drive the message "The torrent
+  file was loaded, but no peers are sharing it yet. Its web seeds are not supported."
+- **Internet Archive check (2026-11-12, about 60 s, trackers only, DHT off):**
+  `SteamboatWillie_archive.torrent` (4.7 KB) parsed fine. It has 6 files, 2 of them video;
+  2 trackers (bt1/bt2.archive.org); and 2 web seeds. Its trackers returned one peer, which
+  delivered about 5.6 MB in 60 s at around 1.6 MB/s. So this torrent works through its peer,
+  not through web seeds. IA torrents whose items have no BitTorrent peer at a given time would
+  stall, showing the message above.
+
 ## Consequences
 
 - **Members on other networks** download exactly as before, except that they never fetch the

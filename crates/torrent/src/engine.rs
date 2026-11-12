@@ -242,6 +242,8 @@ enum Cmd {
         /// Host-provided (member) or .torrent-file metadata: no swarm lookup at all.
         meta: Option<Vec<u8>>,
         extra_peers: Vec<SocketAddr>,
+        /// Only play an already finished file; never fetch or join anything.
+        cached_only: bool,
     },
     Stop {
         infohash: Infohash,
@@ -302,6 +304,18 @@ impl EngineHandle {
             media,
             meta: Some(meta),
             extra_peers,
+            cached_only: false,
+        });
+    }
+
+    /// Plays this torrent's file if it is already finished in the cache (no swarm, no fetch);
+    /// otherwise does nothing (a member then waits for the host's metadata).
+    pub fn start_cached_only(&self, media: TorrentMedia) {
+        let _ = self.tx.send(Cmd::Start {
+            media,
+            meta: None,
+            extra_peers: Vec::new(),
+            cached_only: true,
         });
     }
 
@@ -310,6 +324,7 @@ impl EngineHandle {
             media,
             meta: None,
             extra_peers: Vec::new(),
+            cached_only: false,
         });
     }
 
@@ -664,7 +679,8 @@ impl Actor {
                 media,
                 meta,
                 extra_peers,
-            } => self.start(media, meta, extra_peers).await,
+                cached_only,
+            } => self.start(media, meta, extra_peers, cached_only).await,
             Cmd::Stop {
                 infohash,
                 reason,
@@ -792,6 +808,7 @@ impl Actor {
         media: TorrentMedia,
         given: Option<Vec<u8>>,
         extra_peers: Vec<SocketAddr>,
+        cached_only: bool,
     ) {
         let ih = media.infohash;
         if self.active.contains_key(&ih) || self.served.contains_key(&ih) {
@@ -811,9 +828,23 @@ impl Actor {
                         status: complete_status(media.size),
                     });
                     self.emit(EngineEvent::Complete { infohash: ih });
+                    // A host serving a finished file still offers its metadata to members.
+                    if let Some(m) = given
+                        .as_deref()
+                        .and_then(|b| meta::inspect(b, self.cfg.meta_cap, Some(ih)).ok())
+                    {
+                        self.emit(EngineEvent::Metadata {
+                            infohash: ih,
+                            torrent: m.sanitized(),
+                            port: 0,
+                        });
+                    }
                 }
                 Err(_) => self.fail(ih, EngineError::Engine),
             }
+            return;
+        }
+        if cached_only {
             return;
         }
         // Metadata already known (host offer / .torrent): verify it and add directly.

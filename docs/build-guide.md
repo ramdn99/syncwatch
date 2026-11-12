@@ -193,6 +193,32 @@ pwsh -NoProfile -File scripts/dev/torrent-lab.ps1
 pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -UpKiB 500 -KeepQbt
 ```
 
+Lab variants:
+
+```
+pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -Scenario torrentfile -UpKiB 1500
+pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -SameIpDefault
+pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -Manual
+```
+
+- `-Scenario torrentfile` uses three windows:
+  1. the host opens a `.torrent` file;
+  2. one member declines, then rejoins late and starts on the host's file;
+  3. the source switches .torrent, magnet, local file, then back to the .torrent.
+- `-SameIpDefault` puts qBittorrent on 127.0.0.2 with libtorrent's default of one connection
+  per IP, like a real public swarm seen from one PC. This reproduced the member bug of ADR 0011.
+- `-Manual` seeds both generated test torrents and prints the multi-file magnet, the 40 MB
+  `.torrent` file path and its magnet for a hands-on test. It cleans up when you press a key,
+  or after `-ManualMinutes` (60 by default).
+
+Inspect any `.torrent` with our parser, and optionally try it for N seconds (trackers only, DHT
+off, loopback listener):
+
+```
+cargo run -p syncwatch-torrent --example inspect_torrent -- <file.torrent>
+cargo run -p syncwatch-torrent --example inspect_torrent -- <file.torrent> 60
+```
+
 The manual Wireshark/TCPView checklist is `docs/checklists/torrent-stop.md`.
 
 | Variable (debug builds) | Effect |

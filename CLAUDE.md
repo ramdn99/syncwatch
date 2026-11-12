@@ -78,6 +78,9 @@ pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario sync   (also chattim
 docker compose -f deploy/compose.dev.yml up -d --build   (signaling + local coturn; always down afterwards)
 cargo test -p syncwatch-torrent   (librqbit in process, fake trackers; ~1 min)
 pwsh -NoProfile -File scripts/dev/torrent-lab.ps1   (two windows + qBittorrent as the only local, throttled seeder; outside traffic monitor)
+pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -Scenario torrentfile -UpKiB 1500   (.torrent file, decline, late joiner, source switches; 3 windows)
+pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -SameIpDefault   (qBittorrent with one connection per IP: the ADR 0011 member bug setup)
+pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -Manual   (hands-on material: prints magnets and the .torrent path; key press or timeout cleans up)
 pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario skiprelay -Ice coturn
 pwsh -NoProfile -File scripts/check-tls-tree.ps1   (Windows tree: no aws-lc/native-tls/OpenSSL)
 cargo deny --locked check bans advisories sources

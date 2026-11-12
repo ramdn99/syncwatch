@@ -270,6 +270,8 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             crate::media::magnet_inspect,
             crate::media::prepare_change_media,
             crate::torrent::torrent_metadata,
+            crate::torrent::torrent_inspect_file,
+            crate::room::room_set_torrent_file,
             crate::torrent::torrent_settings_get,
             crate::torrent::torrent_settings_set,
             crate::room::room_set_torrent_media,

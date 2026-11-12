@@ -5,11 +5,14 @@ Milestone 9.
 
 ## Watching a torrent together
 
-- **Host:**
-  1. Open Change source, then Torrent magnet, and paste a magnet link.
-  2. Choose **Get file list**. SyncWatch asks peers for the torrent's file list; this can take
-     a moment and fails after 90 s if nobody has it.
-  3. Pick the video file. Only that file is downloaded.
+- **Host:** open Change source, then **Torrent**. There are two ways to add one:
+  - **Magnet link:** paste it and choose **Get file list**. SyncWatch asks peers for the
+    torrent's file list. This can take a moment, and it fails after 90 s if nobody shares the
+    torrent; the message names the likely cause (nobody sharing it, a firewall, DHT off).
+  - **Torrent file:** choose **Choose .torrent...** or drop a `.torrent` file on the dialog. Its
+    name, infohash, total size and file list show at once, with no network.
+
+  Then pick the video file. Only that file is downloaded, by everyone.
 - **Members** see the torrent's name, the file the host chose and its size, and choose
   **Download and play** or **Decline**. Nothing is downloaded before they agree. Members never
   look for the file list themselves: they get it from the host. If the host is still getting it,
@@ -21,6 +24,18 @@ Milestone 9.
   is instant.
 - **No peers:** SyncWatch shows "waiting for peers" and retries by itself. What is already
   downloaded keeps playing.
+
+### What you see while waiting
+
+- "Waiting for the host to get the file list": a member is waiting for the host.
+- "Looking for peers (DHT on, 3 trackers)": the host is fetching the file list.
+- "4 peers found": downloading.
+- "The torrent file was loaded, but no peers are sharing it yet": nobody shares the torrent.
+  SyncWatch retries by itself.
+
+SyncWatch cannot use **web seeds** (HTTP download addresses inside some torrents, common on the
+Internet Archive). A torrent that relies only on web seeds and has no peers will not download.
+The message then says so.
 
 ### When the download is complete
 

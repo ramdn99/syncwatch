@@ -35,7 +35,14 @@ param(
     # Only start the seeder (qBittorrent keeps running) and probe the tracker.
     [switch]$SeedOnly,
     # Keep libtorrent's default of ONE connection per IP (like a real public swarm seen from one PC).
-    [switch]$SameIpDefault
+    [switch]$SameIpDefault,
+    # torrent: magnet room (2 windows). torrentfile: .torrent file room, decline, late joiner,
+    # source switches magnet -> local -> back (3 windows).
+    [ValidateSet('torrent', 'torrentfile')][string]$Scenario = 'torrent',
+    # Hands-on test material: seed both test torrents, print the magnets and .torrent paths, keep
+    # qBittorrent running until a key is pressed or -ManualMinutes pass, then clean up.
+    [switch]$Manual,
+    [int]$ManualMinutes = 60
 )
 # -SameIpDefault: qBittorrent keeps libtorrent's ONE connection per IP and sits on 127.0.0.2, so the
 # first window (127.0.0.1) gets in and a second one from the same address is refused, as behind one
@@ -62,10 +69,21 @@ Set-Content (Join-Path $pack 'readme.nfo') 'SyncWatch generated test pack. Not r
 $tracker = "http://127.0.0.1:$TrackerPort/announce"
 $torrentFile = Join-Path $lab 'lab.torrent'
 $mk = cargo run -q -p syncwatch-torrent --example make_test_torrent -- $pack $torrentFile $tracker 256
-$magnet = ($mk | Where-Object { $_ -like 'MAGNET *' }) -replace '^MAGNET ', ''
-$ih = ($mk | Where-Object { $_ -like 'INFOHASH *' }) -replace '^INFOHASH ', ''
+$magnet = ($mk | Where-Object { $_ -like 'MAGNET *' }) -replace '^MAGNET ', '' | ForEach-Object { $_.Trim() }
+
+$ih = ($mk | Where-Object { $_ -like 'INFOHASH *' }) -replace '^INFOHASH ', '' | ForEach-Object { $_.Trim() }
 if (-not $magnet) { Write-Host 'FAIL could not create the test torrent' -ForegroundColor Red; exit 1 }
 Write-Host "Test torrent $ih (3 files, own tracker on 127.0.0.1)"
+# A second, single-file torrent of ~40 MB for the .torrent file tests (cut from the generated video).
+$film = Join-Path $lab 'SyncWatch Test Film.mkv'
+& ffmpeg -v error -y -i $long -t 2040 -map 0 -c copy $film
+if ($LASTEXITCODE -or -not (Test-Path $film)) { Write-Host 'FAIL could not create the film file' -ForegroundColor Red; exit 1 }
+$filmTorrent = Join-Path $lab 'film.torrent'
+$mk2 = cargo run -q -p syncwatch-torrent --example make_test_torrent -- $film $filmTorrent $tracker 256
+$magnet2 = ($mk2 | Where-Object { $_ -like 'MAGNET *' }) -replace '^MAGNET ', '' | ForEach-Object { $_.Trim() }
+
+$ih2 = ($mk2 | Where-Object { $_ -like 'INFOHASH *' }) -replace '^INFOHASH ', '' | ForEach-Object { $_.Trim() }
+Write-Host "Test torrent $ih2 (1 file, $([math]::Round((Get-Item $film).Length / 1MB, 1)) MiB, .torrent file)"
 
 # --- qBittorrent as the controlled seeder
 $prof = Join-Path $tmp 'syncwatch-qbt-profile'
@@ -120,21 +138,27 @@ $prefs = @{
 } | ConvertTo-Json -Compress
 Invoke-RestMethod "$api/app/setPreferences" -Method Post -Body @{ json = $prefs } | Out-Null
 Invoke-RestMethod "$api/torrents/add" -Method Post -Form @{ torrents = Get-Item $torrentFile; savepath = $lab } | Out-Null
+Invoke-RestMethod "$api/torrents/add" -Method Post -Form @{ torrents = Get-Item $filmTorrent; savepath = $lab } | Out-Null
 $seeding = $false
 foreach ($i in 1..120) {
-    $t = Invoke-RestMethod "$api/torrents/info?hashes=$ih"
-    if ($t -and $t[0].progress -ge 1 -and $t[0].state -in 'uploading', 'stalledUP', 'forcedUP', 'queuedUP') { $seeding = $true; break }
+    $t = Invoke-RestMethod "$api/torrents/info"
+    $ready = @($t | Where-Object { $_.hash -in $ih, $ih2 -and $_.progress -ge 1 -and $_.state -in 'uploading', 'stalledUP', 'forcedUP', 'queuedUP' })
+    if ($ready.Count -eq 2) { $seeding = $true; break }
     Start-Sleep -Milliseconds 500
 }
-if (-not $seeding) { Write-Host 'FAIL qBittorrent is not seeding the test torrent' -ForegroundColor Red; Invoke-RestMethod "$api/app/shutdown" -Method Post | Out-Null; exit 1 }
+if (-not $seeding) { Write-Host 'FAIL qBittorrent is not seeding the test torrents' -ForegroundColor Red; (Invoke-RestMethod "$api/torrents/info") | ForEach-Object { $_ } | ForEach-Object { Write-Host "  $($_.hash) [$($_.hash.Length)] $($_.state) $($_.progress) want [$ih] [$ih2]" }; Invoke-RestMethod "$api/app/shutdown" -Method Post | Out-Null; exit 1 }
 Write-Host "qBittorrent seeds on ${qbtIp}:$qbtPort, upload limited to $UpKiB KiB/s, embedded tracker :$TrackerPort"
 # qBittorrent must have announced itself to its own tracker BEFORE our windows ask (otherwise
 # their first announce gets an empty list and the next one is 30 minutes away).
 $announced = $false
 foreach ($i in 1..120) {
-    $trs = Invoke-RestMethod "$api/torrents/trackers?hash=$ih"
-    if ($trs | Where-Object { $_.url -like 'http*' -and $_.status -eq 2 -and $_.num_seeds -ge 1 }) { $announced = $true; break }
-    if ($i -eq 10) { Invoke-RestMethod "$api/torrents/reannounce" -Method Post -Body @{ hashes = $ih } | Out-Null }
+    $ok = 0
+    foreach ($h in $ih, $ih2) {
+        $trs = Invoke-RestMethod "$api/torrents/trackers?hash=$h"
+        if ($trs | Where-Object { $_.url -like 'http*' -and $_.status -eq 2 -and $_.num_seeds -ge 1 }) { $ok++ }
+    }
+    if ($ok -eq 2) { $announced = $true; break }
+    if ($i -eq 10) { Invoke-RestMethod "$api/torrents/reannounce" -Method Post -Body @{ hashes = "$ih|$ih2" } | Out-Null }
     Start-Sleep -Milliseconds 500
 }
 if (-not $announced) { Write-Host 'FAIL qBittorrent did not announce itself to its tracker' -ForegroundColor Red; Invoke-RestMethod "$api/app/shutdown" -Method Post | Out-Null; exit 1 }
@@ -146,20 +170,45 @@ try {
 } catch { Write-Host "Tracker probe failed: $($_.Exception.Message)" }
 (Invoke-RestMethod "$api/torrents/trackers?hash=$ih") | Where-Object { $_.url -like 'http*' } | ForEach-Object { Write-Host "qBittorrent tracker: status=$($_.status) seeds=$($_.num_seeds)" }
 if ($SeedOnly) { Write-Host "Seeder left running (Web API $api)."; exit 0 }
+if ($Manual) {
+    Write-Host ''
+    Write-Host 'Manual test material (generated files only, seeded by qBittorrent on this PC):'
+    Write-Host "  Multi-file magnet (pick long.mkv): $magnet"
+    Write-Host "  Single-file .torrent file:         $filmTorrent"
+    Write-Host "  Single-file magnet:                $magnet2"
+    Write-Host "  qBittorrent Web UI (localhost):    http://127.0.0.1:$WebPort"
+    Write-Host "Press any key to stop and clean up (or wait $ManualMinutes minutes)."
+    $end = (Get-Date).AddMinutes($ManualMinutes)
+    while ((Get-Date) -lt $end) {
+        $key = $false
+        try { $key = [Console]::KeyAvailable } catch { $key = $false }
+        if ($key) { break }
+        Start-Sleep -Seconds 1
+    }
+    try { Invoke-RestMethod "$api/app/shutdown" -Method Post -TimeoutSec 5 | Out-Null } catch {}
+    $qp.WaitForExit(15000) | Out-Null
+    if (-not $qp.HasExited) { Stop-Process -Id $qp.Id -Force }
+    Remove-Item -Recurse -Force $prof, $lab -ErrorAction SilentlyContinue
+    Write-Host 'qBittorrent stopped; lab files removed.'
+    exit 0
+}
 
 # --- clean torrent caches of the dev windows (a finished file would skip the download)
-foreach ($w in 'a', 'b') { Remove-Item -Recurse -Force (Join-Path $env:LOCALAPPDATA "SyncWatch-dev-$w\cache\torrents") -ErrorAction SilentlyContinue }
+foreach ($w in 'a', 'b', 'c') { Remove-Item -Recurse -Force (Join-Path $env:LOCALAPPDATA "SyncWatch-dev-$w\cache\torrents") -ErrorAction SilentlyContinue }
 
 # --- outside monitor (1 s)
 $csv = Join-Path $lab 'monitor.csv'
-$mon = Start-ThreadJob -ArgumentList $api, $ih, $qp.Id, $csv -ScriptBlock {
-    param($api, $ih, $qpid, $csv)
-    'wallMs,qbtUploaded,qbtPeers,connsQbtToUs,ourUdp,ourTcpListen,peerConns,trackerConns' | Set-Content $csv
+$mon = Start-ThreadJob -ArgumentList $api, $(if ($Scenario -eq 'torrent') { $ih } else { $ih }), $qp.Id, $csv, $ih2 -ScriptBlock {
+    param($api, $ih, $qpid, $csv, $ih2)
+    'wallMs,qbtUploaded,qbtPeers,connsQbtToUs,ourUdp,ourTcpListen,peerConns,trackerConns,qbtUploaded2,qbtPeers2' | Set-Content $csv
     while ($true) {
         try {
             $p = Invoke-RestMethod "$api/torrents/properties?hash=$ih" -TimeoutSec 2
             $peers = (Invoke-RestMethod "$api/sync/torrentPeers?hash=$ih&rid=0" -TimeoutSec 2).peers
             $n = if ($peers) { @($peers.PSObject.Properties).Count } else { 0 }
+            $p2 = Invoke-RestMethod "$api/torrents/properties?hash=$ih2" -TimeoutSec 2
+            $peers2 = (Invoke-RestMethod "$api/sync/torrentPeers?hash=$ih2&rid=0" -TimeoutSec 2).peers
+            $n2 = if ($peers2) { @($peers2.PSObject.Properties).Count } else { 0 }
             $sw = @(Get-Process syncwatch -ErrorAction SilentlyContinue | ForEach-Object Id)
             $ourPorts = if ($sw) { @(Get-NetTCPConnection -OwningProcess $sw -ErrorAction SilentlyContinue | ForEach-Object LocalPort) } else { @() }
             $qc = @(Get-NetTCPConnection -OwningProcess $qpid -State Established -ErrorAction SilentlyContinue | Where-Object { $_.RemoteAddress -like '127.*' -and $ourPorts -contains $_.RemotePort })
@@ -168,7 +217,7 @@ $mon = Start-ThreadJob -ArgumentList $api, $ih, $qp.Id, $csv -ScriptBlock {
             $trackerConns = @($qc | Where-Object { $_.LocalPort -eq 9000 }).Count
             $udp = if ($sw) { @(Get-NetUDPEndpoint -OwningProcess $sw -ErrorAction SilentlyContinue).Count } else { 0 }
             $listen = if ($sw) { (@(Get-NetTCPConnection -OwningProcess $sw -State Listen -ErrorAction SilentlyContinue | ForEach-Object LocalPort) -join ' ') } else { '' }
-            "$([DateTimeOffset]::Now.ToUnixTimeMilliseconds()),$($p.total_uploaded),$n,$conns,$udp,$listen,$peerConns,$trackerConns" | Add-Content $csv
+            "$([DateTimeOffset]::Now.ToUnixTimeMilliseconds()),$($p.total_uploaded),$n,$conns,$udp,$listen,$peerConns,$trackerConns,$($p2.total_uploaded),$n2" | Add-Content $csv
         } catch {}
         Start-Sleep -Seconds 1
     }
@@ -179,7 +228,8 @@ $env:SYNCWATCH_LAB_MAGNET = $magnet
 $env:SYNCWATCH_LAB_FILE = 'long.mkv'
 $env:SYNCWATCH_DEV_TORRENT_BIND = '127.0.0.1'
 $env:SYNCWATCH_DEV_TORRENT_DHT = '0'
-$out = pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario torrent 2>&1
+$env:SYNCWATCH_LAB_TORRENT_FILE = $filmTorrent
+$out = pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario $Scenario 2>&1
 $out | Where-Object { $_ -notmatch '^(Building|.*started \(PID)' } | ForEach-Object { Write-Host $_ }
 $raw = ($out | Select-String 'Raw results: (.*)$').Matches | Select-Object -Last 1 | ForEach-Object { $_.Groups[1].Value.Trim() }
 Stop-Job $mon; Remove-Job $mon -Force
@@ -188,11 +238,41 @@ Stop-Job $mon; Remove-Job $mon -Force
 $fail = 0
 function Result($ok, $text) { if ($ok) { Write-Host "PASS $text" } else { Write-Host "FAIL $text" -ForegroundColor Red; $script:fail++ } }
 $ts = @{}
-foreach ($w in 'a', 'b') {
+foreach ($w in 'a', 'b', 'c') {
     $f = Join-Path $raw "scenario-$w.txt"
     if (Test-Path $f) { Get-Content $f | Where-Object { $_ -like 'TS *' } | ForEach-Object { $p = $_ -split ' '; $ts[$p[1]] = [int64]$p[2] } }
 }
-$rows = Import-Csv $csv | ForEach-Object { [pscustomobject]@{ t = [int64]$_.wallMs; up = [int64]$_.qbtUploaded; peers = [int]$_.qbtPeers; conns = [int]$_.connsQbtToUs; peer = [int]$_.peerConns; trk = [int]$_.trackerConns; udp = [int]$_.ourUdp; listen = $_.ourTcpListen } }
+$rows = Import-Csv $csv | ForEach-Object { [pscustomobject]@{ t = [int64]$_.wallMs; up = [int64]$_.qbtUploaded; peers = [int]$_.qbtPeers; conns = [int]$_.connsQbtToUs; peer = [int]$_.peerConns; trk = [int]$_.trackerConns; udp = [int]$_.ourUdp; listen = $_.ourTcpListen; up2 = [int64]$_.qbtUploaded2; peers2 = [int]$_.qbtPeers2 } }
+if ($Scenario -eq 'torrentfile') {
+    function Window($from, $to) { @($rows | Where-Object { $_.t -ge $from -and $_.t -le $to }) }
+    if ($ts['t2_all_complete'] -and $ts['t1_off'] -and $ts['final']) {
+        $t2after = Window ($ts['t2_all_complete'] + 3000) $ts['final']
+        Result ($t2after.Count -ge 10 -and @($t2after | ForEach-Object up2 | Sort-Object -Unique).Count -eq 1 -and @($t2after | Where-Object { $_.peers2 -gt 0 }).Count -eq 0) "(f/e) .torrent-file torrent: 0 bytes and no peers over $($t2after.Count) s after 100%, including switching back to it"
+        $t1during = Window $ts['t1_set'] $ts['t1_off']
+        Result (($t1during | Measure-Object up -Maximum).Maximum -gt 0) '(e) the magnet torrent downloaded while it was the source'
+        $t1after = Window ($ts['t1_off'] + 3000) $ts['final']
+        Result ($t1after.Count -ge 10 -and @($t1after | ForEach-Object up | Sort-Object -Unique).Count -eq 1 -and @($t1after | Where-Object { $_.peers -gt 0 }).Count -eq 0) "(e) magnet torrent: 0 bytes and no peers over $($t1after.Count) s after switching to the local file"
+        Result (@($t1after | Where-Object { $_.peer -gt 0 -or $_.trk -gt 0 -or $_.udp -gt 0 }).Count -eq 0) '(e/f) no peer or tracker connection and no UDP socket of ours after the switches'
+    } else {
+        Result $false 'torrentfile timestamps missing (see the scenario output)'
+    }
+    $clog = Join-Path $env:LOCALAPPDATA 'SyncWatch-dev-c\logs\syncwatch.log'
+    $cStarts = @(Select-String -Path $clog -Pattern 'torrent engine started' | Where-Object { $_.Line -match '^(\S+)' -and ($ms = [DateTimeOffset]::Parse($Matches[1]).ToUnixTimeMilliseconds()) -ge $ts['t2_set'] -and $ms -lt ($ts['c_accept'] ?? [int64]::MaxValue) }).Count
+    Result ($ts['c_declined'] -and $cStarts -eq 0) '(g) the declining member started no torrent engine'
+    foreach ($w in 'a', 'b', 'c') {
+        $files = @(Get-ChildItem -Recurse -File (Join-Path $env:LOCALAPPDATA "SyncWatch-dev-$w\cache\torrents") -ErrorAction SilentlyContinue | Where-Object Name -ne 'finished.json')
+        Result ($files.Count -eq 1 -and $files[0].Name -eq 'SyncWatch Test Film.mkv') "window $($w): only the chosen file is kept; the switched-away magnet left nothing ($($files.Name -join ', '))"
+    }
+    if (-not $KeepQbt) {
+        try { Invoke-RestMethod "$api/app/shutdown" -Method Post -TimeoutSec 5 | Out-Null } catch {}
+        $qp.WaitForExit(15000) | Out-Null
+        if (-not $qp.HasExited) { Stop-Process -Id $qp.Id -Force }
+        Remove-Item -Recurse -Force $prof -ErrorAction SilentlyContinue
+    }
+    Write-Host "Monitor: $csv"
+    if ($fail) { exit 1 }
+    exit 0
+}
 $lastDone = @($ts['host_complete'], $ts['member_complete']) | Where-Object { $_ } | Measure-Object -Maximum | ForEach-Object Maximum
 if ($lastDone -and $ts['idle_end']) {
     $after = @($rows | Where-Object { $_.t -ge ($lastDone + 3000) -and $_.t -le $ts['final'] })

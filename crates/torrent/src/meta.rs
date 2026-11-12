@@ -16,6 +16,7 @@ pub const MAX_FILES: usize = 10_000;
 pub const MAX_TRACKERS: usize = 32;
 pub const MAX_TRACKER_LEN: usize = 512;
 pub const MAX_PIECE_LEN: u64 = 64 * 1024 * 1024;
+pub const MAX_WEB_SEEDS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum MetaError {
@@ -186,6 +187,8 @@ pub struct TorrentMeta {
     pub trackers: Vec<String>,
     /// BEP 19 web seeds listed in the file (librqbit 9.0.1 cannot use them).
     pub web_seeds: usize,
+    /// Validated web seed URLs (kept in the sanitized torrent so the count survives).
+    web_seed_urls: Vec<String>,
     info_raw: Vec<u8>,
 }
 
@@ -333,11 +336,34 @@ pub fn inspect(
             }
         }
     }
-    let web_seeds = match get(&top, "url-list") {
-        Some(B::Bytes(_)) => 1,
-        Some(B::List(l)) => l.len().min(1000),
-        _ => 0,
+    let web_ok = |s: &str| {
+        s.len() <= MAX_TRACKER_LEN
+            && url::Url::parse(s)
+                .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())
     };
+    let mut web_seed_urls: Vec<String> = Vec::new();
+    match get(&top, "url-list") {
+        Some(b @ B::Bytes(_)) => {
+            if let Ok(s) = text(b)
+                && web_ok(&s)
+            {
+                web_seed_urls.push(s);
+            }
+        }
+        Some(B::List(l)) => {
+            for b in l {
+                if let Ok(s) = text(b)
+                    && web_ok(&s)
+                    && web_seed_urls.len() < MAX_WEB_SEEDS
+                    && !web_seed_urls.contains(&s)
+                {
+                    web_seed_urls.push(s);
+                }
+            }
+        }
+        _ => {}
+    }
+    let web_seeds = web_seed_urls.len();
     Ok(TorrentMeta {
         infohash,
         name,
@@ -346,6 +372,7 @@ pub fn inspect(
         piece_len: piece_len as u64,
         trackers,
         web_seeds,
+        web_seed_urls,
         info_raw,
     })
 }
@@ -387,6 +414,14 @@ impl TorrentMeta {
         }
         bstr(&mut out, b"info");
         out.extend_from_slice(&self.info_raw);
+        if !self.web_seed_urls.is_empty() {
+            bstr(&mut out, b"url-list");
+            out.push(b'l');
+            for w in &self.web_seed_urls {
+                bstr(&mut out, w.as_bytes());
+            }
+            out.push(b'e');
+        }
         out.push(b'e');
         out
     }
@@ -555,6 +590,25 @@ mod tests {
         let again =
             inspect(&s, DEFAULT_META_CAP, Some(m.infohash)).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(again.trackers, m.trackers);
+        // Web seeds: only http(s), capped, kept through sanitizing (the count drives the UI).
+        let mut ws = torrent(&info, &[]);
+        ws.pop();
+        bstr(&mut ws, b"url-list");
+        ws.push(b'l');
+        for u in [
+            "https://archive.example/a/",
+            "ftp://x/",
+            "http://b.example/",
+        ] {
+            bstr(&mut ws, u.as_bytes());
+        }
+        ws.extend_from_slice(b"ee");
+        let w = inspect(&ws, DEFAULT_META_CAP, None).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(w.web_seeds, 2);
+        assert_eq!(
+            inspect(&w.sanitized(), DEFAULT_META_CAP, Some(w.infohash)).map(|x| x.web_seeds),
+            Ok(2)
+        );
         assert!(
             m.magnet()
                 .starts_with(&format!("magnet:?xt=urn:btih:{}", m.infohash.to_hex()))

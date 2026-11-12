@@ -1962,6 +1962,9 @@ fn core_effect(rt: &mut Rt, session: &RoomSession, e: syncwatch_sync_core::Effec
                         rt.mirror
                             .event("waiting for the host to get the torrent's file list");
                         rt.mirror.s.torrent = Some(waiting_dto(media.size));
+                        // Already finished here (switching back, rejoin): plays at once, no
+                        // swarm; otherwise nothing happens until the host's metadata arrives.
+                        rt.torrents.engine.start_cached_only(media.clone());
                         rt.torrent_pending = Some(media);
                     }
                 }
@@ -2377,6 +2380,47 @@ pub fn room_set_torrent_media(
         name,
         size,
         magnet,
+    });
+    descriptor
+        .validate()
+        .map_err(|_| "This torrent cannot be used (name or link too long).".to_owned())?;
+    app.state::<RoomManager>()
+        .send(Cmd::Action(Action::Ui(UiAction::ChangeMedia {
+            descriptor,
+            own_file: false,
+        })))
+}
+
+/// Host, Change source -> Torrent file: the room plays file `file_index` of the .torrent the
+/// host inspected (its validated bytes are offered to members; its trackers go into the magnet
+/// and the announces).
+#[tauri::command]
+pub fn room_set_torrent_file(
+    app: AppHandle,
+    infohash: String,
+    file_index: u32,
+) -> Result<(), String> {
+    let svc = Arc::clone(&*app.state::<Arc<crate::torrent::TorrentService>>());
+    let ih = syncwatch_protocol::magnet::parse(&format!("magnet:?xt=urn:btih:{infohash}"))
+        .map_err(|_| "Unknown torrent.".to_owned())?
+        .infohash;
+    let bytes = svc
+        .cached_meta(&ih)
+        .ok_or_else(|| "Open the .torrent file again.".to_owned())?;
+    let m = syncwatch_torrent::meta::inspect(&bytes, svc.meta_cap(), Some(ih))
+        .map_err(|e| crate::torrent::meta_error_text(&e).to_owned())?;
+    let f = m
+        .files
+        .iter()
+        .find(|f| f.index == file_index && !f.padding)
+        .ok_or_else(|| "That file is not in the torrent.".to_owned())?;
+    let base = f.path.rsplit('/').next().unwrap_or(&f.path).to_owned();
+    let descriptor = MediaDescriptor::Torrent(TorrentMedia {
+        infohash: ih,
+        file_index,
+        name: crate::media::file_name(std::path::Path::new(&base)),
+        size: f.len,
+        magnet: m.magnet(),
     });
     descriptor
         .validate()

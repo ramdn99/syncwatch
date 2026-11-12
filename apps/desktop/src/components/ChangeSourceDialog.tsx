@@ -36,6 +36,8 @@ export function ChangeSourceDialog(props: {
   inRoom?: boolean;
   /** Host picked file `index` of a magnet. */
   onTorrentChosen?: (magnet: string, file: { index: number; path: string; size: number }) => void;
+  /** Host picked file `index` of an inspected .torrent file. */
+  onTorrentFileChosen?: (infohash: string, fileIndex: number) => void;
 }) {
   const [tab, setTab] = useState<'local' | 'magnet'>('local');
   const [path, setPath] = useState<string | null>(props.initialPath ?? null);
@@ -48,6 +50,35 @@ export function ChangeSourceDialog(props: {
   const [elapsed, setElapsed] = useState(0);
   const [noticeOk, setNoticeOk] = useState(false);
   const [noticeSaved, setNoticeSaved] = useState(false);
+  /** Where the torrent's file list came from. */
+  const [torrentSource, setTorrentSource] = useState<'magnet' | 'file' | null>(null);
+  const [torrentPath, setTorrentPath] = useState<string | null>(null);
+
+  // A .torrent file: read and validated locally, the file list shows at once (no network).
+  const openTorrentFile = async (p: string) => {
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+    setFileIndex(null);
+    try {
+      const i = await torrents.inspectFile(p);
+      setInfo(i);
+      setTorrentSource('file');
+      setTorrentPath(p);
+      setFileIndex(i.files.find((f) => f.video)?.index ?? null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pickTorrentFile = async () => {
+    if (!inTauri()) return;
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const p = await open({ multiple: false, directory: false, filters: [{ name: 'Torrent file', extensions: ['torrent'] }] });
+    if (typeof p === 'string') void openTorrentFile(p);
+  };
 
   useEffect(() => {
     if (!inTauri()) return;
@@ -71,6 +102,7 @@ export function ChangeSourceDialog(props: {
     try {
       const i = await torrents.metadata(magnet.trim());
       setInfo(i);
+      setTorrentSource('magnet');
       setFileIndex(i.files.find((f) => f.video)?.index ?? null);
     } catch (e) {
       setError(String(e));
@@ -111,12 +143,15 @@ export function ChangeSourceDialog(props: {
 
   // Drag-and-drop onto the dialog.
   useEffect(() => {
-    if (!inTauri() || tab !== 'local') return;
+    if (!inTauri()) return;
     let un: (() => void) | undefined;
     void import('@tauri-apps/api/webview').then(({ getCurrentWebview }) =>
       getCurrentWebview()
         .onDragDropEvent((ev) => {
-          if (ev.payload.type === 'drop' && ev.payload.paths[0]) setPath(ev.payload.paths[0]);
+          const p = ev.payload.type === 'drop' ? ev.payload.paths[0] : undefined;
+          if (!p) return;
+          if (tab === 'magnet' && p.toLowerCase().endsWith('.torrent')) void openTorrentFile(p);
+          else if (tab === 'local') setPath(p);
         })
         .then((u) => (un = u)),
     );
@@ -132,7 +167,8 @@ export function ChangeSourceDialog(props: {
           .then((s) => torrents.saveSettings({ ...s, noticeAccepted: true }))
           .catch(() => {});
       }
-      props.onTorrentChosen?.(magnet.trim(), chosenFile);
+      if (torrentSource === 'file' && info) props.onTorrentFileChosen?.(info.infohash, chosenFile.index);
+      else props.onTorrentChosen?.(magnet.trim(), chosenFile);
       props.onClose();
       return;
     }
@@ -155,7 +191,7 @@ export function ChangeSourceDialog(props: {
           {(
             [
               ['local', 'Local file'],
-              ['magnet', 'Torrent magnet'],
+              ['magnet', 'Torrent'],
             ] as const
           ).map(([t, label]) => (
             <button
@@ -188,13 +224,18 @@ export function ChangeSourceDialog(props: {
           </div>
         ) : (
           <div className="mt-4 space-y-2">
+            <label className="block text-sm text-muted" htmlFor="magnet-input">
+              Magnet link
+            </label>
             <textarea
+              id="magnet-input"
               className="h-24 w-full rounded-md border border-border bg-surface px-3 py-2 font-mono text-xs text-text focus:border-accent focus:outline-none"
               placeholder="magnet:?xt=urn:btih:..."
               spellCheck={false}
               value={magnet}
               onChange={(e) => {
                 setMagnet(e.target.value);
+                setTorrentSource(null);
                 setPrepared(null);
                 setInfo(null);
                 setError(null);
@@ -216,7 +257,17 @@ export function ChangeSourceDialog(props: {
                 )}
               </div>
             )}
-            {busy && (
+            <div className="space-y-1">
+              <p className="text-sm text-muted">Torrent file</p>
+              <div className="rounded-lg border border-dashed border-border px-4 py-3 text-center text-sm text-muted" data-testid="torrent-file-drop">
+                Drop a .torrent file here, or
+                <button type="button" disabled={!props.inRoom} className="ml-2 rounded-md bg-surface px-3 py-1 text-text hover:bg-border disabled:opacity-40" onClick={() => void pickTorrentFile()}>
+                  Choose .torrent...
+                </button>
+                {torrentPath && torrentSource === 'file' && <p className="mt-1 truncate text-xs" title={torrentPath}>{torrentPath.split(/[\\/]/).pop()}</p>}
+              </div>
+            </div>
+            {busy && torrentSource !== 'file' && magnet.trim() && (
               <p className="text-sm text-muted" role="status" data-testid="magnet-progress">
                 Getting the file list from peers... {elapsed} s
               </p>
@@ -224,6 +275,13 @@ export function ChangeSourceDialog(props: {
             {info && (
               <div className="space-y-1" data-testid="magnet-files">
                 <p className="text-sm font-medium">{info.name}</p>
+                <p className="font-mono text-xs text-muted" data-testid="torrent-summary">
+                  infohash {info.infohash} · {fmtBytes(info.totalSize)} · {info.files.length} file{info.files.length === 1 ? '' : 's'} · {info.trackers} tracker
+                  {info.trackers === 1 ? '' : 's'}
+                </p>
+                {info.webSeeds > 0 && (
+                  <p className="text-xs text-warning">This torrent lists web seeds (HTTP downloads). SyncWatch cannot use them: it needs peers sharing the torrent.</p>
+                )}
                 <ul className="max-h-48 space-y-0.5 overflow-y-auto rounded-md border border-border p-1 text-sm" role="radiogroup" aria-label="Files in the torrent">
                   {info.files.map((f) => (
                     <li key={f.index}>

@@ -39,7 +39,7 @@ param(
     [string]$Password = '',
     [int]$Soak = 0,
     # Scripted end-to-end checks (debug builds): chat, rooms, sync, chattime, late (3 windows).
-    [ValidateSet('', 'chat', 'rooms', 'sync', 'chattime', 'late', 'popup', 'succession', 'torrent', 'skiprelay')][string]$Scenario = '',
+    [ValidateSet('', 'chat', 'rooms', 'sync', 'chattime', 'late', 'popup', 'succession', 'torrent', 'skiprelay', 'torrentfile')][string]$Scenario = '',
     [switch]$Docker,
     # Stop a stale Vite/node process of THIS repo that still holds port 1420.
     [switch]$FreePort,
@@ -89,17 +89,18 @@ $scenarioMedia = switch ($Scenario) {
     'chattime' { Join-Path $MediaDir 'long.mkv' }
     { $_ -in 'rooms', 'sync', 'late', 'popup', 'succession', 'skiprelay' } { if ($Media) { $Media } else { 'D:\media\test.mkv' } }
     # torrent: the magnet (from scripts/dev/torrent-lab.ps1, which also runs the seeder).
-    'torrent' { $env:SYNCWATCH_LAB_MAGNET }
+    { $_ -in 'torrent', 'torrentfile' } { $env:SYNCWATCH_LAB_MAGNET }
     default { '' }
 }
 $extra = switch ($Scenario) {
     'torrent' { @($env:SYNCWATCH_LAB_FILE) }
+    'torrentfile' { @($env:SYNCWATCH_LAB_TORRENT_FILE, 'D:\media\test.mkv') }
     'sync' { @((Join-Path $MediaDir 'extra-cp1252.srt'), (Join-Path $MediaDir 'extra-audio.mka')) }
     'late' { @('D:\media\test-mismatch.mkv') }
     'skiprelay' { @((Join-Path $MediaDir 'extra-audio.mka')) }
     default { @() }
 }
-foreach ($n in $(if ($Scenario -eq 'torrent') { @() } else { @($scenarioMedia) + $extra })) {
+foreach ($n in $(if ($Scenario -in 'torrent', 'torrentfile') { @() } else { @($scenarioMedia) + $extra })) {
     if ($n -and -not (Test-Path $n)) { Write-Host "Missing test file $n. Run: pwsh -NoProfile -File scripts/dev/make-test-media.ps1" -ForegroundColor Red; exit 1 }
 }
 
@@ -110,7 +111,7 @@ if ($LASTEXITCODE) { exit 1 }
 $work = Join-Path ([IO.Path]::GetTempPath()) "syncwatch-two-windows-$PID"
 New-Item -ItemType Directory -Force $work | Out-Null
 $windows = @('a', 'b')
-if ($Scenario -in 'late', 'succession', 'chat') { $windows += 'c' }
+if ($Scenario -in 'late', 'succession', 'chat', 'torrentfile') { $windows += 'c' }
 # Succession: window a (the host) is killed on purpose; only b and c must finish.
 $mustFinish = @($windows | Where-Object { -not ($Scenario -eq 'succession' -and $_ -eq 'a') })
 $killed = $false
@@ -161,7 +162,7 @@ try {
         $env:SYNCWATCH_DEV_IDENTITY = $who
         $env:SYNCWATCH_DEV_NAME = switch ($who) { 'a' { 'Host A' } 'b' { 'Member B' } default { 'Late C' } }
         $env:SYNCWATCH_DEV_AUTOROOM = $(if ($AutoRoom) { if ($who -eq 'a') { 'host' } elseif ($who -eq 'c' -and $Scenario -eq 'chat') { 'manual' } else { 'join' } } else { '' })
-        $env:SYNCWATCH_DEV_SCENARIO_ROLE = $(if ($who -eq 'c' -and $Scenario -in 'late', 'chat') { 'late' } else { '' })
+        $env:SYNCWATCH_DEV_SCENARIO_ROLE = $(if ($who -eq 'c' -and $Scenario -in 'late', 'chat', 'torrentfile') { 'late' } else { '' })
         $env:SYNCWATCH_DEV_SOAK_FILE = $(if ($Soak -gt 0) { Join-Path $work "soak-$who.json" } else { '' })
         $env:SYNCWATCH_DEV_MINIMIZE = $(if ($Soak -gt 0 -and $who -eq 'b') { '1' } else { '' })
         $env:SYNCWATCH_DEV_SCENARIO_FILE = $(if ($Scenario) { Join-Path $work "scenario-$who.txt" } else { '' })

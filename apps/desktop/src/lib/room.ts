@@ -261,6 +261,8 @@ export const room = {
   /** Host: the room plays file `fileIndex` of this magnet. */
   setTorrentMedia: (magnet: string, fileIndex: number, name: string, size: number) =>
     call<void>('room_set_torrent_media', { magnet, fileIndex, name, size }),
+  /** Host: the room plays file `fileIndex` of the inspected .torrent file. */
+  setTorrentFile: (infohash: string, fileIndex: number) => call<void>('room_set_torrent_file', { infohash, fileIndex }),
 };
 
 export interface TorrentFile {
@@ -274,6 +276,10 @@ export interface TorrentInfo {
   infohash: string;
   name: string;
   files: TorrentFile[];
+  totalSize: number;
+  trackers: number;
+  /** Web seeds listed in the torrent (not supported: the torrent needs peers). */
+  webSeeds: number;
 }
 
 export interface TorrentSettings {
@@ -289,6 +295,8 @@ export interface TorrentSettings {
 export const torrents = {
   /** Host: the magnet's file list (metadata only). */
   metadata: (magnet: string) => call<TorrentInfo>('torrent_metadata', { magnet }),
+  /** Host: a .torrent file, read and validated locally (no network). */
+  inspectFile: (path: string) => call<TorrentInfo>('torrent_inspect_file', { path }),
   settings: () => call<TorrentSettings>('torrent_settings_get'),
   saveSettings: (settings: TorrentSettings) => call<void>('torrent_settings_set', { settings }),
 };

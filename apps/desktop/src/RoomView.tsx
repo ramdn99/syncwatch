@@ -578,6 +578,7 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
           onLocalChosen={(p) => void run(rs.active ? room.setLocalMedia(p) : player.open(p))}
           inRoom={rs.active}
           onTorrentChosen={(magnet, f) => void run(room.setTorrentMedia(magnet, f.index, f.path, f.size))}
+          onTorrentFileChosen={(ih, index) => void run(room.setTorrentFile(ih, index))}
         />
       )}
       {rs.active && rs.confirmMagnet && (
