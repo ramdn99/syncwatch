@@ -143,6 +143,7 @@ pub struct TorrentMemberDto {
 fn phase_text(p: TorrentPhase) -> &'static str {
     match p {
         TorrentPhase::Metadata => "metadata",
+        TorrentPhase::WaitingForHost => "waitingForHost",
         TorrentPhase::Downloading => "downloading",
         TorrentPhase::Streaming => "streaming",
         TorrentPhase::NoPeers => "noPeers",
@@ -167,6 +168,11 @@ pub struct TorrentDto {
     buffering: Option<BufferingDto>,
     /// Only the playback stream runs (window short / just seeked).
     exclusive: bool,
+    /// What is used to find peers (status text while looking).
+    trackers: u32,
+    dht: bool,
+    /// BEP 19 web seeds in the torrent (librqbit 9.0.1 cannot use them).
+    web_seeds: u32,
     /// Set once complete: "Downloading and sharing have stopped. No further traffic."
     complete_message: Option<&'static str>,
     error: Option<&'static str>,
@@ -185,6 +191,7 @@ pub struct ConfirmMagnetDto {
     name: String,
     size: u64,
     infohash: String,
+    torrent_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -829,12 +836,14 @@ impl Mirror {
                 name,
                 size,
                 infohash,
+                torrent_name,
             } => {
                 self.event(format!("the host shared a torrent: {name}"));
                 self.s.confirm_magnet = Some(ConfirmMagnetDto {
                     name,
                     size,
                     infohash: infohash.to_hex(),
+                    torrent_name,
                 });
             }
             UiEvent::Notice(Notice::RequestDenied { reason }) => {
@@ -1224,6 +1233,10 @@ struct Rt {
     /// The room's torrent this window downloads / plays (at most one).
     torrent: Option<syncwatch_protocol::Infohash>,
     torrent_duration_sent: bool,
+    /// Member: the host's verified metadata for the room torrent (bytes, host engine port).
+    member_meta: Option<(Infohash, Vec<u8>, u16)>,
+    /// Member: accepted, waiting for the host's metadata offer before starting.
+    torrent_pending: Option<TorrentMedia>,
 }
 
 /// Position reports to sync-core (the drift controller and the chat timestamps).
@@ -1255,6 +1268,8 @@ async fn drive(
         torrents: Arc::clone(&*app.state::<Arc<crate::torrent::TorrentService>>()),
         torrent: None,
         torrent_duration_sent: false,
+        member_meta: None,
+        torrent_pending: None,
     };
     let mut reconnect_at: Option<Instant> = None;
     let mut backoff = Duration::from_secs(1);
@@ -1436,6 +1451,92 @@ fn select_track_action(
 
 /// Manifest bookkeeping after each step: the host maps its prepared files to manifest ids;
 /// a member reuses identical files already in the per-room cache instead of downloading.
+/// The host's engine as a direct peer for a member on the same machine (the swarm may refuse
+/// a second connection from the same address).
+fn host_peers(port: u16) -> Vec<std::net::SocketAddr> {
+    if port == 0 {
+        Vec::new()
+    } else {
+        vec![std::net::SocketAddr::from(([127, 0, 0, 1], port))]
+    }
+}
+
+fn waiting_dto(size: u64) -> TorrentDto {
+    TorrentDto {
+        phase: "waitingForHost",
+        have_bytes: 0,
+        size,
+        down_bps: 0,
+        up_bps: 0,
+        peers: 0,
+        eta_secs: None,
+        ranges: Vec::new(),
+        buffering: None,
+        exclusive: true,
+        trackers: 0,
+        dht: false,
+        web_seeds: 0,
+        complete_message: None,
+        error: None,
+    }
+}
+
+/// Member: the host's metadata arrived. It is used only if its info dictionary hashes to the
+/// room's announced infohash and the host's chosen file is in it with the announced size.
+fn member_meta_received(
+    rt: &mut Rt,
+    session: &RoomSession,
+    infohash: Infohash,
+    torrent: Vec<u8>,
+    host_port: u16,
+) {
+    if session.is_host() {
+        return;
+    }
+    let Some(MediaDescriptor::Torrent(d)) = session.peer().local().descriptor.clone() else {
+        return;
+    };
+    let cap = rt.torrents.meta_cap();
+    let ok = syncwatch_torrent::meta::inspect(&torrent, cap, Some(infohash))
+        .map_err(|e| e.to_string())
+        .and_then(|m| {
+            let f = m
+                .files
+                .iter()
+                .find(|f| f.index == d.file_index)
+                .ok_or_else(|| "the host's file is not in it".to_owned())?;
+            if d.infohash != infohash || f.len != d.size {
+                return Err("it does not match the room's torrent".to_owned());
+            }
+            Ok(m.sanitized())
+        });
+    match ok {
+        Ok(bytes) => {
+            rt.mirror
+                .event("received the torrent's file list from the host");
+            rt.member_meta = Some((infohash, bytes.clone(), host_port));
+            if let Some(media) = rt.torrent_pending.take()
+                && media.infohash == infohash
+            {
+                rt.torrents
+                    .engine
+                    .start_with_meta(media, bytes, host_peers(host_port));
+            }
+        }
+        Err(why) => {
+            tracing::warn!(reason = %why, "torrent metadata from the host refused");
+            rt.mirror.reject(
+                None,
+                "host".into(),
+                format!("torrent metadata refused: {why}"),
+            );
+            rt.mirror.toast(
+                "The host sent torrent metadata that does not match this torrent. It was refused.",
+            );
+        }
+    }
+}
+
 /// Torrent engine events -> the UI mirror and sync-core (ADR 0009/0010). Events of an old
 /// torrent (after a source switch) only reach the diagnostics.
 fn on_engine_event(rt: &mut Rt, ev: syncwatch_torrent::EngineEvent) -> Option<Input> {
@@ -1474,6 +1575,9 @@ fn on_engine_event(rt: &mut Rt, ev: syncwatch_torrent::EngineEvent) -> Option<In
                     total: b.total,
                 }),
                 exclusive: status.exclusive,
+                trackers: status.trackers,
+                dht: status.dht,
+                web_seeds: status.web_seeds,
                 complete_message: prev_msg,
                 error: None,
             });
@@ -1482,6 +1586,17 @@ fn on_engine_event(rt: &mut Rt, ev: syncwatch_torrent::EngineEvent) -> Option<In
                 permille,
             })))
         }
+        // Our engine added the torrent: sync-core keeps the metadata (the host offers it to
+        // members; anyone keeps it for a later host role).
+        E::Metadata {
+            infohash,
+            torrent,
+            port,
+        } if current(&infohash) => Some(Input::Core(Event::TorrentMeta {
+            infohash,
+            torrent,
+            host_port: port,
+        })),
         E::Playable { infohash, url } if current(&infohash) => {
             // The URL carries a 128-bit token: keep it out of every log line (mpv included).
             if let Some(token) = url.split('/').rev().nth(1) {
@@ -1828,19 +1943,48 @@ fn core_effect(rt: &mut Rt, session: &RoomSession, e: syncwatch_sync_core::Effec
             rt.torrent_duration_sent = false;
             rt.media.torrent_url = None;
             rt.mirror.event(format!("torrent started: {}", media.name));
-            rt.torrents.engine.start(media);
+            if session.is_host() {
+                // The host gets the file list itself (or already has it from the dialog / a
+                // .torrent file) and then offers it to the members.
+                match rt.torrents.cached_meta(&infohash) {
+                    Some(b) => rt.torrents.engine.start_with_meta(media, b, Vec::new()),
+                    None => rt.torrents.engine.start(media),
+                }
+            } else {
+                match &rt.member_meta {
+                    // A member never asks the swarm for the file list: the host's verified
+                    // metadata, and the host's engine as a peer (same machine / LAN).
+                    Some((ih, b, port)) if *ih == infohash => {
+                        let peers = host_peers(*port);
+                        rt.torrents.engine.start_with_meta(media, b.clone(), peers);
+                    }
+                    _ => {
+                        rt.mirror
+                            .event("waiting for the host to get the torrent's file list");
+                        rt.mirror.s.torrent = Some(waiting_dto(media.size));
+                        rt.torrent_pending = Some(media);
+                    }
+                }
+            }
         }
         E::StopTorrent { infohash } => {
             if rt.torrent == Some(infohash) {
                 rt.torrent = None;
                 rt.media.torrent_url = None;
             }
+            rt.torrent_pending = None;
+            rt.member_meta = None;
             rt.mirror.event("torrent stopped (source changed)");
             // Never blocks: the engine announces "stopped" in the background.
             rt.torrents
                 .engine
                 .stop_nowait(infohash, syncwatch_torrent::StopReason::Switch);
         }
+        E::TorrentMetaReceived {
+            infohash,
+            torrent,
+            host_port,
+        } => member_meta_received(rt, session, infohash, torrent, host_port),
         other => tracing::debug!(effect = ?std::mem::discriminant(&other), "unhandled effect"),
     }
 }

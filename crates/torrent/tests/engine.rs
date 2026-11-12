@@ -553,3 +553,131 @@ async fn cancel_while_resolving_is_immediate() {
     assert!(!eng.session_running().await, "no engine left");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// THE member bug (M7 manual test): a member whose only working path to the metadata is the
+/// host. Before the fix the member fetched the file list from the swarm itself and timed out;
+/// now it starts from the host's offered metadata and the host's engine as a peer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn member_without_a_path_to_the_swarm_starts_from_the_hosts_metadata() {
+    init();
+    let dir = tmp("hostmeta");
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let bytes = data(5 * 1024 * 1024 + 77, 21);
+    std::fs::write(src.join("film.mkv"), &bytes).unwrap();
+    let sw = swarm(&src.join("film.mkv"), "film.mkv", None).await;
+    // The host: normal magnet, fetches the metadata, downloads.
+    let host_port = free_port();
+    let (host, mut hev) = EngineHandle::spawn(engine_cfg(dir.join("host"), host_port));
+    host.start(media(
+        sw.seeder.infohash,
+        0,
+        "film.mkv",
+        bytes.len() as u64,
+        sw.magnet.clone(),
+    ));
+    let mut hseen = Vec::new();
+    let (meta, port) = match wait_event(&mut hev, &mut hseen, 60, |e| {
+        matches!(e, EngineEvent::Metadata { .. })
+    })
+    .await
+    {
+        Some(EngineEvent::Metadata { torrent, port, .. }) => (torrent, port),
+        e => panic!("host has no metadata: {e:?}"),
+    };
+    assert_eq!(port, host_port, "the host reports its engine port");
+    // The member: its magnet only knows a tracker that never lists anyone.
+    let peers = Arc::new(Mutex::new(Vec::new()));
+    let (dead, _dead_log) = http_tracker(peers).await;
+    let dead_magnet = magnet(&sw.seeder.infohash, "film.mkv", &[dead]);
+    let member_media = media(
+        sw.seeder.infohash,
+        0,
+        "film.mkv",
+        bytes.len() as u64,
+        dead_magnet,
+    );
+    // BEFORE the fix: fetching the file list itself, the member never gets it.
+    let mut cfg = engine_cfg(dir.join("old"), free_port());
+    cfg.metadata_timeout = Duration::from_secs(8);
+    let (old, mut oev) = EngineHandle::spawn(cfg);
+    old.start(member_media.clone());
+    let mut oseen = Vec::new();
+    let f = wait_event(&mut oev, &mut oseen, 30, |e| {
+        matches!(e, EngineEvent::Failed { .. })
+    })
+    .await;
+    assert!(
+        matches!(
+            f,
+            Some(EngineEvent::Failed {
+                error: syncwatch_torrent::EngineError::MetadataTimeout,
+                ..
+            })
+        ),
+        "the old path stalls: {f:?}"
+    );
+    // AFTER the fix: the host's metadata and the host's engine as a peer.
+    let (member, mut mev) = EngineHandle::spawn(engine_cfg(dir.join("member"), free_port()));
+    member.start_with_meta(
+        member_media,
+        meta,
+        vec![format!("127.0.0.1:{port}").parse().unwrap()],
+    );
+    let mut mseen = Vec::new();
+    let url = match wait_event(&mut mev, &mut mseen, 60, |e| {
+        matches!(e, EngineEvent::Playable { .. })
+    })
+    .await
+    {
+        Some(EngineEvent::Playable { url, .. }) => url,
+        e => panic!("member did not start: {e:?} {mseen:?}"),
+    };
+    assert!(
+        !mseen.iter().any(
+            |e| matches!(e, EngineEvent::Status { status, .. } if status.phase == Phase::Metadata)
+        ),
+        "no metadata phase: the member never asked the swarm"
+    );
+    wait_event(&mut mev, &mut mseen, 90, |e| {
+        matches!(e, EngineEvent::Complete { .. })
+    })
+    .await
+    .expect("member complete");
+    assert!(http_get(&url, 0, None).await == bytes, "byte-exact");
+    // Hostile metadata is refused (wrong infohash).
+    let (m2, mut m2ev) = EngineHandle::spawn(engine_cfg(dir.join("m2"), free_port()));
+    let mut wrong = media(
+        syncwatch_protocol::Infohash([3; 20]),
+        0,
+        "film.mkv",
+        bytes.len() as u64,
+        magnet(&syncwatch_protocol::Infohash([3; 20]), "x", &[]),
+    );
+    wrong.name = "film.mkv".into();
+    let meta2 = match hseen.iter().find_map(|e| match e {
+        EngineEvent::Metadata { torrent, .. } => Some(torrent.clone()),
+        _ => None,
+    }) {
+        Some(m) => m,
+        None => panic!(),
+    };
+    m2.start_with_meta(wrong, meta2, Vec::new());
+    let mut s2 = Vec::new();
+    let f = wait_event(&mut m2ev, &mut s2, 10, |e| {
+        matches!(e, EngineEvent::Failed { .. })
+    })
+    .await;
+    assert!(
+        matches!(
+            f,
+            Some(EngineEvent::Failed {
+                error: syncwatch_torrent::EngineError::MetaMismatch,
+                ..
+            })
+        ),
+        "{f:?}"
+    );
+    host.stop(sw.seeder.infohash, StopReason::Leave).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

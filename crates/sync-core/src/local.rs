@@ -37,6 +37,13 @@ pub struct Local {
     torrent_streaming: bool,
     /// Torrent progress reported to the host (whole percent steps).
     torrent: Option<TorrentProgress>,
+    /// The room torrent's metadata (host: to offer; member: received from the host).
+    pub torrent_meta: Option<TorrentMetaStore>,
+    /// Member: metadata chunks being assembled (infohash, total, bytes).
+    meta_in: Option<(Infohash, u32, Vec<u8>)>,
+    /// Set by the machine that owns this Local (the host fetches torrent metadata itself;
+    /// members wait for the host's offer).
+    pub is_host: bool,
     awaiting_magnet: bool,
     // --- playback following ---
     obs: Option<Obs>,
@@ -72,6 +79,9 @@ impl Local {
             torrent_started: None,
             torrent_streaming: false,
             torrent: None,
+            torrent_meta: None,
+            meta_in: None,
+            is_host: false,
             awaiting_magnet: false,
             obs: None,
             applied_paused: None,
@@ -147,6 +157,12 @@ impl Local {
         self.load_requested = false;
         self.torrent_streaming = false;
         self.torrent = None;
+        self.meta_in = None;
+        // Metadata of another torrent never survives a source change.
+        let keep = matches!((&descriptor, &self.torrent_meta), (Some(MediaDescriptor::Torrent(t)), Some(m)) if m.infohash == t.infohash);
+        if !keep {
+            self.torrent_meta = None;
+        }
         self.awaiting_magnet = false;
         self.pending_mismatch = None;
         self.obs = None;
@@ -186,6 +202,9 @@ impl Local {
                         name: t.name.clone(),
                         size: t.size,
                         infohash: t.infohash,
+                        torrent_name: syncwatch_protocol::magnet::parse(&t.magnet)
+                            .ok()
+                            .and_then(|m| m.display_name),
                     });
                 }
             }
@@ -221,10 +240,21 @@ impl Local {
         self.awaiting_magnet = false;
         self.torrent_started = Some(t.infohash);
         self.media = MediaStatus::Downloading { permille: 0 };
+        let have_meta = self.has_meta(&t.infohash);
+        // The host gets the file list itself; a member uses the host's (never the swarm's).
         self.torrent = Some(TorrentProgress {
-            phase: TorrentPhase::Metadata,
+            phase: if self.is_host || have_meta {
+                TorrentPhase::Metadata
+            } else {
+                TorrentPhase::WaitingForHost
+            },
             permille: 0,
         });
+        if !self.is_host && !have_meta {
+            out.push(Effect::SendToHost(Message::TorrentMetaRequest {
+                infohash: t.infohash,
+            }));
+        }
         out.push(Effect::StartTorrent {
             infohash: t.infohash,
             file_index: t.file_index,
@@ -263,6 +293,78 @@ impl Local {
             self.media = MediaStatus::Mismatch;
             self.request_load(PlayerCmd::LoadLocal, out);
         }
+    }
+
+    pub fn has_meta(&self, ih: &Infohash) -> bool {
+        self.torrent_meta
+            .as_ref()
+            .is_some_and(|m| m.infohash == *ih)
+    }
+
+    /// The room torrent's announced infohash, if the room plays a torrent.
+    pub fn room_infohash(&self) -> Option<Infohash> {
+        match &self.descriptor {
+            Some(MediaDescriptor::Torrent(t)) => Some(t.infohash),
+            _ => None,
+        }
+    }
+
+    /// Keeps metadata the app provides (only for the room's torrent).
+    pub fn set_meta(&mut self, m: TorrentMetaStore) -> bool {
+        if self.room_infohash() == Some(m.infohash) {
+            self.torrent_meta = Some(m);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Member: one chunk of the host's metadata offer. Err = protocol violation.
+    pub fn on_meta_chunk(
+        &mut self,
+        infohash: Infohash,
+        total: u32,
+        offset: u32,
+        host_port: u16,
+        data: Vec<u8>,
+        out: &mut Out,
+    ) -> Result<(), &'static str> {
+        if self.room_infohash() != Some(infohash) {
+            return Err("torrent metadata for a torrent the room does not play");
+        }
+        if self.has_meta(&infohash) {
+            return Ok(()); // already have it: the offer is ignored
+        }
+        if total as usize > syncwatch_protocol::limits::MAX_TORRENT_META_BYTES {
+            return Err("torrent metadata larger than the protocol limit");
+        }
+        if offset == 0 {
+            self.meta_in = Some((infohash, total, Vec::new()));
+        }
+        let Some((ih, t, buf)) = self.meta_in.as_mut() else {
+            return Err("torrent metadata chunk out of order");
+        };
+        if *ih != infohash || *t != total || buf.len() != offset as usize {
+            self.meta_in = None;
+            return Err("torrent metadata chunk out of order");
+        }
+        buf.extend_from_slice(&data);
+        if buf.len() == total as usize {
+            let Some((_, _, torrent)) = self.meta_in.take() else {
+                return Ok(());
+            };
+            self.torrent_meta = Some(TorrentMetaStore {
+                infohash,
+                torrent: torrent.clone(),
+                host_port,
+            });
+            out.push(Effect::TorrentMetaReceived {
+                infohash,
+                torrent,
+                host_port,
+            });
+        }
+        Ok(())
     }
 
     pub fn accept_magnet(&mut self, out: &mut Out) {

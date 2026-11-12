@@ -264,6 +264,8 @@ pub struct Node {
     /// External files: host side = sources, member side = received bytes.
     pub ext_files: HashMap<ExternalId, Vec<u8>>,
     pub ext_complete: Vec<ExternalId>,
+    /// Torrent metadata received from the host (infohash, bytes).
+    pub meta_received: Vec<(Infohash, Vec<u8>)>,
     next_tick: i64,
     pending_events: Vec<(i64, Event)>,
 }
@@ -350,6 +352,7 @@ impl World {
             connected: true,
             ext_files: HashMap::new(),
             ext_complete: Vec::new(),
+            meta_received: Vec::new(),
             next_tick: 0,
             pending_events: Vec::new(),
         });
@@ -578,6 +581,9 @@ impl World {
                     }
                 }
                 Effect::StartTorrent { .. } | Effect::StopTorrent { .. } => {}
+                Effect::TorrentMetaReceived {
+                    infohash, torrent, ..
+                } => self.nodes[idx].meta_received.push((infohash, torrent)),
             }
         }
     }

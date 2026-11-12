@@ -152,6 +152,7 @@ impl MemberMachine {
         m.members = h.members.clone();
         m.chat_config = h.chat_config;
         m.local = local;
+        m.local.is_host = false;
         m.next_ping_us = i64::MIN;
         m
     }
@@ -197,6 +198,17 @@ impl MemberMachine {
                 let manifest = self.local.tracks.desired.manifest.clone();
                 self.downloads
                     .on_cached(id, &manifest, &mut self.local.tracks, &mut out);
+            }
+            Event::TorrentMeta {
+                infohash,
+                torrent,
+                host_port,
+            } => {
+                self.local.set_meta(TorrentMetaStore {
+                    infohash,
+                    torrent,
+                    host_port,
+                });
             }
             Event::PeerJoined { .. } | Event::PeerLeft { .. } => {}
         }
@@ -457,6 +469,23 @@ impl MemberMachine {
                     });
                 }
             }
+            Message::TorrentMeta {
+                infohash,
+                total,
+                offset,
+                host_port,
+                data,
+            } => {
+                if let Err(what) = self
+                    .local
+                    .on_meta_chunk(infohash, total, offset, host_port, data, out)
+                {
+                    out.push(Effect::ProtocolViolation {
+                        from: from.member,
+                        what,
+                    });
+                }
+            }
             Message::FileWithheld { external_id } => {
                 let manifest = self.local.tracks.desired.manifest.clone();
                 self.downloads
@@ -470,7 +499,8 @@ impl MemberMachine {
             | Message::ChatSend { .. }
             | Message::FileRequest { .. }
             | Message::FileHave { .. }
-            | Message::FileCancel { .. } => out.push(Effect::ProtocolViolation {
+            | Message::FileCancel { .. }
+            | Message::TorrentMetaRequest { .. } => out.push(Effect::ProtocolViolation {
                 from: from.member,
                 what: "member-only message from the host",
             }),

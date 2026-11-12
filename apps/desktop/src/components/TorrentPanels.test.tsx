@@ -19,6 +19,9 @@ const own = (over: Partial<TorrentState> = {}): TorrentState => ({
   exclusive: false,
   completeMessage: null,
   error: null,
+  trackers: 2,
+  dht: true,
+  webSeeds: 0,
   ...over,
 });
 
@@ -116,5 +119,29 @@ describe('seek bar and buffering', () => {
     render(<BufferingOverlay buffering={{ have: 1_000_000, total: 4_000_000 }} />);
     expect(screen.getByTestId('torrent-buffering').textContent).toContain('Buffering 25%');
     expect(screen.getByTestId('torrent-buffering').textContent).toContain('1.0 MB of 4.0 MB');
+  });
+});
+
+describe('clear status instead of a silent stall', () => {
+  it('waiting for the host, looking for peers, no peers (with and without web seeds)', () => {
+    const { rerender } = render(<TorrentBlock torrent={own({ phase: 'waitingForHost', haveBytes: 0 })} isHost={false} members={[]} />);
+    expect(screen.getByTestId('torrent-look').textContent).toBe('Waiting for the host to get the file list');
+    rerender(<TorrentBlock torrent={own({ phase: 'metadata', haveBytes: 0, dht: false, trackers: 1 })} isHost={false} members={[]} />);
+    expect(screen.getByTestId('torrent-look').textContent).toBe('Looking for peers (DHT off, 1 tracker)');
+    rerender(<TorrentBlock torrent={own({ phase: 'noPeers', peers: 0 })} isHost={false} members={[]} />);
+    expect(screen.getByTestId('torrent-look').textContent).toContain('no peers are sharing it yet');
+    rerender(<TorrentBlock torrent={own({ phase: 'noPeers', peers: 0, webSeeds: 2 })} isHost={false} members={[]} />);
+    expect(screen.getByTestId('torrent-look').textContent).toContain('web seeds');
+  });
+
+  it('the host sees a member waiting for its file list', () => {
+    render(<TorrentBlock torrent={null} isHost members={[member(1, 'Ben', { phase: 'waitingForHost', permille: 0 })]} />);
+    expect(screen.getByTestId('torrent-member-status').textContent).toBe("waiting for the host's file list");
+  });
+
+  it('the confirmation names the torrent and the chosen file', () => {
+    render(<ConfirmMagnetDialog name="long.mkv" size={77_000_000} torrentName="SyncWatch Lab Pack" onAccept={() => {}} onDecline={() => {}} />);
+    expect(screen.getByTestId('magnet-torrent-name').textContent).toBe('SyncWatch Lab Pack');
+    expect(screen.getByTestId('magnet-name').textContent).toBe('long.mkv');
   });
 });

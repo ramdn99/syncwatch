@@ -5,6 +5,10 @@
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 /// External-file chunk size (spec section 8: 16 KiB chunks).
 pub const CHUNK_BYTES: usize = 16 * 1024;
+/// Protocol ceiling for torrent METADATA offered by the host (the .torrent / info dictionary,
+/// never media). The default cap actually used is 5 MB (configurable below this ceiling).
+pub const MAX_TORRENT_META_BYTES: usize = 16 * 1024 * 1024;
+pub const DEFAULT_TORRENT_META_CAP: usize = 5 * 1024 * 1024;
 /// Display names: bytes on the wire (graphemes are checked by sync-core).
 pub const MAX_NAME_BYTES: usize = 128;
 /// Chat text bytes on the wire (500 graphemes are enforced by sync-core).

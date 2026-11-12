@@ -1,5 +1,5 @@
 import type { RoomMember, TorrentState } from '../lib/room';
-import { fmtBytes, fmtEta, fmtRate, torrentStatusText, TORRENT_NOTICE } from '../lib/room';
+import { fmtBytes, fmtEta, fmtRate, torrentLookText, torrentStatusText, TORRENT_NOTICE } from '../lib/room';
 
 /**
  * Torrent progress block (spec section 10, Host controls): this window's own download (speeds,
@@ -35,7 +35,12 @@ export function TorrentBlock({ torrent, members, isHost }: { torrent: TorrentSta
               <dd>{fmtEta(torrent.etaSecs)}</dd>
             </dl>
           )}
-          {torrent.phase === 'noPeers' && <p className="text-warning">Waiting for peers. Retrying automatically; what is downloaded keeps playing.</p>}
+          {torrentLookText(torrent) && (
+            <p className={torrent.phase === 'noPeers' ? 'text-warning' : 'text-muted'} data-testid="torrent-look" role="status">
+              {torrentLookText(torrent)}
+            </p>
+          )}
+          {torrent.phase === 'noPeers' && <p className="text-muted">What is downloaded keeps playing.</p>}
           {torrent.completeMessage && (
             <p className="text-success" data-testid="torrent-complete" role="status">
               {torrent.completeMessage}
@@ -67,14 +72,20 @@ export function TorrentBlock({ torrent, members, isHost }: { torrent: TorrentSta
 }
 
 /** Member: the host shared a magnet; nothing is downloaded before the member agrees. */
-export function ConfirmMagnetDialog(props: { name: string; size: number; onAccept: () => void; onDecline: () => void }) {
+export function ConfirmMagnetDialog(props: { name: string; size: number; torrentName?: string | null; onAccept: () => void; onDecline: () => void }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="alertdialog" aria-labelledby="magnet-title">
       <div className="w-[30rem] space-y-3 rounded-xl border border-border bg-elevated p-5">
         <h2 id="magnet-title" className="font-brand text-lg font-bold">
           The host wants to play a torrent
         </h2>
+        {props.torrentName && (
+          <p className="text-sm text-muted">
+            Torrent: <span data-testid="magnet-torrent-name">{props.torrentName}</span>
+          </p>
+        )}
         <p className="text-sm">
+          <span className="text-muted">File chosen by the host: </span>
           <span className="font-medium" data-testid="magnet-name">
             {props.name}
           </span>{' '}

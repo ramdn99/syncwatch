@@ -4,7 +4,7 @@
 use crate::ProtocolError;
 use crate::ids::*;
 use crate::limits::*;
-use crate::media::MediaDescriptor;
+use crate::media::{Infohash, MediaDescriptor};
 use crate::permissions::Permissions;
 use crate::tracks::TrackState;
 use serde::{Deserialize, Serialize};
@@ -95,6 +95,8 @@ pub enum TrackSyncStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TorrentPhase {
     Metadata,
+    /// Member: waiting for the host to offer the file list (members never ask the swarm).
+    WaitingForHost,
     Downloading,
     /// Playing while downloading.
     Streaming,
@@ -408,6 +410,21 @@ pub enum Message {
     FileWithheld {
         external_id: ExternalId,
     },
+    // --- torrent METADATA (never media): the room's announced torrent only ---
+    /// Host -> member: a chunk of the room torrent's metadata (.torrent bytes; the member checks
+    /// that its info dictionary hashes to `infohash`). `host_port` is the host's torrent engine
+    /// port (a local peer for members on the same machine).
+    TorrentMeta {
+        infohash: Infohash,
+        total: u32,
+        offset: u32,
+        host_port: u16,
+        data: Vec<u8>,
+    },
+    /// Member -> host: send the metadata of the room's announced torrent.
+    TorrentMetaRequest {
+        infohash: Infohash,
+    },
 }
 
 /// Data-channel kind a message travels on.
@@ -447,10 +464,12 @@ pub enum MessageKind {
     FileHave,
     FileCancel,
     FileWithheld,
+    TorrentMeta,
+    TorrentMetaRequest,
 }
 
 impl MessageKind {
-    pub const ALL: [MessageKind; 18] = [
+    pub const ALL: [MessageKind; 20] = [
         MessageKind::Hello,
         MessageKind::Welcome,
         MessageKind::Reject,
@@ -469,6 +488,8 @@ impl MessageKind {
         MessageKind::FileHave,
         MessageKind::FileCancel,
         MessageKind::FileWithheld,
+        MessageKind::TorrentMeta,
+        MessageKind::TorrentMetaRequest,
     ];
 
     /// Whether this kind carries an opaque byte payload. Exhaustive on purpose: adding a message
@@ -476,7 +497,9 @@ impl MessageKind {
     /// (`FileChunk`, which only ever refers to a manifest ExternalId).
     pub fn carries_bulk_bytes(self) -> bool {
         match self {
-            MessageKind::FileChunk => true,
+            // External files (manifest only) and torrent METADATA (announced infohash only,
+            // capped): never main media.
+            MessageKind::FileChunk | MessageKind::TorrentMeta => true,
             MessageKind::Hello
             | MessageKind::Welcome
             | MessageKind::Reject
@@ -493,7 +516,8 @@ impl MessageKind {
             | MessageKind::FileRequest
             | MessageKind::FileHave
             | MessageKind::FileCancel
-            | MessageKind::FileWithheld => false,
+            | MessageKind::FileWithheld
+            | MessageKind::TorrentMetaRequest => false,
         }
     }
 }
@@ -540,6 +564,8 @@ impl Message {
             Message::FileHave { .. } => MessageKind::FileHave,
             Message::FileCancel { .. } => MessageKind::FileCancel,
             Message::FileWithheld { .. } => MessageKind::FileWithheld,
+            Message::TorrentMeta { .. } => MessageKind::TorrentMeta,
+            Message::TorrentMetaRequest { .. } => MessageKind::TorrentMetaRequest,
         }
     }
 
@@ -554,7 +580,7 @@ impl Message {
 
     pub fn priority(&self) -> Priority {
         match self.kind() {
-            MessageKind::FileChunk => Priority::Bulk,
+            MessageKind::FileChunk | MessageKind::TorrentMeta => Priority::Bulk,
             MessageKind::TimePing | MessageKind::TimePong | MessageKind::Heartbeat => {
                 Priority::Heartbeat
             }
@@ -587,6 +613,23 @@ impl Message {
             Message::FileChunk { data, .. } => {
                 if data.len() > CHUNK_BYTES || data.is_empty() {
                     Err(ProtocolError::Limit("chunk size"))
+                } else {
+                    Ok(())
+                }
+            }
+            Message::TorrentMeta {
+                total,
+                offset,
+                data,
+                ..
+            } => {
+                let end = (*offset as usize).checked_add(data.len());
+                if data.len() > CHUNK_BYTES
+                    || data.is_empty()
+                    || *total as usize > MAX_TORRENT_META_BYTES
+                    || end.is_none_or(|e| e > *total as usize)
+                {
+                    Err(ProtocolError::Limit("torrent metadata chunk"))
                 } else {
                     Ok(())
                 }

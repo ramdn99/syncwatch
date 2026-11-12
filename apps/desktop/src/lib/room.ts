@@ -33,7 +33,7 @@ export interface RoomMember {
   torrent: { phase: TorrentPhase; permille: number } | null;
 }
 
-export type TorrentPhase = 'metadata' | 'downloading' | 'streaming' | 'noPeers' | 'complete' | 'failed';
+export type TorrentPhase = 'metadata' | 'waitingForHost' | 'downloading' | 'streaming' | 'noPeers' | 'complete' | 'failed';
 
 /** This window's own torrent download. */
 export interface TorrentState {
@@ -49,6 +49,11 @@ export interface TorrentState {
   buffering: { have: number; total: number } | null;
   /** Only the playback stream runs (window short or just seeked). */
   exclusive: boolean;
+  /** What is used to find peers. */
+  trackers: number;
+  dht: boolean;
+  /** Web seeds listed in the torrent (not supported by the engine). */
+  webSeeds: number;
   /** "Downloading and sharing have stopped. No further traffic." once complete. */
   completeMessage: string | null;
   error: string | null;
@@ -111,7 +116,7 @@ export interface RoomState {
   joining: boolean;
   torrent: TorrentState | null;
   /** Member: the host's magnet waits for our confirmation. */
-  confirmMagnet: { name: string; size: number; infohash: string } | null;
+  confirmMagnet: { name: string; size: number; infohash: string; torrentName: string | null } | null;
 }
 
 export interface AddExternalOutcome {
@@ -294,6 +299,7 @@ export const TORRENT_NOTICE =
 
 const PHASE_TEXT: Record<TorrentPhase, string> = {
   metadata: 'getting file list',
+  waitingForHost: "waiting for the host's file list",
   downloading: 'downloading',
   streaming: 'downloading',
   noPeers: 'waiting for peers',
@@ -307,6 +313,20 @@ export function torrentStatusText(t: { phase: TorrentPhase; permille: number } |
   if (buffering && t.phase !== 'complete') return 'buffering';
   const pct = Math.floor(t.permille / 10);
   return t.phase === 'downloading' || t.phase === 'streaming' || t.phase === 'noPeers' ? `${PHASE_TEXT[t.phase]} ${pct}%` : PHASE_TEXT[t.phase];
+}
+
+/** What this window is doing while it has no data yet, and why it may be stuck. */
+export function torrentLookText(t: TorrentState): string | null {
+  if (t.phase === 'waitingForHost') return 'Waiting for the host to get the file list';
+  const how = `DHT ${t.dht ? 'on' : 'off'}, ${t.trackers} tracker${t.trackers === 1 ? '' : 's'}`;
+  if (t.phase === 'metadata') return `Looking for peers (${how})`;
+  if (t.phase === 'noPeers') {
+    return t.webSeeds > 0
+      ? 'The torrent file was loaded, but no peers are sharing it yet. Its web seeds (HTTP downloads) are not supported.'
+      : `The torrent file was loaded, but no peers are sharing it yet (${how}). Retrying automatically; a firewall or DHT being off can also cause this.`;
+  }
+  if ((t.phase === 'downloading' || t.phase === 'streaming') && t.peers > 0) return `${t.peers} peer${t.peers === 1 ? '' : 's'} found (${how})`;
+  return null;
 }
 
 export const fmtBytes = (n: number) =>

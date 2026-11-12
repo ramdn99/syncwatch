@@ -187,6 +187,21 @@ pub enum Event {
     Torrent(TorrentEvent),
     /// The app found an identical external file (blake3 match) in its cache.
     ExternalCached(ExternalId),
+    /// The app has the room torrent's metadata (host: from its engine or a .torrent file).
+    /// The host offers it to members; any participant keeps it for a later role change.
+    TorrentMeta {
+        infohash: Infohash,
+        torrent: Vec<u8>,
+        host_port: u16,
+    },
+}
+
+/// Torrent metadata held for the room's announced torrent (moves with the host role).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TorrentMetaStore {
+    pub infohash: Infohash,
+    pub torrent: Vec<u8>,
+    pub host_port: u16,
 }
 
 /// UI notifications.
@@ -208,9 +223,12 @@ pub enum UiEvent {
         got: FileIdentity,
     },
     ConfirmMagnet {
+        /// The host's chosen file (name and size).
         name: String,
         size: u64,
         infohash: Infohash,
+        /// The torrent's own name (magnet "dn"), if known.
+        torrent_name: Option<String>,
     },
     MediaChanged {
         title: Option<String>,
@@ -270,6 +288,13 @@ pub enum Effect {
     /// Stop ALL traffic of this torrent (spec section 10).
     StopTorrent {
         infohash: Infohash,
+    },
+    /// Member: the host's metadata for the room torrent arrived complete (the app verifies
+    /// its SHA-1 against `infohash` before using it).
+    TorrentMetaReceived {
+        infohash: Infohash,
+        torrent: Vec<u8>,
+        host_port: u16,
     },
     /// Member: persist a verified-in-order chunk of an external file to the per-room cache.
     WriteExternalChunk {

@@ -10,9 +10,9 @@
 use crate::announce::{STOPPED_TIMEOUT, StoppedAnnounce, send_stopped};
 use crate::cache::Cache;
 use crate::juggle::{Juggler, StreamDriver};
+use crate::meta;
 use crate::policy::{Buffering, ByteMap, FileGeometry, PiecePolicy, PolicyConfig};
 use crate::server::{Loopback, Reader, StreamOpener};
-use crate::validate;
 use futures_util::future::BoxFuture;
 use librqbit::api::TorrentIdOrHash;
 use librqbit::{
@@ -60,6 +60,8 @@ pub struct EngineConfig {
     /// While waiting for peers, restart peer discovery this often.
     pub retry_every: Duration,
     pub free_space: Option<FreeSpace>,
+    /// Largest torrent metadata accepted (a .torrent file or the host's offer).
+    pub meta_cap: usize,
     /// Tick period of the actor.
     pub tick: Duration,
 }
@@ -79,6 +81,7 @@ impl EngineConfig {
             no_peers_after: Duration::from_secs(15),
             retry_every: Duration::from_secs(30),
             free_space: None,
+            meta_cap: meta::DEFAULT_META_CAP,
             tick: Duration::from_millis(200),
         }
     }
@@ -104,6 +107,10 @@ pub enum EngineError {
     CacheFull,
     #[error("the torrent engine could not start")]
     Engine,
+    #[error("the torrent metadata does not belong to this torrent")]
+    MetaMismatch,
+    #[error("the torrent metadata is larger than the limit")]
+    MetaTooLarge,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +127,37 @@ pub struct TorrentInfo {
     pub infohash: Infohash,
     pub name: String,
     pub files: Vec<FileEntry>,
+    pub total_size: u64,
+    /// Validated trackers (count) and BEP 19 web seeds (librqbit 9.0.1 cannot use them).
+    pub trackers: usize,
+    pub web_seeds: usize,
+    /// Sanitized .torrent bytes (original info dictionary + validated trackers only).
+    pub torrent: Vec<u8>,
+}
+
+impl TorrentInfo {
+    /// From validated metadata (our parser), skipping padding files.
+    pub fn from_meta(m: &meta::TorrentMeta) -> Self {
+        Self {
+            infohash: m.infohash,
+            name: m.name.clone(),
+            files: m
+                .files
+                .iter()
+                .filter(|f| !f.padding)
+                .map(|f| FileEntry {
+                    index: f.index,
+                    path: f.path.clone(),
+                    len: f.len,
+                    video: f.video,
+                })
+                .collect(),
+            total_size: m.total_size,
+            trackers: m.trackers.len(),
+            web_seeds: m.web_seeds,
+            torrent: m.sanitized(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +183,10 @@ pub struct TorrentStatus {
     pub buffering: Option<Buffering>,
     /// Only the playback stream is running (window short / just seeked).
     pub exclusive: bool,
+    /// What the engine is using to find peers (status text).
+    pub trackers: u32,
+    pub dht: bool,
+    pub web_seeds: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +207,13 @@ pub enum EngineEvent {
     Playable {
         infohash: Infohash,
         url: String,
+    },
+    /// The torrent was added: its sanitized metadata and our engine's listen port (the host
+    /// offers both to members).
+    Metadata {
+        infohash: Infohash,
+        torrent: Vec<u8>,
+        port: u16,
     },
     Complete {
         infohash: Infohash,
@@ -190,6 +239,9 @@ enum Cmd {
     },
     Start {
         media: TorrentMedia,
+        /// Host-provided (member) or .torrent-file metadata: no swarm lookup at all.
+        meta: Option<Vec<u8>>,
+        extra_peers: Vec<SocketAddr>,
     },
     Stop {
         infohash: Infohash,
@@ -238,8 +290,27 @@ impl EngineHandle {
         rx.await.unwrap_or(Err(EngineError::Engine))
     }
 
+    /// Starts from metadata we already have (the host's offer, or a .torrent file): the
+    /// engine never asks the swarm for the file list. `extra_peers`: e.g. the host's engine.
+    pub fn start_with_meta(
+        &self,
+        media: TorrentMedia,
+        meta: Vec<u8>,
+        extra_peers: Vec<SocketAddr>,
+    ) {
+        let _ = self.tx.send(Cmd::Start {
+            media,
+            meta: Some(meta),
+            extra_peers,
+        });
+    }
+
     pub fn start(&self, media: TorrentMedia) {
-        let _ = self.tx.send(Cmd::Start { media });
+        let _ = self.tx.send(Cmd::Start {
+            media,
+            meta: None,
+            extra_peers: Vec::new(),
+        });
     }
 
     /// Stops a torrent (never blocks on trackers: the announce runs in the background).
@@ -352,6 +423,7 @@ struct Active {
     first_piece: u32,
     rel_path: String,
     trackers: Vec<Url>,
+    web_seeds: usize,
     policy: PiecePolicy,
     juggler: Juggler<FileStream>,
     bytes: ByteMap,
@@ -415,6 +487,7 @@ async fn fetch_metadata(
     magnet: String,
     timeout: Duration,
     initial_peers: Vec<SocketAddr>,
+    cap: usize,
 ) -> Result<(TorrentInfo, bytes::Bytes), EngineError> {
     let parsed = syncwatch_protocol::magnet::parse(&magnet).map_err(|_| EngineError::BadMagnet)?;
     let opts = AddTorrentOptions {
@@ -436,39 +509,16 @@ async fn fetch_metadata(
         Ok(Ok(AddTorrentResponse::ListOnly(r))) => r,
         Ok(Ok(_)) => return Err(EngineError::Metadata),
     };
-    let info = &resp.info;
-    let multi = info.iter_file_details().count() > 1;
-    let name = info
-        .name()
-        .map(|n| n.into_owned())
-        .or(parsed.display_name.clone())
-        .unwrap_or_else(|| "torrent".into());
-    let mut files = Vec::new();
-    for (i, fd) in info.iter_file_details().enumerate() {
-        let mut comps = fd.filename.to_vec();
-        if multi {
-            comps.insert(0, name.clone());
-        }
-        validate::check_path(&comps).map_err(|_| EngineError::UnsafePath)?;
-        if fd.attrs().padding {
-            continue;
-        }
-        let path = comps.join("/");
-        files.push(FileEntry {
-            index: i as u32,
-            video: validate::is_video(&path),
-            path,
-            len: fd.len,
-        });
-    }
-    Ok((
-        TorrentInfo {
-            infohash: parsed.infohash,
-            name,
-            files,
-        },
-        resp.torrent_bytes,
-    ))
+    // The swarm's metadata is untrusted too: the same defensive parser as for .torrent files.
+    let m =
+        meta::inspect(&resp.torrent_bytes, cap, Some(parsed.infohash)).map_err(|e| match e {
+            meta::MetaError::UnsafePath => EngineError::UnsafePath,
+            meta::MetaError::TooLarge => EngineError::MetaTooLarge,
+            _ => EngineError::Metadata,
+        })?;
+    let info = TorrentInfo::from_meta(&m);
+    let bytes = bytes::Bytes::from(info.torrent.clone());
+    Ok((info, bytes))
 }
 
 impl Actor {
@@ -610,7 +660,11 @@ impl Actor {
                     }
                 }
             }
-            Cmd::Start { media } => self.start(media).await,
+            Cmd::Start {
+                media,
+                meta,
+                extra_peers,
+            } => self.start(media, meta, extra_peers).await,
             Cmd::Stop {
                 infohash,
                 reason,
@@ -653,9 +707,13 @@ impl Actor {
         kind: PrepKind,
     ) -> tokio::task::AbortHandle {
         let tx = self.prep_tx.clone();
-        let (timeout, peers) = (self.cfg.metadata_timeout, self.cfg.initial_peers.clone());
+        let (timeout, peers, cap) = (
+            self.cfg.metadata_timeout,
+            self.cfg.initial_peers.clone(),
+            self.cfg.meta_cap,
+        );
         tokio::spawn(async move {
-            let result = fetch_metadata(session, magnet, timeout, peers).await;
+            let result = fetch_metadata(session, magnet, timeout, peers, cap).await;
             let _ = tx.send(Prepared {
                 infohash: parsed.infohash,
                 trackers: magnet_trackers(&parsed),
@@ -678,7 +736,7 @@ impl Actor {
                 // Stopped meanwhile? Then the result is dropped.
                 if self.starting.remove(&p.infohash).is_some() {
                     let r = match p.result {
-                        Ok((info, bytes)) => self.add(&media, info, bytes).await,
+                        Ok((info, bytes)) => self.add(&media, info, bytes, Vec::new()).await,
                         Err(e) => Err(e),
                     };
                     if let Err(e) = r {
@@ -729,7 +787,12 @@ impl Actor {
         });
     }
 
-    async fn start(&mut self, media: TorrentMedia) {
+    async fn start(
+        &mut self,
+        media: TorrentMedia,
+        given: Option<Vec<u8>>,
+        extra_peers: Vec<SocketAddr>,
+    ) {
         let ih = media.infohash;
         if self.active.contains_key(&ih) || self.served.contains_key(&ih) {
             return;
@@ -753,10 +816,31 @@ impl Actor {
             }
             return;
         }
+        // Metadata already known (host offer / .torrent): verify it and add directly.
+        if let Some(bytes) = given {
+            let r = match meta::inspect(&bytes, self.cfg.meta_cap, Some(ih)) {
+                Ok(m) => {
+                    let info = TorrentInfo::from_meta(&m);
+                    let b = bytes::Bytes::from(info.torrent.clone());
+                    self.add(&media, info, b, extra_peers).await
+                }
+                Err(meta::MetaError::HashMismatch) => Err(EngineError::MetaMismatch),
+                Err(meta::MetaError::TooLarge) => Err(EngineError::MetaTooLarge),
+                Err(meta::MetaError::UnsafePath) => Err(EngineError::UnsafePath),
+                Err(_) => Err(EngineError::Metadata),
+            };
+            if let Err(e) = r {
+                self.cache.remove(&ih);
+                self.fail(ih, e);
+                self.shutdown_if_idle().await;
+            }
+            return;
+        }
         let parsed = match syncwatch_protocol::magnet::parse(&media.magnet) {
             Ok(p) => p,
             Err(_) => return self.fail(ih, EngineError::BadMagnet),
         };
+        let trackers = parsed.trackers.len() as u32;
         let session = match self.ensure_session().await {
             Ok(s) => s,
             Err(e) => return self.fail(ih, e),
@@ -781,6 +865,9 @@ impl Actor {
                 ranges: Vec::new(),
                 buffering: None,
                 exclusive: true,
+                trackers,
+                dht: self.cfg.dht,
+                web_seeds: 0,
             },
         });
     }
@@ -791,6 +878,7 @@ impl Actor {
         media: &TorrentMedia,
         info: TorrentInfo,
         torrent_bytes: bytes::Bytes,
+        extra_peers: Vec<SocketAddr>,
     ) -> Result<(), EngineError> {
         let ih = media.infohash;
         let entry = info
@@ -820,8 +908,11 @@ impl Actor {
             overwrite: true,
             output_folder: Some(dir.to_string_lossy().into_owned()),
             trackers: (!parsed.trackers.is_empty()).then(|| parsed.trackers.clone()),
-            initial_peers: (!self.cfg.initial_peers.is_empty())
-                .then(|| self.cfg.initial_peers.clone()),
+            initial_peers: {
+                let mut p = self.cfg.initial_peers.clone();
+                p.extend(extra_peers);
+                (!p.is_empty()).then_some(p)
+            },
             ..Default::default()
         };
         let resp = session
@@ -863,6 +954,7 @@ impl Actor {
             trackers = trackers.len(),
             "torrent added (selected file only)"
         );
+        let meta_bytes = info.torrent.clone();
         self.active.insert(
             ih,
             Active {
@@ -873,6 +965,7 @@ impl Actor {
                 first_piece,
                 rel_path: rel,
                 trackers,
+                web_seeds: info.web_seeds,
                 policy: PiecePolicy::new(self.cfg.policy, geo),
                 juggler: Juggler::default(),
                 bytes: ByteMap::new(fi.len, None),
@@ -886,6 +979,16 @@ impl Actor {
                 failed: false,
             },
         );
+        let port = self
+            .session
+            .as_ref()
+            .and_then(|s| s.listen_addr().map(|a| a.port()))
+            .unwrap_or(0);
+        self.emit(EngineEvent::Metadata {
+            infohash: ih,
+            torrent: meta_bytes,
+            port,
+        });
         Ok(())
     }
 
@@ -1034,6 +1137,9 @@ impl Actor {
                     ranges: a.policy.geometry().ranges(&have),
                     buffering: plan.buffering,
                     exclusive: plan.exclusive,
+                    trackers: a.trackers.len() as u32,
+                    dht: cfg.dht,
+                    web_seeds: a.web_seeds as u32,
                 },
             });
             if complete {
@@ -1139,6 +1245,9 @@ fn complete_status(size: u64) -> TorrentStatus {
         ranges: vec![(0, size)],
         buffering: None,
         exclusive: false,
+        trackers: 0,
+        dht: false,
+        web_seeds: 0,
     }
 }
 

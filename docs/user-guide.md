@@ -10,8 +10,10 @@ Milestone 9.
   2. Choose **Get file list**. SyncWatch asks peers for the torrent's file list; this can take
      a moment and fails after 90 s if nobody has it.
   3. Pick the video file. Only that file is downloaded.
-- **Members** see the name and size and choose **Download and play** or **Decline**. Nothing is
-  downloaded before they agree.
+- **Members** see the torrent's name, the file the host chose and its size, and choose
+  **Download and play** or **Decline**. Nothing is downloaded before they agree. Members never
+  look for the file list themselves: they get it from the host. If the host is still getting it,
+  they see "Waiting for the host to get the file list" and start as soon as it arrives.
 - Everyone downloads their own copy and starts playing as soon as the beginning and the end of
   the file are there. Playback stays in sync while downloading.
 - **Seeking to a part that is not downloaded yet** pauses the room and shows "Buffering n%"

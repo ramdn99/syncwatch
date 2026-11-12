@@ -76,7 +76,12 @@ fn no_media_over_datachannel_enumeration() {
         .iter()
         .filter(|k| k.carries_bulk_bytes())
         .collect();
-    assert_eq!(bulk, vec![&MessageKind::FileChunk]);
+    // External files (manifest entries only) and torrent METADATA (the room's announced
+    // infohash only, capped); main media can never travel over the data channel.
+    assert_eq!(
+        bulk,
+        vec![&MessageKind::FileChunk, &MessageKind::TorrentMeta]
+    );
     assert_eq!(limits::CHUNK_BYTES, 16 * 1024);
 
     // A media descriptor serializes to a small, fixed-size-ish blob regardless of media size.
@@ -95,9 +100,9 @@ fn no_media_over_datachannel_enumeration() {
         frame.len()
     );
 
-    // Every kind maps to a channel and priority; only FileChunk is Bulk priority.
+    // Every kind maps to a channel and priority; only those two are Bulk priority.
     for k in MessageKind::ALL {
-        let bulk_priority = k == MessageKind::FileChunk;
+        let bulk_priority = matches!(k, MessageKind::FileChunk | MessageKind::TorrentMeta);
         assert_eq!(k.carries_bulk_bytes(), bulk_priority);
     }
 }
@@ -207,4 +212,35 @@ fn magnet_vectors() {
         magnet::parse(&format!("magnet:?xt=urn:btih:{}", "a".repeat(9000))),
         Err(MagnetError::TooLong)
     );
+}
+
+/// Torrent metadata chunks are bounded: chunk size, the protocol ceiling, offset + length
+/// within the announced total. (sync-core binds them to the room's announced infohash.)
+#[test]
+fn torrent_metadata_chunks_are_bounded() {
+    let ok = |total: u32, offset: u32, len: usize| Message::TorrentMeta {
+        infohash: Infohash([1; 20]),
+        total,
+        offset,
+        host_port: 6881,
+        data: vec![0; len],
+    };
+    assert!(ok(100_000, 0, limits::CHUNK_BYTES).validate().is_ok());
+    assert!(
+        ok(100_000, 0, limits::CHUNK_BYTES + 1).validate().is_err(),
+        "chunk too big"
+    );
+    assert!(ok(100_000, 0, 0).validate().is_err(), "empty chunk");
+    assert!(ok(100, 90, 20).validate().is_err(), "past the total");
+    assert!(
+        ok((limits::MAX_TORRENT_META_BYTES + 1) as u32, 0, 10)
+            .validate()
+            .is_err(),
+        "over the protocol ceiling"
+    );
+    const { assert!(limits::DEFAULT_TORRENT_META_CAP <= limits::MAX_TORRENT_META_BYTES) };
+    assert_eq!(limits::DEFAULT_TORRENT_META_CAP, 5 * 1024 * 1024);
+    // Round trip through the wire format.
+    let m = ok(40_000, 16_384, 1000);
+    assert_eq!(decode(&encode(&m).unwrap()).unwrap(), m);
 }

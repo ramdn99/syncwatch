@@ -29,6 +29,8 @@ pub struct TorrentSettings {
     pub dht: bool,
     /// The user acknowledged the "you are responsible for what you stream" notice.
     pub notice_accepted: bool,
+    /// Largest torrent metadata accepted (a .torrent file or the host's offer), MB.
+    pub meta_cap_mb: u32,
 }
 
 impl Default for TorrentSettings {
@@ -41,6 +43,7 @@ impl Default for TorrentSettings {
             bind: String::new(),
             dht: true,
             notice_accepted: false,
+            meta_cap_mb: 5,
         }
     }
 }
@@ -48,6 +51,8 @@ impl Default for TorrentSettings {
 pub struct TorrentService {
     pub engine: EngineHandle,
     room_tx: Mutex<Option<mpsc::UnboundedSender<EngineEvent>>>,
+    /// Recent torrent metadata the host has (infohash, sanitized .torrent bytes).
+    metas: Mutex<Vec<(syncwatch_protocol::Infohash, Vec<u8>)>>,
     settings: Mutex<TorrentSettings>,
     path: PathBuf,
     default_cache: PathBuf,
@@ -69,6 +74,11 @@ fn free_space(_p: &Path) -> Option<u64> {
     None
 }
 
+fn meta_cap(s: &TorrentSettings) -> usize {
+    (s.meta_cap_mb.clamp(1, 16) as usize * 1024 * 1024)
+        .min(syncwatch_protocol::limits::MAX_TORRENT_META_BYTES)
+}
+
 fn config_for(default_cache: &Path, s: &TorrentSettings) -> EngineConfig {
     let dir = s
         .cache_dir
@@ -84,6 +94,7 @@ fn config_for(default_cache: &Path, s: &TorrentSettings) -> EngineConfig {
     c.dht = s.dht;
     c.metadata_timeout = Duration::from_secs(90);
     c.free_space = Some(Arc::new(free_space));
+    c.meta_cap = meta_cap(s);
     c
 }
 
@@ -110,6 +121,7 @@ impl TorrentService {
         let me = Arc::new(Self {
             engine,
             room_tx: Mutex::new(None),
+            metas: Mutex::new(Vec::new()),
             settings: Mutex::new(settings),
             path,
             default_cache,
@@ -157,6 +169,29 @@ impl TorrentService {
         rx
     }
 
+    /// Metadata the host already has (a magnet's file list fetched in the Change source
+    /// dialog, or a .torrent file): the room starts from it without asking the swarm again.
+    pub fn cache_meta(&self, ih: syncwatch_protocol::Infohash, bytes: Vec<u8>) {
+        if let Ok(mut g) = self.metas.lock() {
+            g.retain(|(h, _)| *h != ih);
+            g.push((ih, bytes));
+            if g.len() > 8 {
+                g.remove(0);
+            }
+        }
+    }
+
+    pub fn cached_meta(&self, ih: &syncwatch_protocol::Infohash) -> Option<Vec<u8>> {
+        self.metas
+            .lock()
+            .ok()
+            .and_then(|g| g.iter().find(|(h, _)| h == ih).map(|(_, b)| b.clone()))
+    }
+
+    pub fn meta_cap(&self) -> usize {
+        meta_cap(&self.settings())
+    }
+
     pub fn detach_room(&self) {
         if let Ok(mut g) = self.room_tx.lock() {
             *g = None;
@@ -188,8 +223,10 @@ pub fn engine_error_text(e: &syncwatch_torrent::EngineError) -> &'static str {
     match e {
         E::BadMagnet => "This is not a valid magnet link.",
         E::MetadataTimeout => {
-            "No peer sent the torrent's file list in time. The torrent may have no seeds right now."
+            "No peer sent the torrent's file list in time. Likely causes: nobody is sharing this torrent right now, a firewall blocks the connections, or DHT is off (Settings > Torrents). Try again later, turn DHT on, or use the .torrent file instead of the magnet link."
         }
+        E::MetaMismatch => "The torrent metadata does not belong to this torrent and was refused.",
+        E::MetaTooLarge => "The torrent metadata is larger than the limit in Settings > Torrents.",
         E::Metadata => "The torrent's file list could not be fetched.",
         E::UnsafePath => "This torrent contains an unsafe file name or path and was refused.",
         E::NoSuchFile => "The selected file does not exist in this torrent.",
@@ -212,6 +249,7 @@ pub async fn torrent_metadata(app: AppHandle, magnet: String) -> Result<TorrentI
         .metadata(&magnet)
         .await
         .map_err(|e| engine_error_text(&e).to_owned())?;
+    svc.cache_meta(info.infohash, info.torrent.clone());
     let mut files: Vec<TorrentFileDto> = info
         .files
         .into_iter()
@@ -271,6 +309,8 @@ mod tests {
             E::DiskFull,
             E::CacheFull,
             E::Engine,
+            E::MetaMismatch,
+            E::MetaTooLarge,
         ] {
             let t = engine_error_text(&e);
             assert!(t.ends_with('.') && t.len() > 20, "{e:?}");

@@ -33,8 +33,14 @@ param(
     [string]$Qbt = 'D:\Program Files\qBittorrent\qbittorrent.exe',
     [switch]$KeepQbt,
     # Only start the seeder (qBittorrent keeps running) and probe the tracker.
-    [switch]$SeedOnly
+    [switch]$SeedOnly,
+    # Keep libtorrent's default of ONE connection per IP (like a real public swarm seen from one PC).
+    [switch]$SameIpDefault
 )
+# -SameIpDefault: qBittorrent keeps libtorrent's ONE connection per IP and sits on 127.0.0.2, so the
+# first window (127.0.0.1) gets in and a second one from the same address is refused, as behind one
+# home NAT in a real public swarm.
+$qbtIp = if ($SameIpDefault) { '127.0.0.2' } else { '127.0.0.1' }
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent)
 if (-not $env:CARGO_HOME) { $env:RUSTUP_HOME = 'D:\Rust\rustup'; $env:CARGO_HOME = 'D:\Rust\cargo'; $env:PATH = "D:\Rust\cargo\bin;$env:PATH" }
@@ -82,7 +88,7 @@ Session\DHTEnabled=false
 Session\PeXEnabled=false
 Session\LSDEnabled=false
 Session\Port=$qbtPort
-Session\InterfaceAddress=127.0.0.1
+Session\InterfaceAddress=$qbtIp
 Session\QueueingSystemEnabled=false
 
 [Network]
@@ -107,10 +113,10 @@ $prefs = @{
     enable_embedded_tracker = $true; embedded_tracker_port = $TrackerPort
     dht = $false; pex = $false; lsd = $false; upnp = $false
     up_limit = $UpKiB * 1024; limit_lan_peers = $true
-    current_interface_address = '127.0.0.1'; listen_port = $qbtPort
+    current_interface_address = $qbtIp; listen_port = $qbtPort
     max_ratio_enabled = $false; queueing_enabled = $false
     # Everything is on 127.0.0.1: libtorrent must accept more than one connection per IP.
-    enable_multi_connections_from_same_ip = $true
+    enable_multi_connections_from_same_ip = (-not $SameIpDefault)
 } | ConvertTo-Json -Compress
 Invoke-RestMethod "$api/app/setPreferences" -Method Post -Body @{ json = $prefs } | Out-Null
 Invoke-RestMethod "$api/torrents/add" -Method Post -Form @{ torrents = Get-Item $torrentFile; savepath = $lab } | Out-Null
@@ -121,7 +127,7 @@ foreach ($i in 1..120) {
     Start-Sleep -Milliseconds 500
 }
 if (-not $seeding) { Write-Host 'FAIL qBittorrent is not seeding the test torrent' -ForegroundColor Red; Invoke-RestMethod "$api/app/shutdown" -Method Post | Out-Null; exit 1 }
-Write-Host "qBittorrent seeds on 127.0.0.1:$qbtPort, upload limited to $UpKiB KiB/s, embedded tracker :$TrackerPort"
+Write-Host "qBittorrent seeds on ${qbtIp}:$qbtPort, upload limited to $UpKiB KiB/s, embedded tracker :$TrackerPort"
 # qBittorrent must have announced itself to its own tracker BEFORE our windows ask (otherwise
 # their first announce gets an empty list and the next one is 30 minutes away).
 $announced = $false
@@ -156,7 +162,7 @@ $mon = Start-ThreadJob -ArgumentList $api, $ih, $qp.Id, $csv -ScriptBlock {
             $n = if ($peers) { @($peers.PSObject.Properties).Count } else { 0 }
             $sw = @(Get-Process syncwatch -ErrorAction SilentlyContinue | ForEach-Object Id)
             $ourPorts = if ($sw) { @(Get-NetTCPConnection -OwningProcess $sw -ErrorAction SilentlyContinue | ForEach-Object LocalPort) } else { @() }
-            $qc = @(Get-NetTCPConnection -OwningProcess $qpid -State Established -ErrorAction SilentlyContinue | Where-Object { $_.RemoteAddress -eq '127.0.0.1' -and $ourPorts -contains $_.RemotePort })
+            $qc = @(Get-NetTCPConnection -OwningProcess $qpid -State Established -ErrorAction SilentlyContinue | Where-Object { $_.RemoteAddress -like '127.*' -and $ourPorts -contains $_.RemotePort })
             $conns = $qc.Count
             $peerConns = @($qc | Where-Object { $_.LocalPort -ne 9000 }).Count
             $trackerConns = @($qc | Where-Object { $_.LocalPort -eq 9000 }).Count

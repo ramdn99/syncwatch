@@ -84,7 +84,11 @@ impl HostMachine {
         Self {
             cfg,
             me,
-            local: Local::new(me, now),
+            local: {
+                let mut l = Local::new(me, now);
+                l.is_host = true;
+                l
+            },
             descriptor: None,
             tracks: TrackState::default(),
             members: BTreeMap::new(),
@@ -106,7 +110,9 @@ impl HostMachine {
     }
 
     /// Becomes host from a handover (the former host's state) keeping our local participant.
-    pub fn from_handover(h: HostHandover, local: Local, mut cfg: HostConfig, now: i64) -> Self {
+    pub fn from_handover(h: HostHandover, mut local: Local, mut cfg: HostConfig, now: i64) -> Self {
+        // The new host keeps the torrent metadata it already holds and serves it from now on.
+        local.is_host = true;
         cfg.identity = h.new_host_identity;
         let me = h.new_host;
         let mut members = BTreeMap::new();
@@ -301,6 +307,21 @@ impl HostMachine {
             Event::LocalFile(e) => self.local.on_local_file(e, &mut out),
             Event::Torrent(e) => self.local.on_torrent(e, &mut out),
             Event::ExternalCached(_) => {}
+            Event::TorrentMeta {
+                infohash,
+                torrent,
+                host_port,
+            } => {
+                let fresh = !self.local.has_meta(&infohash);
+                if self.local.set_meta(TorrentMetaStore {
+                    infohash,
+                    torrent,
+                    host_port,
+                }) && fresh
+                {
+                    self.send_meta(None, &mut out);
+                }
+            }
         }
         self.broadcast_members_if_changed(&mut out);
         self.update_successor(&mut out);
@@ -359,6 +380,34 @@ impl HostMachine {
             Message::Command(Command::Succession(Box::new(st.clone()))),
         ));
         self.successor_sent = Some((to, st));
+    }
+
+    /// Offers the room torrent's metadata (chunked) to one member, or to everyone.
+    fn send_meta(&self, to: Option<MemberId>, out: &mut Out) {
+        let Some(m) = &self.local.torrent_meta else {
+            return;
+        };
+        if self.local.room_infohash() != Some(m.infohash) {
+            return;
+        }
+        let total = m.torrent.len() as u32;
+        for (i, chunk) in m
+            .torrent
+            .chunks(syncwatch_protocol::limits::CHUNK_BYTES)
+            .enumerate()
+        {
+            let msg = Message::TorrentMeta {
+                infohash: m.infohash,
+                total,
+                offset: (i * syncwatch_protocol::limits::CHUNK_BYTES) as u32,
+                host_port: m.host_port,
+                data: chunk.to_vec(),
+            };
+            out.push(match to {
+                Some(id) => Effect::SendTo(id, msg),
+                None => Effect::Broadcast(msg),
+            });
+        }
     }
 
     // ------------------------------------------------------------------ helpers -----------
@@ -640,6 +689,8 @@ impl HostMachine {
             chat_state: self.chat_state_for(id),
         };
         out.push(Effect::SendTo(id, Message::Welcome(Box::new(snapshot))));
+        // Late joiners and reconnects get the torrent metadata with the media state.
+        self.send_meta(Some(id), out);
         let _ = now;
     }
 
@@ -733,10 +784,23 @@ impl HostMachine {
                 from: m,
                 what: "file chunk from a member",
             }),
-            Message::FileWithheld { .. } => out.push(Effect::ProtocolViolation {
-                from: m,
-                what: "host-only file message from a member",
-            }),
+            Message::FileWithheld { .. } | Message::TorrentMeta { .. } => {
+                out.push(Effect::ProtocolViolation {
+                    from: m,
+                    what: "host-only file message from a member",
+                })
+            }
+            Message::TorrentMetaRequest { infohash } => {
+                if self.local.room_infohash() == Some(infohash) {
+                    self.send_meta(Some(m), out);
+                } else {
+                    // Only the room's announced torrent; nothing else is ever sent.
+                    out.push(Effect::ProtocolViolation {
+                        from: m,
+                        what: "torrent metadata request for another torrent",
+                    });
+                }
+            }
             Message::Hello { .. }
             | Message::Welcome(_)
             | Message::Reject { .. }
@@ -910,6 +974,8 @@ impl HostMachine {
         );
         self.local
             .on_media_change(descriptor, playback, tracks, Some(who), Some(now), now, out);
+        // Already known (e.g. switching back to a torrent): offer it with the change.
+        self.send_meta(None, out);
     }
 
     fn submit_chat(

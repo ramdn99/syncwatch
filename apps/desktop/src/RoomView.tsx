@@ -584,6 +584,7 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
         <ConfirmMagnetDialog
           name={rs.confirmMagnet.name}
           size={rs.confirmMagnet.size}
+          torrentName={rs.confirmMagnet.torrentName}
           onAccept={() => act({ type: 'acceptMagnet' })}
           onDecline={() => act({ type: 'declineMagnet' })}
         />

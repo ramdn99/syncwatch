@@ -679,10 +679,10 @@ fn torrent_progress_reaches_the_host_in_whole_percent_steps() {
     assert_eq!(
         status_of(&w),
         Some(TorrentProgress {
-            phase: TorrentPhase::Metadata,
+            phase: TorrentPhase::WaitingForHost,
             permille: 0
         }),
-        "accepting the magnet starts in the metadata phase"
+        "a member that accepted waits for the host's file list"
     );
     let sent_before = w.nodes[ids[0]]
         .sent
@@ -723,4 +723,217 @@ fn torrent_progress_reaches_the_host_in_whole_percent_steps() {
     );
     w.run_for(1_000_000);
     assert_eq!(status_of(&w).map(|t| t.phase), Some(TorrentPhase::Complete));
+}
+
+// ------------------------------------------------------- host-provided torrent metadata ------
+
+fn meta_bytes() -> Vec<u8> {
+    // 40 KB: three chunks on the wire.
+    (0..40_000u32).map(|i| (i * 13 % 251) as u8).collect()
+}
+
+fn torrent_room(seed: u64, n: usize) -> (World, Vec<usize>) {
+    let (mut w, ids) = room(n, seed);
+    w.ui(
+        HOST,
+        UiAction::ChangeMedia {
+            descriptor: torrent(M1, "one.mkv"),
+            own_file: false,
+        },
+    );
+    w.run_for(1_000_000);
+    (w, ids)
+}
+
+/// The bug fix: a member never fetches the file list from the swarm. Accepting before the
+/// host has it shows "waiting for the host" (and asks); the host's offer arrives in chunks
+/// and completes on every member, byte-exact.
+#[test]
+fn members_use_the_hosts_metadata_and_never_need_the_swarm() {
+    let (mut w, ids) = torrent_room(70, 2);
+    let host_id = w.nodes[HOST].id;
+    for i in &ids {
+        let st = w.nodes[*i].peer.local().status(None, None);
+        assert_eq!(
+            st.torrent.map(|t| t.phase),
+            Some(TorrentPhase::WaitingForHost),
+            "member {i} waits for the host, never the swarm"
+        );
+        assert!(
+            w.nodes[*i]
+                .sent
+                .iter()
+                .any(|(_, m)| *m == Message::TorrentMetaRequest { infohash: ih(M1) }),
+            "member {i} asked the host"
+        );
+    }
+    // The host now has the metadata (its engine added the torrent).
+    w.deliver_event(
+        HOST,
+        Event::TorrentMeta {
+            infohash: ih(M1),
+            torrent: meta_bytes(),
+            host_port: 6881,
+        },
+    );
+    w.run_for(1_000_000);
+    let chunks = w.nodes[HOST]
+        .sent
+        .iter()
+        .filter(|(_, m)| matches!(m, Message::TorrentMeta { .. }))
+        .count();
+    assert!(chunks >= 3, "chunked: {chunks}");
+    for i in &ids {
+        assert_eq!(
+            w.nodes[*i].meta_received,
+            vec![(ih(M1), meta_bytes())],
+            "member {i} got the host's metadata exactly once"
+        );
+        assert!(
+            w.nodes[*i].violations.is_empty(),
+            "{:?}",
+            w.nodes[*i].violations
+        );
+    }
+    let _ = host_id;
+}
+
+/// A member that already has the metadata ignores a repeated offer.
+#[test]
+fn a_member_that_has_the_metadata_ignores_the_offer() {
+    let (mut w, ids) = torrent_room(71, 1);
+    w.deliver_event(
+        HOST,
+        Event::TorrentMeta {
+            infohash: ih(M1),
+            torrent: meta_bytes(),
+            host_port: 1,
+        },
+    );
+    w.run_for(1_000_000);
+    // The member asks again (e.g. after a reconnect): the host resends, the member ignores it.
+    let from = Sender {
+        member: w.nodes[ids[0]].id,
+        identity: w.nodes[ids[0]].identity,
+    };
+    w.deliver_event(
+        HOST,
+        Event::Net {
+            from,
+            msg: Message::TorrentMetaRequest { infohash: ih(M1) },
+        },
+    );
+    w.run_for(1_000_000);
+    assert_eq!(
+        w.nodes[ids[0]].meta_received.len(),
+        1,
+        "ignored the second offer"
+    );
+}
+
+/// Metadata exists only for the room's announced infohash: the host refuses requests for
+/// anything else, a member refuses offers for anything else, and members cannot push it.
+#[test]
+fn torrent_metadata_only_for_the_announced_infohash() {
+    let (mut w, ids) = torrent_room(72, 1);
+    let member = Sender {
+        member: w.nodes[ids[0]].id,
+        identity: w.nodes[ids[0]].identity,
+    };
+    let host = Sender {
+        member: w.nodes[HOST].id,
+        identity: w.nodes[HOST].identity,
+    };
+    w.deliver_event(
+        HOST,
+        Event::Net {
+            from: member,
+            msg: Message::TorrentMetaRequest { infohash: ih(M2) },
+        },
+    );
+    assert!(
+        w.nodes[HOST]
+            .violations
+            .contains(&"torrent metadata request for another torrent")
+    );
+    w.deliver_event(
+        ids[0],
+        Event::Net {
+            from: host,
+            msg: Message::TorrentMeta {
+                infohash: ih(M2),
+                total: 10,
+                offset: 0,
+                host_port: 1,
+                data: vec![1; 10],
+            },
+        },
+    );
+    assert!(
+        w.nodes[ids[0]]
+            .violations
+            .contains(&"torrent metadata for a torrent the room does not play")
+    );
+    assert!(w.nodes[ids[0]].meta_received.is_empty());
+    w.deliver_event(
+        HOST,
+        Event::Net {
+            from: member,
+            msg: Message::TorrentMeta {
+                infohash: ih(M1),
+                total: 10,
+                offset: 0,
+                host_port: 1,
+                data: vec![1; 10],
+            },
+        },
+    );
+    assert!(
+        w.nodes[HOST]
+            .violations
+            .contains(&"host-only file message from a member")
+    );
+    // The host offers metadata only for its current torrent: after switching to local media
+    // nothing is sent anymore.
+    w.deliver_event(
+        HOST,
+        Event::TorrentMeta {
+            infohash: ih(M2),
+            torrent: meta_bytes(),
+            host_port: 1,
+        },
+    );
+    w.run_for(500_000);
+    assert!(
+        !w.nodes[HOST].sent.iter().any(
+            |(_, m)| matches!(m, Message::TorrentMeta { infohash, .. } if *infohash == ih(M2))
+        )
+    );
+}
+
+/// A late joiner (and a reconnect) receives the metadata with the media state; after a host
+/// transfer the new host keeps serving it.
+#[test]
+fn late_joiners_and_a_new_host_get_and_serve_the_metadata() {
+    let (mut w, ids) = torrent_room(73, 1);
+    w.deliver_event(
+        HOST,
+        Event::TorrentMeta {
+            infohash: ih(M1),
+            torrent: meta_bytes(),
+            host_port: 7,
+        },
+    );
+    w.run_for(1_000_000);
+    let late = w.add_member(NodeConfig::named("Late"));
+    w.run_for(2_000_000);
+    assert_eq!(w.nodes[late].meta_received, vec![(ih(M1), meta_bytes())]);
+    // Host transfer to the first member; another late joiner gets it from the NEW host.
+    w.ui(HOST, UiAction::MakeHost(w.nodes[ids[0]].id));
+    w.run_for(3_000_000);
+    assert!(w.nodes[ids[0]].peer.is_host());
+    let later = w.add_member(NodeConfig::named("Later"));
+    w.run_for(3_000_000);
+    assert_eq!(w.nodes[later].meta_received, vec![(ih(M1), meta_bytes())]);
+    assert!(w.nodes[ids[0]].peer.local().has_meta(&ih(M1)));
 }

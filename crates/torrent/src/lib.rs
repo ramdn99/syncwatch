@@ -11,6 +11,7 @@ pub mod announce;
 pub mod cache;
 pub mod engine;
 pub mod juggle;
+pub mod meta;
 pub mod policy;
 pub mod server;
 pub mod validate;
