@@ -101,6 +101,7 @@ fn heartbeat_never_overtakes_scheduled_play() {
                 msg: Message::Heartbeat {
                     playback: hb,
                     host_now_us: t - 50_000,
+                    duration_ms: None,
                 },
             },
         );
@@ -294,7 +295,8 @@ fn buffering_member_pauses_room_and_resume_is_automatic() {
     w.run_for(5_000_000);
     let now = w.now;
     w.nodes[ids[1]].player.buffering_until = Some(now + 3_000_000);
-    w.run_for(1_000_000);
+    // A real stall pauses the room once it lasted the popup's show delay (700 ms, ADR 0012).
+    w.run_for(1_500_000);
     assert!(
         !w.nodes[HOST].player.is_playing(),
         "room pauses while a member buffers"
@@ -506,6 +508,7 @@ fn heartbeat_before_welcome_is_ignored_quietly() {
     let hb = Message::Heartbeat {
         playback: RoomPlayback::initial(MediaEpoch(1), 0),
         host_now_us: 5,
+        duration_ms: None,
     };
     let fx = m.handle(
         clock(0),
@@ -533,6 +536,7 @@ fn heartbeat_before_welcome_is_ignored_quietly() {
             msg: Message::Heartbeat {
                 playback: RoomPlayback::initial(MediaEpoch(1), 0),
                 host_now_us: 5,
+                duration_ms: None,
             },
         },
     );

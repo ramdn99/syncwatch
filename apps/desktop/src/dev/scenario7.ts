@@ -109,10 +109,10 @@ export async function torrentHost(report: Report, magnet: string, fileName: stri
     const end = Date.now() + 180_000;
     for (;;) {
       const [s, r] = [await snap(), await current()];
-      if (!held && (r.gate.active || r.torrent?.buffering)) {
+      if (!held && (r.gate.active || r.stall.stalled)) {
         held = true;
         report(`TS hold_seen ${Date.now()}`);
-        report(`INFO hold: gate ${r.gate.active} (${r.gate.waiting.map((w) => `${w.name}: ${w.reason}`).join(', ')}), own buffering ${r.torrent?.buffering ? 'yes' : 'no'}`);
+        report(`INFO hold: gate ${r.gate.active} (${r.gate.waiting.map((w) => `${w.name}: ${w.reason}`).join(', ')}), own buffering ${r.stall.stalled ? 'yes' : 'no'}`);
       }
       if (playing(s) && Math.abs(posMs(s) - SEEK_FAR_MS) < 20_000 && (held || there)) break;
       if (Date.now() > end) throw new Error('did not resume after the far seek');
@@ -169,7 +169,7 @@ export async function torrentMember(report: Report, fileName: string) {
     const end = Date.now() + 200_000;
     for (;;) {
       const [s, r] = [await snap(), await current()];
-      if (r.torrent?.buffering) buf = true;
+      if (r.stall.stalled) buf = true;
       if (playing(s) && Math.abs(posMs(s) - SEEK_FAR_MS) < 20_000) break;
       if (Date.now() > end) throw new Error('member did not resume');
       await sleep(100);

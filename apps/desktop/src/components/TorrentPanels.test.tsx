@@ -1,6 +1,6 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fmtEta, torrentStatusText, type RoomMember, type TorrentState } from '../lib/room';
+import { fmtEta, gateBannerText, torrentStatusText, type GateWait, type RoomMember, type TorrentState } from '../lib/room';
 import { BufferingOverlay, ConfirmMagnetDialog, TorrentBlock } from './TorrentPanels';
 import { rangeSpans } from './VideoArea';
 
@@ -15,7 +15,7 @@ const own = (over: Partial<TorrentState> = {}): TorrentState => ({
   peers: 7,
   etaSecs: 232,
   ranges: [[0, 420_000_000]],
-  buffering: null,
+  window: null,
   exclusive: false,
   completeMessage: null,
   error: null,
@@ -39,6 +39,7 @@ const member = (id: number, name: string, torrent: RoomMember['torrent'], extra:
   permissions: { canPlayPause: true, canSeek: true, canChangeMedia: false, canChangeSpeed: false },
   words: null,
   torrent,
+  wait: null,
   ...extra,
 });
 
@@ -50,6 +51,11 @@ describe('torrent status texts', () => {
     expect(torrentStatusText({ phase: 'streaming', permille: 990 })).toBe('downloading 99%');
     expect(torrentStatusText({ phase: 'noPeers', permille: 100 })).toBe('waiting for peers 10%');
     expect(torrentStatusText({ phase: 'streaming', permille: 500 }, true)).toBe('buffering');
+    // Overall progress never reads as buffering: only the member's real need at the room position.
+    expect(torrentStatusText({ phase: 'streaming', permille: 400 }, false)).toBe('downloading 40%');
+    expect(torrentStatusText({ phase: 'streaming', permille: 400 }, true, { atMs: 750_000, missing: 3e6, permille: 600 })).toBe(
+      'buffering at 12:30, 60% of the window',
+    );
     expect(torrentStatusText({ phase: 'complete', permille: 1000 }, true)).toBe('complete');
     expect(fmtEta(232)).toBe('3 min');
   });
@@ -64,7 +70,7 @@ describe('TorrentBlock', () => {
         members={[
           member(0, 'Hana', { phase: 'streaming', permille: 420 }),
           member(1, 'Ben', { phase: 'downloading', permille: 130 }),
-          member(2, 'Cy', { phase: 'streaming', permille: 300 }, { buffering: true }),
+          member(2, 'Cy', { phase: 'streaming', permille: 300 }, { buffering: true, wait: { atMs: 750_000, missing: 3e6, permille: 600 } }),
           member(3, 'Di', { phase: 'complete', permille: 1000 }),
           member(4, 'Ed', { phase: 'noPeers', permille: 50 }),
           member(5, 'Flo', null, { media: 'declined' }),
@@ -77,7 +83,7 @@ describe('TorrentBlock', () => {
     expect(screen.getByTestId('torrent-peers').textContent).toBe('7');
     expect(screen.getAllByTestId('torrent-member-status').map((e) => e.textContent)).toEqual([
       'downloading 13%',
-      'buffering',
+      'buffering at 12:30, 60% of the window',
       'complete',
       'waiting for peers 5%',
       'declined',
@@ -116,9 +122,43 @@ describe('seek bar and buffering', () => {
   });
 
   it('shows the buffering target and progress', () => {
-    render(<BufferingOverlay buffering={{ have: 1_000_000, total: 4_000_000 }} />);
+    render(<BufferingOverlay wait={{ atMs: 750_000, missing: 3_000_000, permille: 250 }} />);
     expect(screen.getByTestId('torrent-buffering').textContent).toContain('Buffering 25%');
-    expect(screen.getByTestId('torrent-buffering').textContent).toContain('1.0 MB of 4.0 MB');
+    expect(screen.getByTestId('torrent-buffering').textContent).toContain('At 12:30: needs ~3.0 MB more');
+  });
+
+  it('a stall without a torrent window just says buffering', () => {
+    render(<BufferingOverlay wait={null} />);
+    expect(screen.getByTestId('torrent-buffering').textContent).toBe('Buffering...');
+  });
+
+  it("my own status shows 'buffering' only for my real stall, never for overall progress", () => {
+    const { rerender } = render(<TorrentBlock torrent={own()} isHost={false} members={[]} stall={{ stalled: false, wait: null }} />);
+    expect(screen.getByTestId('torrent-phase').textContent).toBe('downloading 42%');
+    rerender(<TorrentBlock torrent={own()} isHost={false} members={[]} stall={{ stalled: true, wait: { atMs: 60_000, missing: 1e6, permille: 500 } }} />);
+    expect(screen.getByTestId('torrent-phase').textContent).toBe('buffering at 01:00, 50% of the window');
+  });
+});
+
+describe('ready-gate banner (ADR 0012)', () => {
+  const bo: GateWait = { member: 2, name: 'Bo', reason: 'buffering', wait: { atMs: 750_000, missing: 3_000_000, permille: 600 } };
+  const cy: GateWait = { member: 3, name: 'Cy', reason: 'loading', wait: null };
+  const gate = (waiting: GateWait[], active = true) => ({ active, waiting });
+
+  it('the host sees the reason and the data', () => {
+    expect(gateBannerText(gate([bo, cy]), 0, true)).toBe('Waiting for Bo: buffering at 12:30 (needs ~3.0 MB more), Cy (loading)...');
+    expect(gateBannerText(gate([]), 0, true)).toBe('Waiting for everyone...');
+    expect(gateBannerText(gate([bo], false), 0, true)).toBeNull();
+  });
+
+  it("another member's buffering is a small 'catch up' message, never the popup text", () => {
+    expect(gateBannerText(gate([bo]), 1, false)).toBe('Waiting for Bo to catch up...');
+    expect(gateBannerText(gate([bo, cy]), 1, false)).toBe('Waiting for Bo to catch up, Cy (loading)...');
+  });
+
+  it('my own buffering is my popup, not the banner', () => {
+    expect(gateBannerText(gate([bo]), 2, false)).toBeNull();
+    expect(gateBannerText(gate([bo, cy]), 2, false)).toBe('Waiting for Cy (loading)...');
   });
 });
 

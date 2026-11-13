@@ -48,7 +48,7 @@ impl Gate {
         match s.media {
             MediaStatus::Ready | MediaStatus::Mismatch => {
                 if s.buffering {
-                    Some(NotReadyReason::Buffering)
+                    Some(NotReadyReason::Buffering(s.wait))
                 } else if s.ready_epoch < room.epoch {
                     Some(NotReadyReason::Loading)
                 } else {
@@ -59,9 +59,12 @@ impl Gate {
                 .wait_for_everyone
                 .then_some(NotReadyReason::MissingFile),
             MediaStatus::Verifying => self.wait_for_everyone.then_some(NotReadyReason::Verifying),
-            MediaStatus::Downloading { .. } => self
-                .wait_for_everyone
-                .then_some(NotReadyReason::Downloading),
+            // Not streaming yet. Only "wait for everyone" waits for it, and then the reason is
+            // the missing window at the room position when known, never the overall progress.
+            MediaStatus::Downloading { .. } => self.wait_for_everyone.then_some(match s.wait {
+                Some(w) => NotReadyReason::Buffering(Some(w)),
+                None => NotReadyReason::Downloading,
+            }),
             MediaStatus::NoMedia | MediaStatus::Declined | MediaStatus::Unavailable => None,
         }
     }
@@ -86,6 +89,7 @@ mod tests {
             tracks: TrackSyncStatus::InSync,
             rtt_ms: None,
             torrent: None,
+            wait: None,
         }
     }
 
@@ -114,7 +118,7 @@ mod tests {
         );
         assert_eq!(
             g.blocks(Some(&st(MediaStatus::Ready, 5, true)), &room),
-            Some(NotReadyReason::Buffering)
+            Some(NotReadyReason::Buffering(None))
         );
         assert_eq!(
             g.blocks(Some(&st(MediaStatus::Mismatch, 5, false)), &room),

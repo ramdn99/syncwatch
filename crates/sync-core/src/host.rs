@@ -456,6 +456,7 @@ impl HostMachine {
             chat_muted: false,
             connected: true,
             torrent: host_status.torrent,
+            wait: host_status.wait,
         }];
         v.extend(
             self.members
@@ -475,6 +476,7 @@ impl HostMachine {
                     chat_muted: self.chat.is_muted(&e.identity),
                     connected: e.connected,
                     torrent: e.status.and_then(|s| s.torrent),
+                    wait: e.status.and_then(|s| s.wait),
                 }),
         );
         v
@@ -523,7 +525,13 @@ impl HostMachine {
         v
     }
 
-    fn publish_gate(&self, active: bool, waiting: Vec<(MemberId, NotReadyReason)>, out: &mut Out) {
+    fn publish_gate(
+        &mut self,
+        active: bool,
+        waiting: Vec<(MemberId, NotReadyReason)>,
+        out: &mut Out,
+    ) {
+        self.local.gate_active = active;
         let g = GateInfo { active, waiting };
         out.ui(UiEvent::Gate(g.clone()));
         self.broadcast_cmd(Command::ReadyGate(g), out);
@@ -583,7 +591,7 @@ impl HostMachine {
         let buffering = self
             .blockers()
             .iter()
-            .any(|(m, why)| *why == NotReadyReason::Buffering && !excused.contains(m));
+            .any(|(m, why)| matches!(why, NotReadyReason::Buffering(_)) && !excused.contains(m));
         if buffering {
             let p = RoomPlayback {
                 position_ms: r.position_at(now),
@@ -619,7 +627,10 @@ impl HostMachine {
             out.push(Effect::Broadcast(Message::Heartbeat {
                 playback: self.local.room,
                 host_now_us: now,
+                duration_ms: self.local.media_duration_hint(),
             }));
+            // The host's own torrent engine follows the room position too.
+            self.local.on_heartbeat_info(None, Some(now), out);
         }
     }
 

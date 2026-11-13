@@ -138,3 +138,11 @@ state becomes "waiting for peers" with a periodic retry (a new peer stream: reco
 - **Lab detail:** everything runs on 127.0.0.1, so qBittorrent must allow several connections
   from one IP (`enable_multi_connections_from_same_ip`). Otherwise libtorrent drops our
   handshake. This applies to the lab only.
+
+## Update (ADR 0012)
+
+A `Room` cursor now comes before everything else. It points at the first missing byte of the ROOM's
+read window, also before this player opened the file or while it waits at the gate. "Playable" is
+judged at the room position. Readiness for the ready gate is coverage of that window plus head and
+tail, never overall progress. The lead, tail and fill order above is unchanged once the room window
+is on disk.

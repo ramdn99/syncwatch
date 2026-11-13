@@ -1,11 +1,12 @@
-import type { RoomMember, TorrentState } from '../lib/room';
+import type { BufferWait, RoomMember, TorrentState } from '../lib/room';
 import { fmtBytes, fmtEta, fmtRate, torrentLookText, torrentStatusText, TORRENT_NOTICE } from '../lib/room';
+import { formatTime } from '../lib/time';
 
 /**
  * Torrent progress block (spec section 10, Host controls): this window's own download (speeds,
  * peers, ETA, progress) and, for the host, every member's status.
  */
-export function TorrentBlock({ torrent, members, isHost }: { torrent: TorrentState | null; members: RoomMember[]; isHost: boolean }) {
+export function TorrentBlock({ torrent, members, isHost, stall = null }: { torrent: TorrentState | null; members: RoomMember[]; isHost: boolean; stall?: { stalled: boolean; wait: BufferWait | null } | null }) {
   const any = torrent || members.some((m) => m.torrent);
   if (!any) return null;
   const pct = torrent && torrent.size > 0 ? Math.floor((100 * torrent.haveBytes) / torrent.size) : 0;
@@ -15,7 +16,7 @@ export function TorrentBlock({ torrent, members, isHost }: { torrent: TorrentSta
       {torrent && (
         <div className="space-y-1 rounded bg-elevated px-2 py-1.5" data-testid="torrent-own">
           <div className="flex items-center justify-between">
-            <span data-testid="torrent-phase">{torrentStatusText({ phase: torrent.phase, permille: pct * 10 }, torrent.buffering != null)}</span>
+            <span data-testid="torrent-phase">{torrentStatusText({ phase: torrent.phase, permille: pct * 10 }, stall?.stalled ?? false, stall?.wait ?? null)}</span>
             <span className="tabular text-muted">
               {fmtBytes(torrent.haveBytes)} / {fmtBytes(torrent.size)}
             </span>
@@ -61,7 +62,7 @@ export function TorrentBlock({ torrent, members, isHost }: { torrent: TorrentSta
               <li key={m.id} className="flex justify-between gap-2">
                 <span className="min-w-0 truncate">{m.name}</span>
                 <span className="shrink-0 text-muted" data-testid="torrent-member-status">
-                  {m.media === 'declined' ? 'declined' : (torrentStatusText(m.torrent, m.buffering) ?? 'not started')}
+                  {m.media === 'declined' ? 'declined' : (torrentStatusText(m.torrent, m.buffering, m.wait) ?? 'not started')}
                 </span>
               </li>
             ))}
@@ -106,15 +107,20 @@ export function ConfirmMagnetDialog(props: { name: string; size: number; torrent
   );
 }
 
-/** Seeking into a part that is not downloaded yet: the room waits (ready gate). */
-export function BufferingOverlay({ buffering }: { buffering: { have: number; total: number } }) {
-  const pct = buffering.total > 0 ? Math.floor((100 * buffering.have) / buffering.total) : 0;
+/**
+ * THIS window's own player is stalled on missing data (ADR 0012): shown only for a real stall
+ * (after a short delay, gone as soon as playback runs), with the room position and how much of
+ * the read window is there when it is a torrent.
+ */
+export function BufferingOverlay({ wait }: { wait: BufferWait | null }) {
   return (
     <div className="absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2 rounded-lg bg-black/75 px-4 py-2 text-center text-sm" role="status" data-testid="torrent-buffering">
-      <p className="font-medium">Buffering {pct}%</p>
-      <p className="text-xs text-muted">
-        {fmtBytes(buffering.have)} of {fmtBytes(buffering.total)} needed to continue
-      </p>
+      <p className="font-medium">{wait ? `Buffering ${Math.floor(wait.permille / 10)}%` : 'Buffering...'}</p>
+      {wait && (
+        <p className="text-xs text-muted">
+          At {formatTime(wait.atMs / 1000)}: needs ~{fmtBytes(wait.missing)} more to continue
+        </p>
+      )}
     </div>
   );
 }

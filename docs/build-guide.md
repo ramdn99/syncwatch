@@ -198,9 +198,17 @@ Lab variants:
 ```
 pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -Scenario torrentfile -UpKiB 1500
 pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -SameIpDefault
+pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -Scenario torrentgate -SameIpDefault
 pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -Manual
 ```
 
+- `-Scenario torrentgate` (ADR 0012) checks the ready gate and the buffering popup in two
+  windows:
+  - (a) playing from a downloaded part while partial;
+  - (b) a seek past the member's download;
+  - (c) a seek back;
+  - (d) a late rejoin at a far, paused position;
+  - (e) no popup after 100%.
 - `-Scenario torrentfile` uses three windows:
   1. the host opens a `.torrent` file;
   2. one member declines, then rejoins late and starts on the host's file;

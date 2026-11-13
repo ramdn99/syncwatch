@@ -580,7 +580,9 @@ impl World {
                             .retain(|u| !(u.to == t && u.external_id == external_id));
                     }
                 }
-                Effect::StartTorrent { .. } | Effect::StopTorrent { .. } => {}
+                Effect::StartTorrent { .. }
+                | Effect::StopTorrent { .. }
+                | Effect::TorrentTarget { .. } => {}
                 Effect::TorrentMetaReceived {
                     infohash, torrent, ..
                 } => self.nodes[idx].meta_received.push((infohash, torrent)),

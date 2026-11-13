@@ -11,7 +11,8 @@ use crate::announce::{STOPPED_TIMEOUT, StoppedAnnounce, send_stopped};
 use crate::cache::Cache;
 use crate::juggle::{Juggler, StreamDriver};
 use crate::meta;
-use crate::policy::{Buffering, ByteMap, FileGeometry, PiecePolicy, PolicyConfig};
+use crate::policy::{ByteMap, FileGeometry, PiecePolicy, PolicyConfig};
+use crate::ready::{Readiness, ReadyConfig, ReadyTracker};
 use crate::server::{Loopback, Reader, StreamOpener};
 use futures_util::future::BoxFuture;
 use librqbit::api::TorrentIdOrHash;
@@ -53,6 +54,8 @@ pub struct EngineConfig {
     pub dht: bool,
     pub metadata_timeout: Duration,
     pub policy: PolicyConfig,
+    /// The read-ahead window that makes a participant ready at the room position (ADR 0012).
+    pub ready: ReadyConfig,
     /// Tests: peers to connect to directly.
     pub initial_peers: Vec<SocketAddr>,
     /// No peers for this long: "waiting for peers".
@@ -77,6 +80,7 @@ impl EngineConfig {
             dht: true,
             metadata_timeout: Duration::from_secs(90),
             policy: PolicyConfig::default(),
+            ready: ReadyConfig::default(),
             initial_peers: Vec::new(),
             no_peers_after: Duration::from_secs(15),
             retry_every: Duration::from_secs(30),
@@ -180,7 +184,10 @@ pub struct TorrentStatus {
     pub peers: u32,
     pub eta_secs: Option<u64>,
     pub ranges: Vec<(u64, u64)>,
-    pub buffering: Option<Buffering>,
+    /// Readiness at the ROOM position (window + container pieces, with hysteresis); `None`
+    /// until the room position and a time -> byte mapping are known. This, not the overall
+    /// progress or the player's read frontier, says whether this participant is buffering.
+    pub window: Option<Readiness>,
     /// Only the playback stream is running (window short / just seeked).
     pub exclusive: bool,
     /// What the engine is using to find peers (status text).
@@ -257,6 +264,10 @@ enum Cmd {
     Duration {
         infohash: Infohash,
         ms: Option<u64>,
+    },
+    Room {
+        infohash: Infohash,
+        target: RoomTarget,
     },
     Config {
         cfg: Box<EngineConfig>,
@@ -361,6 +372,14 @@ impl EngineHandle {
         let _ = self.tx.send(Cmd::Duration { infohash, ms });
     }
 
+    /// The ROOM's authoritative position (ADR 0012). The engine extrapolates it while the room
+    /// plays, fetches its window first (also before the player opened the file or while it
+    /// waits at the gate) and reports readiness there. `retarget`: a room seek, media change,
+    /// pause or resume (the window jumps; fetch it at once, before anything else).
+    pub fn room(&self, infohash: Infohash, target: RoomTarget) {
+        let _ = self.tx.send(Cmd::Room { infohash, target });
+    }
+
     pub fn set_config(&self, cfg: EngineConfig) {
         let _ = self.tx.send(Cmd::Config { cfg: Box::new(cfg) });
     }
@@ -446,10 +465,37 @@ struct Active {
     last_read_seq: u64,
     last_read_end: u64,
     pending_seek_ms: Option<u64>,
+    ready: ReadyTracker,
     playable_sent: bool,
     no_peers_since: Option<Instant>,
     last_retry: Instant,
     failed: bool,
+}
+
+/// The room's playback position as the app knows it (see [`EngineHandle::room`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoomTarget {
+    pub ms: u64,
+    pub playing: bool,
+    /// Speed in permille (1000 = normal).
+    pub speed: u32,
+    pub retarget: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RoomAt {
+    target: RoomTarget,
+    at: Instant,
+}
+
+impl RoomAt {
+    fn ms_now(&self) -> u64 {
+        if !self.target.playing {
+            return self.target.ms;
+        }
+        let el = self.at.elapsed().as_micros() as u64 * self.target.speed as u64 / 1_000_000;
+        self.target.ms.saturating_add(el)
+    }
 }
 
 /// A finished file served without any engine (restart / rejoin never re-adds the torrent).
@@ -468,6 +514,10 @@ struct Actor {
     served: HashMap<Infohash, Served>,
     /// Torrents being prepared (metadata phase, in their own task); a stop aborts them.
     starting: HashMap<Infohash, (TorrentMedia, tokio::task::AbortHandle)>,
+    /// The room position per torrent (kept while the torrent is still starting).
+    rooms: HashMap<Infohash, RoomAt>,
+    /// Media durations learned before the torrent was added.
+    durations: HashMap<Infohash, u64>,
     /// Host metadata queries in flight (they keep the session alive).
     queries: usize,
     prep_tx: mpsc::UnboundedSender<Prepared>,
@@ -556,6 +606,8 @@ impl Actor {
             active: HashMap::new(),
             served: HashMap::new(),
             starting: HashMap::new(),
+            rooms: HashMap::new(),
+            durations: HashMap::new(),
             queries: 0,
             prep_tx,
             prep_rx: Some(prep_rx),
@@ -701,8 +753,31 @@ impl Actor {
                 }
             }
             Cmd::Duration { infohash, ms } => {
+                match ms.filter(|d| *d > 0) {
+                    Some(d) => {
+                        self.durations.insert(infohash, d);
+                    }
+                    None => {
+                        self.durations.remove(&infohash);
+                    }
+                }
                 if let Some(a) = self.active.get_mut(&infohash) {
                     a.bytes.set_duration(ms);
+                }
+            }
+            Cmd::Room { infohash, target } => {
+                let retarget =
+                    target.retarget || self.rooms.get(&infohash).is_none_or(|r| r.target.retarget);
+                self.rooms.insert(
+                    infohash,
+                    RoomAt {
+                        target: RoomTarget { retarget, ..target },
+                        at: Instant::now(),
+                    },
+                );
+                // Re-target now (not at the next tick): the room's part goes first.
+                if retarget && self.active.contains_key(&infohash) {
+                    self.on_tick().await;
                 }
             }
             Cmd::Config { cfg } => {
@@ -894,7 +969,7 @@ impl Actor {
                 peers: 0,
                 eta_secs: None,
                 ranges: Vec::new(),
-                buffering: None,
+                window: None,
                 exclusive: true,
                 trackers,
                 dht: self.cfg.dht,
@@ -999,10 +1074,11 @@ impl Actor {
                 web_seeds: info.web_seeds,
                 policy: PiecePolicy::new(self.cfg.policy, geo),
                 juggler: Juggler::default(),
-                bytes: ByteMap::new(fi.len, None),
+                bytes: ByteMap::new(fi.len, self.durations.get(&ih).copied()),
                 last_read_seq: 0,
                 last_read_end: 0,
                 pending_seek_ms: None,
+                ready: ReadyTracker::default(),
                 loopback,
                 playable_sent: false,
                 no_peers_since: None,
@@ -1079,6 +1155,49 @@ impl Actor {
                     a.policy.on_read(r.pos);
                 }
                 a.last_read_end = r.pos;
+            }
+            // The ROOM position (ADR 0012): its window goes first and decides readiness.
+            let room = self.rooms.get_mut(&ih).map(|r| {
+                let ms = r.ms_now();
+                let retarget = std::mem::replace(&mut r.target.retarget, false);
+                (ms, retarget)
+            });
+            let mut window = None;
+            if let Some((ms, retarget)) = room {
+                let rc = cfg.ready;
+                let len = a.policy.geometry().len;
+                if let Some((s, e)) = crate::ready::window(
+                    &a.bytes,
+                    len,
+                    ms,
+                    rc.window_ms,
+                    rc.back_ms,
+                    rc.min_bytes,
+                    rc.max_bytes,
+                ) {
+                    if retarget {
+                        a.policy.room_seek(s, e, now);
+                        a.ready.reset();
+                    } else {
+                        a.policy.set_room(s, e);
+                    }
+                } else if retarget {
+                    // No mapping yet: keep the re-target for when the duration arrives.
+                    if let Some(r) = self.rooms.get_mut(&ih) {
+                        r.target.retarget = true;
+                    }
+                }
+                let geo = a.policy.geometry();
+                window = crate::ready::evaluate(
+                    &rc,
+                    &mut a.ready,
+                    &a.bytes,
+                    &geo,
+                    &have,
+                    ms,
+                    cfg.policy.head,
+                    cfg.policy.tail,
+                );
             }
             let plan = a.policy.plan(&have, now);
             if let Some(api) = api {
@@ -1166,7 +1285,7 @@ impl Actor {
                     peers,
                     eta_secs: eta,
                     ranges: a.policy.geometry().ranges(&have),
-                    buffering: plan.buffering,
+                    window,
                     exclusive: plan.exclusive,
                     trackers: a.trackers.len() as u32,
                     dht: cfg.dht,
@@ -1187,6 +1306,8 @@ impl Actor {
 
     /// The stop sequence (ADR 0010).
     async fn stop(&mut self, ih: Infohash, reason: StopReason) {
+        self.rooms.remove(&ih);
+        self.durations.remove(&ih);
         if let Some((media, h)) = self.starting.remove(&ih) {
             // Still resolving the magnet: abort it (drops its tracker/DHT lookups) and tell the
             // trackers we are gone.
@@ -1274,7 +1395,12 @@ fn complete_status(size: u64) -> TorrentStatus {
         peers: 0,
         eta_secs: None,
         ranges: vec![(0, size)],
-        buffering: None,
+        window: Some(Readiness {
+            ready: true,
+            at_ms: 0,
+            missing: 0,
+            permille: 1000,
+        }),
         exclusive: false,
         trackers: 0,
         dht: false,

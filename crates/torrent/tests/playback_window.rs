@@ -140,3 +140,94 @@ async fn playback_window_beats_competing_streams_with_a_throttled_seeder() {
     );
     let _ = ttf_c;
 }
+
+/// ADR 0012: a member whose player has not opened the file (late join, waiting at the gate)
+/// fetches the ROOM's current part first, and is ready there long before the file is complete.
+/// Throttled seeder; the room is paused at 80% of the file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_without_a_player_fetches_the_room_position_first() {
+    syncwatch_ice_config::install_crypto_provider();
+    let dir = tmp("roomfirst");
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let len = 64 * MIB;
+    let bytes = data(len as usize, 12);
+    std::fs::write(src.join("r.mkv"), &bytes).unwrap();
+    let peers = Arc::new(Mutex::new(Vec::new()));
+    let (hurl, _http) = http_tracker(peers.clone()).await;
+    let sd = seeder(
+        &src.join("r.mkv"),
+        vec![hurl.clone()],
+        Some(2 * 1024 * 1024),
+    )
+    .await;
+    peers.lock().unwrap().push(sd.addr);
+    let mut cfg = engine_cfg(dir.join("cache"), free_port());
+    cfg.policy.head = 512 * 1024;
+    cfg.policy.tail = 2 * MIB;
+    cfg.policy.prebuffer = MIB;
+    let (eng, mut ev) = EngineHandle::spawn(cfg);
+    // 64 MiB over 640 s (0.1 MiB per second of media); the room waits paused at 512 s.
+    let room_ms = 512_000;
+    let room_byte = len * 8 / 10;
+    eng.duration(sd.infohash, Some(640_000));
+    eng.room(
+        sd.infohash,
+        syncwatch_torrent::RoomTarget {
+            ms: room_ms,
+            playing: false,
+            speed: 1000,
+            retarget: true,
+        },
+    );
+    let mag = magnet(&sd.infohash, "r.mkv", &[hurl]);
+    eng.start(media(sd.infohash, 0, "r.mkv", len, mag));
+    let t0 = Instant::now();
+    let mut seen = Vec::new();
+    let st = match wait_event(&mut ev, &mut seen, 60, |e| {
+        matches!(e, EngineEvent::Status { status, .. } if status.window.is_some_and(|w| w.ready))
+    })
+    .await
+    {
+        Some(EngineEvent::Status { status, .. }) => status,
+        e => panic!("never ready at the room position: {e:?}"),
+    };
+    let mib = |b: u64| b as f64 / MIB as f64;
+    let ranges: Vec<String> = st
+        .ranges
+        .iter()
+        .map(|(a, b)| format!("{:.1}-{:.1}", mib(*a), mib(*b)))
+        .collect();
+    eprintln!(
+        "ROOMFIRST ready at the room position after {:?} with {:.1} of {:.0} MiB; ranges MiB {}",
+        t0.elapsed(),
+        mib(st.have_bytes),
+        mib(len),
+        ranges.join(" ")
+    );
+    // Readiness while not ready reported the missing part (progress for the host's UI).
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, EngineEvent::Status { status, .. }
+        if status.window.is_some_and(|w| !w.ready && w.missing > 0 && w.at_ms == room_ms)))
+    );
+    // The room window (from 1 s before the position) is there ...
+    let win = (room_byte - MIB / 10, room_byte + 2 * MIB);
+    assert!(
+        st.ranges.iter().any(|(a, b)| *a <= win.0 && *b >= win.1),
+        "room window on disk: {ranges:?}"
+    );
+    // ... long before the file: ready at well under half of it.
+    assert!(
+        st.have_bytes < len / 2,
+        "room-first, not front-to-back: {} MiB",
+        mib(st.have_bytes)
+    );
+    // Playable without any player read: opening needs the pre-buffer at the ROOM position.
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, EngineEvent::Playable { .. }))
+    );
+    eng.stop(sd.infohash, StopReason::Leave).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

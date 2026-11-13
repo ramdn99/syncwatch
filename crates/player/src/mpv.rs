@@ -59,7 +59,16 @@ fn init_options(cfg: &MpvConfig) -> Vec<(&'static str, String, bool)> {
         ("pause", "yes".into(), true),
         ("hwdec", cfg.hwdec.clone(), false),
         ("background-color", "#000000".into(), false),
+        // Cache tuning (ADR 0012). A real stall pauses cleanly (cache-pause), and playback
+        // resumes only once 2 s are buffered again (cache-pause-wait), so data arriving at about
+        // the playback rate does not toggle pause on and off. No pause before the first frame
+        // (cache-pause-initial). Local files read 20 s ahead (demuxer-readahead-secs; streams
+        // use the cache, which reads ahead as far as the download allows). Playback from a part
+        // that is already on disk therefore never pauses for cache.
         ("cache-pause", "yes".into(), false),
+        ("cache-pause-wait", "2".into(), false),
+        ("cache-pause-initial", "no".into(), false),
+        ("demuxer-readahead-secs", "20".into(), false),
         // Torrent streams wait for pieces (seek past the frontier, slow swarm): never time out.
         ("network-timeout", "600".into(), false),
         ("sub-font", "Noto Sans".into(), false),
@@ -437,5 +446,19 @@ mod tests {
         assert_eq!(get("pause"), Some(("yes".into(), true)));
         assert_eq!(get("hwdec"), Some(("auto-safe".into(), false)));
         assert!(get("sub-fonts-dir").is_none());
+    }
+
+    #[test]
+    fn cache_options_avoid_pause_flicker() {
+        let o = init_options(&MpvConfig::new(1));
+        let get = |k: &str| {
+            o.iter()
+                .find(|(n, _, _)| *n == k)
+                .map(|(_, v, _)| v.clone())
+        };
+        assert_eq!(get("cache-pause").as_deref(), Some("yes"));
+        assert_eq!(get("cache-pause-wait").as_deref(), Some("2"));
+        assert_eq!(get("cache-pause-initial").as_deref(), Some("no"));
+        assert_eq!(get("demuxer-readahead-secs").as_deref(), Some("20"));
     }
 }

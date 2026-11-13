@@ -7,6 +7,7 @@
 //! arrived: a command, a heartbeat or a snapshot. Heartbeats never start playback early.
 
 use crate::drift::{DriftAction, DriftController, IGNORE_MS};
+use crate::stall::StallTracker;
 use crate::timing::OBS_FRESH_US;
 use crate::tracks::TrackApplier;
 use crate::types::*;
@@ -53,7 +54,22 @@ pub struct Local {
     pending_start: bool,
     awaiting_seek: Option<Epoch>,
     pub ready_epoch: Epoch,
-    pub buffering: bool,
+    /// The player's raw "paused for cache" flag (drift suspension only; never the gate or
+    /// the popup on its own, ADR 0012).
+    pub player_cache_paused: bool,
+    /// The cache pause began while playing; it stays a stall through the pause the room makes
+    /// for it (mpv keeps paused-for-cache set until its cache is filled again).
+    cache_latched: bool,
+    /// Torrent: readiness at the room position (engine), `None` while unknown.
+    torrent_window: Option<WindowState>,
+    /// The buffering popup of this window's own player.
+    pub stall: StallTracker,
+    stall_published: (bool, Option<BufferWait>),
+    /// The room waits at the ready gate (a missing window then counts as a stall).
+    pub gate_active: bool,
+    /// The host's media duration (heartbeat): maps the room position to bytes before this
+    /// player opened the file.
+    pub room_duration_ms: Option<u64>,
     drift: DriftController,
     drift_cooldown_until: i64,
     needs_resync: bool,
@@ -90,7 +106,13 @@ impl Local {
             pending_start: false,
             awaiting_seek: None,
             ready_epoch: Epoch(0),
-            buffering: false,
+            player_cache_paused: false,
+            cache_latched: false,
+            torrent_window: None,
+            stall: StallTracker::default(),
+            stall_published: (false, None),
+            gate_active: false,
+            room_duration_ms: None,
             drift: DriftController::default(),
             drift_cooldown_until: i64::MIN,
             needs_resync: false,
@@ -112,11 +134,124 @@ impl Local {
             media_epoch: self.room.media_epoch,
             media: self.media,
             ready_epoch: self.ready_epoch,
-            buffering: self.buffering,
+            buffering: self.needs_data(),
             tracks: track_override.unwrap_or(self.tracks.status),
             rtt_ms,
             torrent: self.torrent,
+            wait: self.window_wait(),
         }
+    }
+
+    /// The torrent window at the room position is known and not on disk.
+    fn window_short(&self) -> bool {
+        self.torrent_started.is_some() && self.torrent_window.is_some_and(|w| !w.ready)
+    }
+
+    /// What the missing window is (target and progress), while it is missing.
+    pub fn window_wait(&self) -> Option<BufferWait> {
+        self.torrent_window
+            .filter(|w| !w.ready && self.torrent_started.is_some())
+            .map(|w| BufferWait {
+                at_ms: w.at_ms,
+                // Coarse steps (512 KiB, 5%): the status goes to the host on every change.
+                missing: w.missing.div_ceil(512 * 1024) * 512 * 1024,
+                permille: w.permille.min(1000) / 50 * 50,
+            })
+    }
+
+    /// READY means "has the data I need now" (ADR 0012): this participant needs data before it
+    /// can continue at the room position. Torrent: the read window at the room position is
+    /// missing (with hysteresis in the engine); any player: a real stall longer than the
+    /// popup's show delay. Never the torrent's overall progress.
+    pub fn needs_data(&self) -> bool {
+        self.window_short() || self.stall.shown()
+    }
+
+    /// The room plays, waits to play at the gate, or holds a scheduled start.
+    fn room_wants_play(&self) -> bool {
+        !self.room.paused || self.gate_active
+    }
+
+    /// The real condition behind the popup: this player paused for lack of data while it
+    /// should play, or its window at the room position is missing while the room plays or
+    /// waits to play.
+    fn starving(&self) -> bool {
+        let player_stall =
+            self.player_cache_paused && (self.applied_paused == Some(false) || self.cache_latched);
+        player_stall || (self.window_short() && self.room_wants_play())
+    }
+
+    /// Re-evaluates the popup and reports a change to the UI.
+    fn update_stall(&mut self, mono: i64, out: &mut Out) {
+        let starving = self.starving();
+        self.stall.update(starving, mono);
+        self.publish_stall(out);
+    }
+
+    fn publish_stall(&mut self, out: &mut Out) {
+        let stalled = self.stall.shown();
+        let wait = if stalled { self.window_wait() } else { None };
+        if self.stall_published != (stalled, wait) {
+            self.stall_published = (stalled, wait);
+            out.ui(UiEvent::Stall { stalled, wait });
+        }
+    }
+
+    /// A transition that could leave the popup stale (seek done, resume, media change,
+    /// reconnect, torrent complete, the stream handing over to the finished file).
+    /// Closes the popup at once (no hide delay) unless the condition still holds.
+    pub fn clear_stall(&mut self, out: &mut Out) {
+        if !self.starving() {
+            self.stall.clear();
+        }
+        self.publish_stall(out);
+    }
+
+    /// Tells the torrent engine where the ROOM is (ADR 0012).
+    fn target_torrent(&self, host_now: Option<i64>, retarget: bool, out: &mut Out) {
+        let Some(ih) = self.torrent_started else {
+            return;
+        };
+        let r = self.room;
+        let (pos, playing) = match host_now {
+            // A scheduled start (anchor ahead): playing, from a position that reaches the
+            // anchor position exactly at the anchor.
+            Some(now) if !r.paused && now < r.anchor_host_us => (
+                r.position_ms - (r.anchor_host_us - now) * r.speed as i64 / 1_000_000,
+                true,
+            ),
+            Some(now) => (r.position_at(now), !r.paused),
+            None => (r.position_ms, false),
+        };
+        out.push(Effect::TorrentTarget {
+            infohash: ih,
+            position_ms: pos.max(0),
+            playing,
+            speed: r.speed,
+            retarget,
+        });
+    }
+
+    /// The host's heartbeat: room position refresh for the torrent engine (also corrects a
+    /// scheduled start that began after the last re-target) and the host's duration.
+    pub fn on_heartbeat_info(
+        &mut self,
+        duration_ms: Option<u64>,
+        host_now: Option<i64>,
+        out: &mut Out,
+    ) {
+        if duration_ms.is_some() {
+            self.room_duration_ms = duration_ms;
+        }
+        self.target_torrent(host_now, false, out);
+    }
+
+    /// Duration for the torrent's time -> byte map: the player's, else the host's.
+    pub fn media_duration_hint(&self) -> Option<u64> {
+        self.duration_ms
+            .filter(|d| *d > 0)
+            .map(|d| d as u64)
+            .or(self.room_duration_ms)
     }
 
     /// Remember the identity of the file this participant picked for its own change request.
@@ -127,7 +262,7 @@ impl Local {
     /// Current local position estimate (for chat timestamps).
     pub fn position_estimate(&self, mono: i64) -> Option<MediaMs> {
         let o = self.obs?;
-        if o.paused || self.buffering {
+        if o.paused || self.player_cache_paused {
             return Some(o.pos_ms);
         }
         Some(o.pos_ms + (mono - o.mono_us) * self.applied_speed as i64 / 1_000_000)
@@ -170,7 +305,12 @@ impl Local {
         self.applied_speed = 1000;
         self.pending_start = false;
         self.awaiting_seek = None;
-        self.buffering = false;
+        self.player_cache_paused = false;
+        self.cache_latched = false;
+        self.torrent_window = None;
+        self.room_duration_ms = None;
+        self.stall.reset();
+        self.publish_stall(out);
         self.drift.reset();
         self.duration_ms = None;
         self.ready_epoch = Epoch(0);
@@ -255,6 +395,14 @@ impl Local {
                 infohash: t.infohash,
             }));
         }
+        // The room's position first, before the player exists (late join, gate).
+        out.push(Effect::TorrentTarget {
+            infohash: t.infohash,
+            position_ms: self.room.position_ms.max(0),
+            playing: false,
+            speed: self.room.speed,
+            retarget: true,
+        });
         out.push(Effect::StartTorrent {
             infohash: t.infohash,
             file_index: t.file_index,
@@ -396,10 +544,30 @@ impl Local {
                 if !self.torrent_streaming {
                     self.media = MediaStatus::Downloading { permille };
                 }
+                if phase == TorrentPhase::Complete {
+                    // Everything is on disk (and the stream hands over to the finished file):
+                    // nothing can be missing any more.
+                    self.torrent_window = Some(WindowState {
+                        ready: true,
+                        at_ms: self.room.position_ms,
+                        missing: 0,
+                        permille: 1000,
+                    });
+                    self.clear_stall(out);
+                }
+            }
+            TorrentEvent::Window(w) => {
+                let complete = self
+                    .torrent
+                    .is_some_and(|t| t.phase == TorrentPhase::Complete);
+                if !complete {
+                    self.torrent_window = w;
+                }
             }
             TorrentEvent::Playable => {
                 if !self.torrent_streaming {
                     self.torrent_streaming = true;
+                    self.clear_stall(out);
                     self.media = MediaStatus::Ready;
                     self.request_load(
                         PlayerCmd::LoadTorrentStream {
@@ -447,7 +615,14 @@ impl Local {
                     mono_us: mono,
                     paused,
                 });
-                self.buffering = buffering;
+                self.player_cache_paused = buffering;
+                if !buffering {
+                    self.cache_latched = false;
+                } else if self.applied_paused == Some(false) && !paused {
+                    self.cache_latched = true;
+                }
+                self.stall.on_position(position_ms, paused, buffering, mono);
+                self.update_stall(mono, out);
             }
             PlayerObs::SeekDone => {
                 if let Some(t0) = self.seek_issued_us.take() {
@@ -458,6 +633,7 @@ impl Local {
                 if let Some(e) = self.awaiting_seek.take() {
                     self.ready_epoch = self.ready_epoch.max(e);
                 }
+                self.clear_stall(out);
             }
             PlayerObs::LoadFailed => {
                 self.loaded = false;
@@ -483,7 +659,12 @@ impl Local {
         if new == self.room && !self.needs_resync {
             return;
         }
+        let moved = new.epoch != self.room.epoch;
         self.room = new;
+        if moved {
+            // Room seek, pause or resume: the engine re-targets the room window at once.
+            self.target_torrent(host_now, true, out);
+        }
         self.sync_player(host_now, mono, false, out);
     }
 
@@ -501,11 +682,25 @@ impl Local {
         }
     }
 
+    /// Applied without a seek: ready for this epoch, unless a seek is still in flight (then the
+    /// seek completion reports this epoch instead of a stale "ready").
+    fn mark_ready(&mut self, e: Epoch) {
+        if self.awaiting_seek.is_some() {
+            self.awaiting_seek = Some(e);
+        } else {
+            self.ready_epoch = self.ready_epoch.max(e);
+        }
+    }
+
     fn set_paused(&mut self, p: bool, mono: i64, out: &mut Out) {
         if self.applied_paused != Some(p) {
             self.applied_paused = Some(p);
             self.last_cmd_us = mono;
             out.player(PlayerCmd::SetPaused(p));
+            if !p {
+                // Resume: a popup from before is stale.
+                self.clear_stall(out);
+            }
         }
     }
 
@@ -567,7 +762,7 @@ impl Local {
             if need_seek {
                 self.seek(r.position_ms, mono, out);
             } else {
-                self.ready_epoch = self.ready_epoch.max(r.epoch);
+                self.mark_ready(r.epoch);
             }
             self.pending_start = !r.paused;
         } else {
@@ -576,7 +771,7 @@ impl Local {
                 let lead_ms = self.seek_latency_us * r.speed as i64 / 1_000_000;
                 self.seek(target + lead_ms, mono, out);
             } else {
-                self.ready_epoch = self.ready_epoch.max(r.epoch);
+                self.mark_ready(r.epoch);
             }
             self.set_speed(r.speed, mono, out);
             self.set_paused(false, mono, out);
@@ -594,6 +789,7 @@ impl Local {
     }
 
     pub fn tick(&mut self, host_now: Option<i64>, mono: i64, out: &mut Out) {
+        self.update_stall(mono, out);
         if !self.loaded {
             return;
         }
@@ -620,7 +816,7 @@ impl Local {
         // Drift correction (suspended while buffering, seeking or not playing).
         if r.paused
             || !r.is_playing_at(now)
-            || self.buffering
+            || self.player_cache_paused
             || self.awaiting_seek.is_some()
             || mono < self.drift_cooldown_until
         {

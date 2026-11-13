@@ -37,8 +37,9 @@ param(
     # Keep libtorrent's default of ONE connection per IP (like a real public swarm seen from one PC).
     [switch]$SameIpDefault,
     # torrent: magnet room (2 windows). torrentfile: .torrent file room, decline, late joiner,
-    # source switches magnet -> local -> back (3 windows).
-    [ValidateSet('torrent', 'torrentfile')][string]$Scenario = 'torrent',
+    # source switches magnet -> local -> back (3 windows). torrentgate: ADR 0012 ready gate and
+    # buffering popup checks (a)-(e) (2 windows; use with -SameIpDefault).
+    [ValidateSet('torrent', 'torrentfile', 'torrentgate')][string]$Scenario = 'torrent',
     # Hands-on test material: seed both test torrents, print the magnets and .torrent paths, keep
     # qBittorrent running until a key is pressed or -ManualMinutes pass, then clean up.
     [switch]$Manual,
@@ -243,6 +244,29 @@ foreach ($w in 'a', 'b', 'c') {
     if (Test-Path $f) { Get-Content $f | Where-Object { $_ -like 'TS *' } | ForEach-Object { $p = $_ -split ' '; $ts[$p[1]] = [int64]$p[2] } }
 }
 $rows = Import-Csv $csv | ForEach-Object { [pscustomobject]@{ t = [int64]$_.wallMs; up = [int64]$_.qbtUploaded; peers = [int]$_.qbtPeers; conns = [int]$_.connsQbtToUs; peer = [int]$_.peerConns; trk = [int]$_.trackerConns; udp = [int]$_.ourUdp; listen = $_.ourTcpListen; up2 = [int64]$_.qbtUploaded2; peers2 = [int]$_.qbtPeers2 } }
+if ($Scenario -eq 'torrentgate') {
+    # The checks run inside the windows (PASS/FAIL lines above); here only qBittorrent's total.
+    foreach ($w in 'a', 'b') {
+        $f = Join-Path $raw "scenario-$w.txt"
+        if (Test-Path $f) {
+            $bad = @(Get-Content $f | Where-Object { $_ -like 'FAIL*' })
+            Result ($bad.Count -eq 0) "window $($w): every (a)-(e) check passed"
+        } else {
+            Result $false "window $($w): no scenario output"
+        }
+    }
+    $total = ($rows | Measure-Object up -Maximum).Maximum
+    Write-Host "qBittorrent sent $([math]::Round($total / 1MB, 1)) MiB in total"
+    if (-not $KeepQbt) {
+        try { Invoke-RestMethod "$api/app/shutdown" -Method Post -TimeoutSec 5 | Out-Null } catch {}
+        $qp.WaitForExit(15000) | Out-Null
+        if (-not $qp.HasExited) { Stop-Process -Id $qp.Id -Force }
+        Remove-Item -Recurse -Force $prof -ErrorAction SilentlyContinue
+    }
+    Write-Host "Monitor: $csv"
+    if ($fail) { exit 1 }
+    exit 0
+}
 if ($Scenario -eq 'torrentfile') {
     function Window($from, $to) { @($rows | Where-Object { $_.t -ge $from -and $_.t -le $to }) }
     if ($ts['t2_all_complete'] -and $ts['t1_off'] -and $ts['final']) {

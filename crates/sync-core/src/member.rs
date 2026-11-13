@@ -98,6 +98,7 @@ impl MemberMachine {
                 chat_muted: rules.muted.contains(&s.identity),
                 connected: false,
                 torrent: known.and_then(|i| i.torrent),
+                wait: None,
             });
             identities.push((s.id, s.identity));
         }
@@ -412,10 +413,12 @@ impl MemberMachine {
             Message::Heartbeat {
                 playback,
                 host_now_us,
+                duration_ms,
             } => {
                 self.clock.add_coarse(host_now_us, mono);
                 let hn = self.host_now(mono);
                 self.local.on_heartbeat(playback, hn, mono, out);
+                self.local.on_heartbeat_info(duration_ms, hn, out);
             }
             Message::Command(c) => self.on_command(mono, c, out),
             Message::Chat(m) => {
@@ -533,7 +536,9 @@ impl MemberMachine {
         }
         let hn = self.host_now(mono);
         if reconnect {
-            // Same media: keep the file; take the fresh state and resume any download.
+            // Same media: keep the file; take the fresh state and resume any download. A
+            // popup from before the drop is stale.
+            self.local.clear_stall(out);
             self.local.tracks.set_desired(s.tracks.clone(), out);
             self.local.apply_room(s.playback, hn, mono, out);
             self.downloads.resume(out);
@@ -610,7 +615,10 @@ impl MemberMachine {
                 self.chat_state = s;
                 out.ui(UiEvent::ChatState(s));
             }
-            Command::ReadyGate(g) => out.ui(UiEvent::Gate(g)),
+            Command::ReadyGate(g) => {
+                self.local.gate_active = g.active;
+                out.ui(UiEvent::Gate(g));
+            }
             Command::Notice(n) => out.ui(UiEvent::Notice(n)),
             Command::Kicked { banned } => {
                 out.ui(UiEvent::Kicked { banned });

@@ -17,6 +17,8 @@ export interface VideoAreaProps {
   emptyState?: { title: string; body: string; action: string | null };
   /** Torrent rooms: downloaded byte ranges of the file, drawn on the seek bar. */
   downloaded?: { ranges: [number, number][]; size: number } | null;
+  /** Show the raw "Buffering..." pill from mpv (outside a room only; rooms use the debounced popup). */
+  cachePill?: boolean;
   children?: ReactNode;
 }
 
@@ -78,7 +80,8 @@ export const VideoArea = forwardRef<HTMLDivElement, VideoAreaProps>(function Vid
           )}
         </div>
       )}
-      {state.fileLoaded && state.pausedForCache && (
+      {/* In a room the buffering popup is driven by sync-core (real stalls only, ADR 0012). */}
+      {props.cachePill !== false && state.fileLoaded && state.pausedForCache && (
         <div className="absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1 text-sm">Buffering...</div>
       )}
       {props.children}

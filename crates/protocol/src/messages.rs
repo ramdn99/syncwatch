@@ -114,6 +114,18 @@ pub struct TorrentProgress {
     pub permille: u16,
 }
 
+/// Why a participant cannot continue at the room position: the data for the room position plus
+/// the read-ahead window is not on its disk yet (torrent streaming, ADR 0012). Sizes in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BufferWait {
+    /// The room position the window starts at.
+    pub at_ms: MediaMs,
+    /// Bytes of the window still missing.
+    pub missing: u64,
+    /// How much of the window is already there (0..=1000).
+    pub permille: u16,
+}
+
 /// Member -> host status report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberStatus {
@@ -121,11 +133,15 @@ pub struct MemberStatus {
     pub media: MediaStatus,
     /// Highest playback epoch the member has fully applied (seeked and loaded).
     pub ready_epoch: Epoch,
+    /// Needs data before it can continue at the room position (window not on disk, or the
+    /// player really stalled). NOT the torrent's overall progress (ADR 0012).
     pub buffering: bool,
     pub tracks: TrackSyncStatus,
     pub rtt_ms: Option<u32>,
     /// Torrent rooms only.
     pub torrent: Option<TorrentProgress>,
+    /// Torrent rooms: the missing window while buffering (target and progress).
+    pub wait: Option<BufferWait>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +158,8 @@ pub struct MemberInfo {
     pub connected: bool,
     /// Torrent rooms only.
     pub torrent: Option<TorrentProgress>,
+    /// Torrent rooms: what a buffering member is waiting for.
+    pub wait: Option<BufferWait>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,7 +202,8 @@ pub enum NotReadyReason {
     MissingFile,
     Verifying,
     Downloading,
-    Buffering,
+    /// Data for the room position is missing (with the target and progress when known).
+    Buffering(Option<BufferWait>),
     Loading,
 }
 
@@ -371,6 +390,9 @@ pub enum Message {
     Heartbeat {
         playback: RoomPlayback,
         host_now_us: HostMicros,
+        /// The host's media duration once known: lets a member that has not opened the file yet
+        /// map the room position to bytes (torrent read window, ADR 0012).
+        duration_ms: Option<u64>,
     },
     // --- member -> host ---
     Request(Request),

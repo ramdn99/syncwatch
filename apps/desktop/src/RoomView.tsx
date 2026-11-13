@@ -7,12 +7,13 @@ import { ChatPanel } from './components/ChatPanel';
 import { HostControls } from './components/HostControls';
 import { MembersPanel } from './components/MembersPanel';
 import { VideoArea } from './components/VideoArea';
+import { GATE_BANNER_DELAY_MS, useDelayedTrue } from './lib/delayed';
 import { computeColumns, dragWidth, loadPrefs, savePrefs, toPhysical, type LayoutPrefs } from './lib/layout';
 import { app, inTauri, onPlayerEvent, player, type PlaybackState, type Rect, type Track } from './lib/player';
 import { mapKey } from './lib/shortcuts';
 import { MissingFilePanel, PasswordPrompt } from './components/RoomDialogs';
 import { DiagnosticsDialog, type UiErrorEntry } from './components/Diagnostics';
-import { EMPTY_ROOM, endText, formatCode, friendlyError, onRoomState, PASSWORD_IGNORED_TEXT, chatBlockedReason, room, type RoomAction, type RoomState } from './lib/room';
+import { EMPTY_ROOM, endText, formatCode, friendlyError, onRoomState, PASSWORD_IGNORED_TEXT, chatBlockedReason, gateBannerText, room, type RoomAction, type RoomState } from './lib/room';
 import { chatLines, markerSeconds } from './lib/chat';
 import type { TrackSelection } from './lib/player';
 
@@ -42,6 +43,7 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [mediaKey, setMediaKey] = useState('none');
   const [rs, setRs] = useState<RoomState>(EMPTY_ROOM);
+  const gateBanner = useDelayedTrue(rs.active && gateBannerText(rs.gate, rs.me, rs.isHost) != null, GATE_BANNER_DELAY_MS);
   const [toasts, setToasts] = useState<{ id: number; text: string }[]>([]);
   const [dismissedPanel, setDismissedPanel] = useState(0);
   const [diagOpen, setDiagOpen] = useState(false);
@@ -468,10 +470,10 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
           </button>
         </div>
       )}
-      {rs.active && rs.gate.active && (
+      {gateBanner && (
         <div role="status" className="flex flex-wrap items-center gap-3 bg-info/15 px-3 py-1.5 text-sm text-info" data-testid="gate">
-          <span className="flex-1">
-            Waiting for {rs.gate.waiting.length ? rs.gate.waiting.map((w) => `${w.name} (${w.reason})`).join(', ') : 'everyone'}...
+          <span className="flex-1" data-testid="gate-text">
+            {gateBannerText(rs.gate, rs.me, rs.isHost)}
           </span>
           {rs.isHost && (
             <button type="button" className="text-text underline" onClick={() => act({ type: 'resumeWithoutWaiting' })}>
@@ -520,8 +522,9 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
           onOpenFile={() => void openFile()}
           emptyState={rs.active ? roomEmptyState(rs) : undefined}
           downloaded={rs.active && rs.torrent ? { ranges: rs.torrent.ranges, size: rs.torrent.size } : null}
+          cachePill={!rs.active}
         >
-          {rs.active && rs.torrent?.buffering && <BufferingOverlay buffering={rs.torrent.buffering} />}
+          {rs.active && rs.stall.stalled && <BufferingOverlay wait={rs.stall.wait} />}
           {showPanel && rs.missingFile && (
             <MissingFilePanel
               file={rs.missingFile}
@@ -563,7 +566,7 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
                 />
                 {rs.active && (
                   <div className="mt-3">
-                    <TorrentBlock torrent={rs.torrent} members={rs.members} isHost={isHost} />
+                    <TorrentBlock torrent={rs.torrent} members={rs.members} isHost={isHost} stall={rs.stall} />
                   </div>
                 )}
               </Section>

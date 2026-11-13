@@ -135,6 +135,9 @@ impl Default for PolicyConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CursorKind {
+    /// The ROOM's position (ADR 0012): while the room's read window is not on disk it runs
+    /// first and alone, also before this player opened the file or while it waits at the gate.
+    Room,
     /// Follows the playhead (also pre-targets a room seek before the player asks).
     Lead,
     /// The file head, only before the first playable moment if the playhead is elsewhere.
@@ -178,6 +181,8 @@ pub struct PiecePolicy {
     started: bool,
     last_seek_us: Option<i64>,
     satisfied_since: Option<i64>,
+    /// The room's read window [start, end) in bytes (extrapolated room position).
+    room: Option<(u64, u64)>,
 }
 
 impl PiecePolicy {
@@ -190,7 +195,40 @@ impl PiecePolicy {
             started: false,
             last_seek_us: None,
             satisfied_since: None,
+            room: None,
         }
+    }
+
+    pub fn room(&self) -> Option<(u64, u64)> {
+        self.room
+    }
+
+    /// The room position moved with playback (no re-target).
+    pub fn set_room(&mut self, start: u64, end: u64) {
+        let len = self.geo.len;
+        self.room = Some((start.min(len), end.min(len).max(start.min(len))));
+    }
+
+    /// A room seek, media change, pause or resume: re-target at once, the room window first and
+    /// alone until it is on disk.
+    pub fn room_seek(&mut self, start: u64, end: u64, now: i64) {
+        self.set_room(start, end);
+        self.last_seek_us = Some(now);
+        self.satisfied_since = None;
+        self.exclusive = true;
+    }
+
+    /// First byte of the room window that is not downloaded yet.
+    fn room_missing(&self, have: &[bool]) -> Option<u64> {
+        let (a, b) = self.room?;
+        let g = self.geo;
+        if b <= a || g.complete(have, a, b) {
+            return None;
+        }
+        let (first, last) = (g.piece_of(a), g.piece_of(b - 1));
+        (first..=last)
+            .find(|p| !have.get(*p).copied().unwrap_or(false))
+            .map(|p| g.piece_start(p).max(a))
     }
 
     pub fn geometry(&self) -> FileGeometry {
@@ -226,13 +264,22 @@ impl PiecePolicy {
         let tail_ok = g.complete(have, self.tail_start(), len);
         let pre_end = self.playhead.saturating_add(self.cfg.prebuffer).min(len);
         let pre_ok = g.complete(have, self.playhead, pre_end);
+        let room_missing = self.room_missing(have);
+        // Opening the file: the pre-buffer at the ROOM position when known (a member joining
+        // or waiting at minute 12 must not need minute 0).
+        let open_at = self.room.map(|r| r.0).unwrap_or(self.playhead);
+        let open_ok = g.complete(
+            have,
+            open_at,
+            open_at.saturating_add(self.cfg.prebuffer).min(len),
+        );
         let ahead_ok = g.complete(
             have,
             self.playhead,
             self.playhead.saturating_add(self.cfg.read_ahead),
         );
 
-        if ahead_ok {
+        if ahead_ok && room_missing.is_none() {
             let since = *self.satisfied_since.get_or_insert(now);
             let calm_seek = self
                 .last_seek_us
@@ -248,18 +295,31 @@ impl PiecePolicy {
         if !self.cfg.exclusive_playback {
             self.exclusive = false;
         }
-        let playable = complete || (head_ok && tail_ok && pre_ok);
+        let playable = complete || (head_ok && tail_ok && open_ok);
         let mut cursors = Vec::new();
         if !complete {
-            // The lead follows the playhead whenever something is missing.
-            cursors.push(Cursor {
-                kind: CursorKind::Lead,
-                pos: self.playhead,
-            });
+            if let Some(pos) = room_missing {
+                // Highest priority: the room's current part.
+                cursors.push(Cursor {
+                    kind: CursorKind::Room,
+                    pos,
+                });
+            }
+            // The lead follows the playhead whenever something is missing (not while the room
+            // window is missing and the player reads elsewhere: the room goes first).
+            let lead_in_room = self
+                .room
+                .is_some_and(|(a, b)| self.playhead >= a && self.playhead < b);
+            if room_missing.is_none() || lead_in_room {
+                cursors.push(Cursor {
+                    kind: CursorKind::Lead,
+                    pos: self.playhead,
+                });
+            }
             if !self.started {
                 // Opening the file needs its head and tail before anything else (the lead is at
                 // the playhead, which a late joiner may have moved away from 0).
-                if !head_ok && self.playhead >= self.cfg.head {
+                if !head_ok && cursors.iter().all(|c| c.pos >= self.cfg.head) {
                     cursors.push(Cursor {
                         kind: CursorKind::Head,
                         pos: 0,
@@ -344,6 +404,11 @@ impl ByteMap {
             duration_ms,
             samples: BTreeMap::new(),
         }
+    }
+
+    /// A time -> byte mapping exists (a duration or at least one sample).
+    pub fn known(&self) -> bool {
+        self.duration_ms.is_some() || !self.samples.is_empty()
     }
 
     pub fn set_duration(&mut self, d: Option<u64>) {
@@ -565,6 +630,90 @@ mod tests {
     }
 
     #[test]
+    fn a_member_that_has_not_opened_the_file_fetches_the_room_position_first() {
+        // Not loaded / paused at the gate: the player never read anything (playhead 0), the
+        // room is at 100 MiB.
+        let mut pol = PiecePolicy::new(cfg(), geo());
+        pol.room_seek(100 * MIB, 106 * MIB, 0);
+        let p = pol.plan(&have_ranges(&[]), 0);
+        assert_eq!(
+            kinds(&p),
+            vec![CursorKind::Room, CursorKind::Head, CursorKind::Tail],
+            "the room's part first, then what opening the file needs; never minute 0 first"
+        );
+        assert_eq!(pos(&p, CursorKind::Room), Some(100 * MIB));
+        // Playable as soon as head, tail and the pre-buffer AT THE ROOM POSITION are there,
+        // with the start of the file still missing.
+        let got = [(0, 2 * MIB), (100 * MIB, 104 * MIB), (LEN - 8 * MIB, LEN)];
+        let p = pol.plan(&have_ranges(&got), 1);
+        assert!(p.playable);
+        assert_eq!(
+            pos(&p, CursorKind::Room),
+            Some(104 * MIB),
+            "rest of the window"
+        );
+        // The window grows from the room position, not from the start.
+        let got = [(0, 2 * MIB), (100 * MIB, 106 * MIB), (LEN - 8 * MIB, LEN)];
+        let p = pol.plan(&have_ranges(&got), 2);
+        assert_eq!(pos(&p, CursorKind::Room), None);
+    }
+
+    #[test]
+    fn room_seek_retargets_before_anything_else_then_the_old_order_returns() {
+        let mut pol = PiecePolicy::new(cfg(), geo());
+        let base = [(0, 40 * MIB), (LEN - 8 * MIB, LEN)];
+        pol.on_read(10 * MIB);
+        pol.set_room(10 * MIB, 16 * MIB);
+        let p = pol.plan(&have_ranges(&base), 0);
+        assert!(p.playable);
+        assert_eq!(
+            pos(&p, CursorKind::Room),
+            None,
+            "window on disk: no room cursor"
+        );
+        // The host seeks to 120 MiB while this player still reads at 10 MiB (paused member).
+        pol.room_seek(120 * MIB, 126 * MIB, 5_000_000);
+        let p = pol.plan(&have_ranges(&base), 5_000_000);
+        assert_eq!(kinds(&p), vec![CursorKind::Room], "room first and alone");
+        assert_eq!(pos(&p, CursorKind::Room), Some(120 * MIB));
+        assert!(p.exclusive);
+        // Window arrives, player still elsewhere: the lead returns; aux streams only after calm.
+        let got = [(0, 40 * MIB), (120 * MIB, 126 * MIB), (LEN - 8 * MIB, LEN)];
+        let p = pol.plan(&have_ranges(&got), 5_500_000);
+        assert_eq!(kinds(&p), vec![CursorKind::Lead]);
+        // The player follows the room (its own read at 120 MiB): the existing read-ahead,
+        // tail and fill order continues.
+        pol.on_seek(120 * MIB, 5_600_000);
+        let full = [(0, 40 * MIB), (120 * MIB, 140 * MIB), (LEN - 8 * MIB, LEN)];
+        pol.plan(&have_ranges(&full), 5_700_000);
+        let p = pol.plan(&have_ranges(&full), 8_000_000);
+        assert_eq!(kinds(&p), vec![CursorKind::Lead, CursorKind::Fill]);
+        // Seek back to a downloaded region: nothing to fetch for the room.
+        pol.room_seek(5 * MIB, 11 * MIB, 9_000_000);
+        let p = pol.plan(&have_ranges(&full), 9_000_000);
+        assert_eq!(pos(&p, CursorKind::Room), None);
+        // Resume / pause re-target at the same place: still nothing extra when it is there.
+        pol.room_seek(5 * MIB, 11 * MIB, 9_100_000);
+        assert_eq!(
+            pos(&pol.plan(&have_ranges(&full), 9_100_000), CursorKind::Room),
+            None
+        );
+    }
+
+    #[test]
+    fn rapid_room_seeks_keep_one_room_cursor_on_the_latest_target() {
+        let mut pol = PiecePolicy::new(cfg(), geo());
+        let base = [(0, 40 * MIB), (LEN - 8 * MIB, LEN)];
+        pol.plan(&have_ranges(&base), 0);
+        for (i, at) in [60u64, 150, 80, 170].iter().enumerate() {
+            pol.room_seek(at * MIB, (at + 6) * MIB, i as i64 * 100_000);
+            let p = pol.plan(&have_ranges(&base), i as i64 * 100_000);
+            assert_eq!(kinds(&p), vec![CursorKind::Room]);
+            assert_eq!(pos(&p, CursorKind::Room), Some(at * MIB));
+        }
+    }
+
+    #[test]
     fn complete_file_needs_no_cursors() {
         let mut pol = PiecePolicy::new(cfg(), geo());
         let p = pol.plan(&have_ranges(&[(0, LEN)]), 0);
@@ -619,11 +768,21 @@ mod tests {
             }
             let mut pol = PiecePolicy::new(cfg(), g);
             let mut now = 0;
-            for (pos, dt) in seeks {
+            for (i, (pos, dt)) in seeks.into_iter().enumerate() {
                 now += dt;
-                pol.on_seek(pos, now);
+                // Alternate the player's own seeks and room seeks (another position).
+                if i % 2 == 0 {
+                    pol.on_seek(pos, now);
+                } else {
+                    let r = (pos / 2).min(LEN);
+                    pol.room_seek(r, (r + 6 * MIB).min(LEN), now);
+                }
                 let p = pol.plan(&have, now);
                 prop_assert!(p.cursors.len() <= 4);
+                if let Some(r) = pos_of(&p, CursorKind::Room) {
+                    prop_assert!(!have[g.piece_of(r)], "the room cursor targets a missing piece");
+                    prop_assert_eq!(p.cursors[0].kind, CursorKind::Room, "room first");
+                }
                 for c in &p.cursors {
                     prop_assert!(c.pos <= LEN);
                 }

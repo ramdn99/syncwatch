@@ -1,3 +1,4 @@
+import { formatTime } from './time';
 // Bridge to the Rust room driver (src-tauri/src/room.rs). The Rust side owns all room state;
 // the UI renders the `room-state` snapshots it pushes and sends actions back.
 
@@ -31,6 +32,17 @@ export interface RoomMember {
   words: [string, string, string, string] | null;
   /** Torrent rooms: this member's download phase and whole-percent progress. */
   torrent: { phase: TorrentPhase; permille: number } | null;
+  /** Torrent rooms: what a buffering member waits for. */
+  wait: BufferWait | null;
+}
+
+/** A buffering participant's missing window at the room position (ADR 0012). */
+export interface BufferWait {
+  atMs: number;
+  /** Bytes of the window still missing. */
+  missing: number;
+  /** How much of the window is there (0..1000). */
+  permille: number;
 }
 
 export type TorrentPhase = 'metadata' | 'waitingForHost' | 'downloading' | 'streaming' | 'noPeers' | 'complete' | 'failed';
@@ -46,7 +58,8 @@ export interface TorrentState {
   etaSecs: number | null;
   /** Downloaded byte ranges [start, end). */
   ranges: [number, number][];
-  buffering: { have: number; total: number } | null;
+  /** Readiness at the room position (display only; the popup is RoomState.stall). */
+  window: { ready: boolean; atMs: number; missing: number; permille: number } | null;
   /** Only the playback stream runs (window short or just seeked). */
   exclusive: boolean;
   /** What is used to find peers. */
@@ -110,13 +123,22 @@ export interface RoomState {
   diag: RoomDiag;
   mediaEpoch: number;
   mediaDurationMs: number | null;
-  gate: { active: boolean; waiting: { member: number; name: string; reason: string }[] };
+  gate: { active: boolean; waiting: GateWait[] };
   externals: { id: number; kind: 'audio' | 'sub'; name: string; size: number; received: number | null; failed: boolean; withheld: boolean }[];
   declined: string[];
   joining: boolean;
   torrent: TorrentState | null;
   /** Member: the host's magnet waits for our confirmation. */
   confirmMagnet: { name: string; size: number; infohash: string; torrentName: string | null } | null;
+  /** The buffering popup of THIS window's own player (never about another member). */
+  stall: { stalled: boolean; wait: BufferWait | null };
+}
+
+export interface GateWait {
+  member: number;
+  name: string;
+  reason: string;
+  wait: BufferWait | null;
 }
 
 export interface AddExternalOutcome {
@@ -175,6 +197,7 @@ export const EMPTY_ROOM: RoomState = {
   joining: false,
   torrent: null,
   confirmMagnet: null,
+  stall: { stalled: false, wait: null },
 };
 
 export type RoomAction =
@@ -315,12 +338,42 @@ const PHASE_TEXT: Record<TorrentPhase, string> = {
   failed: 'failed',
 };
 
-/** Short status for a member's torrent ("downloading 42%", "buffering", "complete"...). */
-export function torrentStatusText(t: { phase: TorrentPhase; permille: number } | null, buffering = false): string | null {
+/** "buffering at 12:30, 60% of the window" (the room position and the window's progress). */
+export function bufferingText(w: BufferWait | null): string {
+  if (!w) return 'buffering';
+  return `buffering at ${formatTime(w.atMs / 1000)}, ${Math.floor(w.permille / 10)}% of the window`;
+}
+
+/**
+ * Short status for a member's torrent ("downloading 42%", "buffering at 12:30, 60% of the
+ * window", "complete"...). `buffering` is the member's real need for data at the room position,
+ * never its overall progress.
+ */
+export function torrentStatusText(t: { phase: TorrentPhase; permille: number } | null, buffering = false, wait: BufferWait | null = null): string | null {
   if (!t) return null;
-  if (buffering && t.phase !== 'complete') return 'buffering';
+  if (buffering && t.phase !== 'complete') return bufferingText(wait);
   const pct = Math.floor(t.permille / 10);
   return t.phase === 'downloading' || t.phase === 'streaming' || t.phase === 'noPeers' ? `${PHASE_TEXT[t.phase]} ${pct}%` : PHASE_TEXT[t.phase];
+}
+
+/**
+ * The ready-gate banner (ADR 0012). The host sees why and what each member waits for ("Waiting
+ * for Bo: buffering at 12:30 (needs ~3 MB more)"); a member sees "Waiting for Bo to catch up"
+ * for another member's buffering. A member's own buffering is its popup, not this banner:
+ * `null` when nothing is left to show.
+ */
+export function gateBannerText(gate: { active: boolean; waiting: GateWait[] }, me: number | null, isHost: boolean): string | null {
+  if (!gate.active) return null;
+  if (gate.waiting.length === 0) return 'Waiting for everyone...';
+  const others = gate.waiting.filter((w) => isHost || w.member !== me);
+  if (others.length === 0) return null;
+  const part = (w: GateWait) => {
+    if (w.reason !== 'buffering') return `${w.name} (${w.reason})`;
+    if (!isHost) return `${w.name} to catch up`;
+    if (!w.wait) return `${w.name}: buffering`;
+    return `${w.name}: buffering at ${formatTime(w.wait.atMs / 1000)} (needs ~${fmtBytes(w.wait.missing)} more)`;
+  };
+  return `Waiting for ${others.map(part).join(', ')}...`;
 }
 
 /** What this window is doing while it has no data yet, and why it may be stuck. */

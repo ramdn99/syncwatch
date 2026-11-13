@@ -112,6 +112,7 @@ fn channels_and_priorities() {
     let hb = Message::Heartbeat {
         playback: RoomPlayback::initial(MediaEpoch(1), 0),
         host_now_us: 0,
+        duration_ms: Some(60_000),
     };
     assert_eq!(hb.channel(), Channel::Unreliable);
     assert_eq!(hb.priority(), Priority::Heartbeat);

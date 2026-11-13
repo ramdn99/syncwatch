@@ -21,6 +21,7 @@ mod types;
 
 #[cfg(feature = "sim")]
 pub mod sim;
+pub mod stall;
 
 pub use host::{HostConfig, HostMachine};
 pub use member::MemberMachine;

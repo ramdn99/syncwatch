@@ -21,7 +21,9 @@ use syncwatch_net::*;
 use syncwatch_player::Player;
 use syncwatch_protocol::signaling::normalize_room_code;
 use syncwatch_protocol::*;
-use syncwatch_sync_core::{Clock, Event, LocalFileEvent, TorrentEvent, UiAction, UiEvent};
+use syncwatch_sync_core::{
+    Clock, Event, LocalFileEvent, TorrentEvent, UiAction, UiEvent, WindowState,
+};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 
@@ -131,6 +133,35 @@ pub struct MemberDto {
     words: Option<[&'static str; 4]>,
     /// Torrent rooms: this member's download phase and whole-percent progress.
     torrent: Option<TorrentMemberDto>,
+    /// Torrent rooms: what a buffering member waits for (position and window progress).
+    wait: Option<WaitDto>,
+}
+
+/// A buffering participant's missing window at the room position (ADR 0012).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitDto {
+    at_ms: i64,
+    missing: u64,
+    permille: u16,
+}
+
+impl From<BufferWait> for WaitDto {
+    fn from(w: BufferWait) -> Self {
+        Self {
+            at_ms: w.at_ms,
+            missing: w.missing,
+            permille: w.permille,
+        }
+    }
+}
+
+/// THIS window's buffering popup (its own player stalled on missing data).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StallDto {
+    stalled: bool,
+    wait: Option<WaitDto>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -165,7 +196,9 @@ pub struct TorrentDto {
     eta_secs: Option<u64>,
     /// Downloaded byte ranges [start, end).
     ranges: Vec<[u64; 2]>,
-    buffering: Option<BufferingDto>,
+    /// Readiness at the room position (window + container pieces); display only. The popup
+    /// is `RoomStateDto::stall`, never this.
+    window: Option<WindowDto>,
     /// Only the playback stream runs (window short / just seeked).
     exclusive: bool,
     /// What is used to find peers (status text while looking).
@@ -178,11 +211,13 @@ pub struct TorrentDto {
     error: Option<&'static str>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BufferingDto {
-    have: u64,
-    total: u64,
+pub struct WindowDto {
+    ready: bool,
+    at_ms: u64,
+    missing: u64,
+    permille: u16,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -327,6 +362,8 @@ pub struct RoomStateDto {
     torrent: Option<TorrentDto>,
     /// Member: the host's magnet waits for our confirmation (name and size shown).
     confirm_magnet: Option<ConfirmMagnetDto>,
+    /// The buffering popup of this window's own player (ADR 0012).
+    stall: StallDto,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -341,7 +378,10 @@ pub struct GateDto {
 pub struct GateWaitDto {
     member: u32,
     name: String,
+    /// "buffering", "loading", "downloading", "missing the file", "verifying the file".
     reason: &'static str,
+    /// Buffering: the room position and the missing part of the window.
+    wait: Option<WaitDto>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -433,6 +473,7 @@ impl Mirror {
                         phase: phase_text(t.phase),
                         permille: t.permille,
                     }),
+                    wait: i.wait.filter(|_| i.buffering).map(WaitDto::from),
                     permissions: i.permissions.into(),
                     words: self.words.get(&i.id.0).copied(),
                 }
@@ -654,6 +695,19 @@ impl Mirror {
                 self.event("joining: loading and catching up");
                 self.s.joining = true;
             }
+            UiEvent::Stall { stalled, wait } => {
+                if stalled != self.s.stall.stalled {
+                    self.event(if stalled {
+                        "buffering: this player waits for data"
+                    } else {
+                        "buffering over"
+                    });
+                }
+                self.s.stall = StallDto {
+                    stalled,
+                    wait: wait.map(WaitDto::from),
+                };
+            }
             UiEvent::Gate(g) => {
                 if g.active != self.s.gate.active {
                     self.event(if g.active {
@@ -674,8 +728,12 @@ impl Mirror {
                                 NotReadyReason::MissingFile => "missing the file",
                                 NotReadyReason::Verifying => "verifying the file",
                                 NotReadyReason::Downloading => "downloading",
-                                NotReadyReason::Buffering => "buffering",
+                                NotReadyReason::Buffering(_) => "buffering",
                                 NotReadyReason::Loading => "loading",
+                            },
+                            wait: match r {
+                                NotReadyReason::Buffering(w) => w.map(WaitDto::from),
+                                _ => None,
                             },
                         })
                         .collect(),
@@ -1232,7 +1290,10 @@ struct Rt {
     torrents: Arc<crate::torrent::TorrentService>,
     /// The room's torrent this window downloads / plays (at most one).
     torrent: Option<syncwatch_protocol::Infohash>,
-    torrent_duration_sent: bool,
+    /// The duration last given to the torrent engine's time -> byte map.
+    torrent_duration_sent: Option<u64>,
+    /// Readiness at the room position from the last engine status, for sync-core.
+    pending_window: Option<Option<WindowState>>,
     /// Member: the host's verified metadata for the room torrent (bytes, host engine port).
     member_meta: Option<(Infohash, Vec<u8>, u16)>,
     /// Member: accepted, waiting for the host's metadata offer before starting.
@@ -1267,7 +1328,8 @@ async fn drive(
         was_host: false,
         torrents: Arc::clone(&*app.state::<Arc<crate::torrent::TorrentService>>()),
         torrent: None,
-        torrent_duration_sent: false,
+        torrent_duration_sent: None,
+        pending_window: None,
         member_meta: None,
         torrent_pending: None,
     };
@@ -1385,6 +1447,11 @@ async fn drive(
             let outs = session.handle(clock(epoch), input);
             ended |= exec(&mut rt, &session, outs).await;
         }
+        if !ended && let Some(w) = rt.pending_window.take() {
+            let ev = Event::Torrent(TorrentEvent::Window(w));
+            let outs = session.handle(clock(epoch), Input::Core(ev));
+            ended |= exec(&mut rt, &session, outs).await;
+        }
         // The real player's position feeds sync-core (drift correction, ready gate, chat).
         if !ended && last_pos.elapsed() >= POSITION_EVERY {
             last_pos = Instant::now();
@@ -1471,7 +1538,7 @@ fn waiting_dto(size: u64) -> TorrentDto {
         peers: 0,
         eta_secs: None,
         ranges: Vec::new(),
-        buffering: None,
+        window: None,
         exclusive: true,
         trackers: 0,
         dht: false,
@@ -1570,9 +1637,11 @@ fn on_engine_event(rt: &mut Rt, ev: syncwatch_torrent::EngineEvent) -> Option<In
                 peers: status.peers,
                 eta_secs: status.eta_secs,
                 ranges: status.ranges.iter().map(|(a, b)| [*a, *b]).collect(),
-                buffering: status.buffering.map(|b| BufferingDto {
-                    have: b.have,
-                    total: b.total,
+                window: status.window.map(|w| WindowDto {
+                    ready: w.ready,
+                    at_ms: w.at_ms,
+                    missing: w.missing,
+                    permille: w.permille,
                 }),
                 exclusive: status.exclusive,
                 trackers: status.trackers,
@@ -1581,6 +1650,13 @@ fn on_engine_event(rt: &mut Rt, ev: syncwatch_torrent::EngineEvent) -> Option<In
                 complete_message: prev_msg,
                 error: None,
             });
+            // Readiness at the room position goes to sync-core right after the progress.
+            rt.pending_window = Some(status.window.map(|w| WindowState {
+                ready: w.ready,
+                at_ms: w.at_ms as i64,
+                missing: w.missing,
+                permille: w.permille,
+            }));
             Some(Input::Core(Event::Torrent(TorrentEvent::Progress {
                 phase,
                 permille,
@@ -1645,15 +1721,13 @@ fn on_engine_event(rt: &mut Rt, ev: syncwatch_torrent::EngineEvent) -> Option<In
 }
 
 async fn after_step(rt: &mut Rt, session: &mut RoomSession, epoch: Instant) -> bool {
-    // The torrent's VBR byte map needs the duration once the player knows it.
-    if let (Some(ih), false, Some(d)) = (
-        rt.torrent,
-        rt.torrent_duration_sent,
-        rt.mirror.s.media_duration_ms,
-    ) && d > 0
+    // The torrent's time -> byte map needs the duration: the player's, or the host's
+    // (heartbeat) before this player opened the file (ADR 0012).
+    if let (Some(ih), Some(d)) = (rt.torrent, session.peer().local().media_duration_hint())
+        && rt.torrent_duration_sent != Some(d)
     {
-        rt.torrent_duration_sent = true;
-        rt.torrents.engine.duration(ih, Some(d as u64));
+        rt.torrent_duration_sent = Some(d);
+        rt.torrents.engine.duration(ih, Some(d));
     }
     let manifest = session.peer().local().tracks.desired.manifest.clone();
     rt.mirror.set_manifest(&manifest);
@@ -1940,7 +2014,7 @@ fn core_effect(rt: &mut Rt, session: &RoomSession, e: syncwatch_sync_core::Effec
                     .engine
                     .stop_nowait(old, syncwatch_torrent::StopReason::Switch);
             }
-            rt.torrent_duration_sent = false;
+            rt.torrent_duration_sent = None;
             rt.media.torrent_url = None;
             rt.mirror.event(format!("torrent started: {}", media.name));
             if session.is_host() {
@@ -1970,6 +2044,21 @@ fn core_effect(rt: &mut Rt, session: &RoomSession, e: syncwatch_sync_core::Effec
                 }
             }
         }
+        E::TorrentTarget {
+            infohash,
+            position_ms,
+            playing,
+            speed,
+            retarget,
+        } => rt.torrents.engine.room(
+            infohash,
+            syncwatch_torrent::RoomTarget {
+                ms: position_ms.max(0) as u64,
+                playing,
+                speed,
+                retarget,
+            },
+        ),
         E::StopTorrent { infohash } => {
             if rt.torrent == Some(infohash) {
                 rt.torrent = None;
@@ -2695,6 +2784,7 @@ mod tests {
             chat_muted: muted,
             connected,
             torrent: None,
+            wait: None,
         }
     }
 

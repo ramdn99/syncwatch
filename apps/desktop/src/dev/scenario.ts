@@ -302,14 +302,18 @@ export async function maybeRunScenario() {
   if (started) return;
   started = true;
   const cfg = await invoke<{ name: string; role: string; media: string | null; extra: string[] } | null>('dev_scenario').catch(() => null);
-  if (!cfg || !['chat', 'rooms', 'sync', 'chattime', 'late', 'popup', 'succession', 'torrent', 'skiprelay', 'torrentfile'].includes(cfg.name)) return;
+  if (!cfg || !['chat', 'rooms', 'sync', 'chattime', 'late', 'popup', 'succession', 'torrent', 'skiprelay', 'torrentfile', 'torrentgate'].includes(cfg.name)) return;
   const report: Report = (line) => void invoke('dev_scenario_report', { line });
   onRoomState((s) => (latest = s));
   report(`START ${cfg.role}`);
   try {
     const m6 = await import('./scenario6');
     const media = cfg.media ?? '';
-    if (cfg.name === 'torrentfile') {
+    if (cfg.name === 'torrentgate') {
+      const g = await import('./scenario7gate');
+      if (cfg.role === 'host') await g.gateHost(report, media, cfg.extra[0] ?? '');
+      else await g.gateMember(report);
+    } else if (cfg.name === 'torrentfile') {
       const m7 = await import('./scenario7');
       if (cfg.role === 'host') await m7.torrentFileHost(report, cfg.extra[0] ?? '', media, cfg.extra[1] ?? '');
       else if (cfg.role === 'late') await m7.torrentFileLate(report);

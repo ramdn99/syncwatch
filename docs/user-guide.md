@@ -19,9 +19,19 @@ Milestone 9.
   they see "Waiting for the host to get the file list" and start as soon as it arrives.
 - Everyone downloads their own copy and starts playing as soon as the beginning and the end of
   the file are there. Playback stays in sync while downloading.
-- **Seeking to a part that is not downloaded yet** pauses the room and shows "Buffering n%"
-  until enough has arrived. Then everyone continues together. Seeking back to downloaded parts
-  is instant.
+- **What counts is the part being played, not the total.** A member at 40% whose current part
+  is downloaded is ready and never makes the room wait. Every member's download always fetches
+  the part the room is playing first, also while it is still loading or waiting.
+- **Seeking to a part that is not downloaded yet** pauses the room until that part has
+  arrived. Then everyone continues together.
+  - The member who is missing it sees "Buffering 60%: at 12:30, needs ~3 MB more to continue".
+  - The host sees "Waiting for Bo: buffering at 12:30 (needs ~3 MB more)", with **Resume
+    without them**. The members list shows "buffering at 12:30, 60% of the window".
+  - The other members see "Waiting for Bo to catch up".
+
+  Seeking back to downloaded parts is instant.
+- The buffering message appears only when your own video really stops for missing data (after
+  a short moment), and disappears as soon as it plays again.
 - **No peers:** SyncWatch shows "waiting for peers" and retries by itself. What is already
   downloaded keeps playing.
 

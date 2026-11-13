@@ -145,17 +145,26 @@ export function ChangeSourceDialog(props: {
   useEffect(() => {
     if (!inTauri()) return;
     let un: (() => void) | undefined;
-    void import('@tauri-apps/api/webview').then(({ getCurrentWebview }) =>
-      getCurrentWebview()
-        .onDragDropEvent((ev) => {
+    let gone = false;
+    void (async () => {
+      try {
+        const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+        const u = await getCurrentWebview().onDragDropEvent((ev) => {
           const p = ev.payload.type === 'drop' ? ev.payload.paths[0] : undefined;
           if (!p) return;
           if (tab === 'magnet' && p.toLowerCase().endsWith('.torrent')) void openTorrentFile(p);
           else if (tab === 'local') setPath(p);
-        })
-        .then((u) => (un = u)),
-    );
-    return () => un?.();
+        });
+        if (gone) u();
+        else un = u;
+      } catch {
+        // No webview (tests, or the window is closing): the file picker still works.
+      }
+    })();
+    return () => {
+      gone = true;
+      un?.();
+    };
   }, [tab]);
 
   const confirm = () => {

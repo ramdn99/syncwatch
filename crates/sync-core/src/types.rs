@@ -95,8 +95,20 @@ pub enum TorrentEvent {
     },
     /// Enough is downloaded to start streaming (head/tail + pre-buffer).
     Playable,
+    /// Readiness at the ROOM position (ADR 0012): the read window plus the container pieces
+    /// are on disk (`ready`), or what is missing. `None`: not known yet.
+    Window(Option<WindowState>),
     /// Torrent engine not available (before Milestone 7) or failed.
     Unavailable,
+}
+
+/// This participant's read window at the room position (from the torrent engine).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowState {
+    pub ready: bool,
+    pub at_ms: MediaMs,
+    pub missing: u64,
+    pub permille: u16,
 }
 
 /// Local user actions.
@@ -248,6 +260,12 @@ pub enum UiEvent {
     Members(Vec<MemberInfo>),
     Permissions(Permissions),
     Gate(GateInfo),
+    /// THIS window's own player is stalled on missing data (the buffering popup), with what
+    /// it waits for when known (torrent window). Never about another member.
+    Stall {
+        stalled: bool,
+        wait: Option<BufferWait>,
+    },
     Notice(Notice),
     ExternalProgress {
         external_id: ExternalId,
@@ -284,6 +302,16 @@ pub enum Effect {
     StartTorrent {
         infohash: Infohash,
         file_index: u32,
+    },
+    /// The ROOM's position for the torrent engine (ADR 0012): it fetches that window first,
+    /// also before the player opened the file or while it waits at the gate. `retarget`:
+    /// room seek, media change, pause or resume.
+    TorrentTarget {
+        infohash: Infohash,
+        position_ms: MediaMs,
+        playing: bool,
+        speed: SpeedPermille,
+        retarget: bool,
     },
     /// Stop ALL traffic of this torrent (spec section 10).
     StopTorrent {
