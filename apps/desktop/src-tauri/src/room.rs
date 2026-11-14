@@ -889,6 +889,9 @@ impl Mirror {
                 self.s.file_status = None;
                 self.s.torrent = None;
                 self.s.confirm_magnet = None;
+                // "Choose my file" belongs to the previous local file: a torrent (or no media)
+                // has none; a new local file sets it again right after (ShowMissingFilePanel).
+                self.s.missing_file = None;
             }
             UiEvent::ConfirmMagnet {
                 name,
@@ -2771,6 +2774,25 @@ mod tests {
         }
         let all: std::collections::BTreeSet<&str> = ALL_VARIANTS.into_iter().collect();
         assert_eq!(seen, all, "the fixture must cover every room action");
+    }
+
+    #[test]
+    fn a_media_change_forgets_the_previous_missing_file() {
+        let mut mirror = Mirror::default();
+        mirror.apply(RoomUi::Core(UiEvent::MediaChanged {
+            title: Some("a.mkv".into()),
+        }));
+        mirror.apply(RoomUi::Core(UiEvent::ShowMissingFilePanel {
+            name: "a.mkv".into(),
+            size: 1,
+            duration_ms: None,
+        }));
+        assert!(mirror.s.missing_file.is_some());
+        // The host switches to a torrent: no "Choose a different file..." any more.
+        mirror.apply(RoomUi::Core(UiEvent::MediaChanged {
+            title: Some("film.mkv".into()),
+        }));
+        assert!(mirror.s.missing_file.is_none());
     }
 
     #[test]
