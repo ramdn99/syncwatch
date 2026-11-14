@@ -194,6 +194,13 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
     });
 
     let conn_paths = paths.clone();
+    let win_cfg = paths.config.clone();
+    let win_last: std::sync::Arc<
+        std::sync::Mutex<(Option<crate::window_state::WindowState>, std::time::Instant)>,
+    > = std::sync::Arc::new(std::sync::Mutex::new((
+        crate::window_state::load(&paths.config),
+        std::time::Instant::now(),
+    )));
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
@@ -217,6 +224,8 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             let window = app
                 .get_webview_window("main")
                 .ok_or("main window missing from tauri.conf.json")?;
+            // Persistence: the last window size and position (only if still on a monitor).
+            crate::window_state::restore(&window, &conn_paths.config);
             let main_hwnd = window.hwnd()?;
             crate::native::title_bar::apply(main_hwnd);
             let surface = VideoSurface::attach(main_hwnd, probe.clone())?;
@@ -302,6 +311,27 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             crate::bridge::bridge_attach,
             crate::bridge::bridge_in,
         ])
+        .on_window_event(move |w, ev| {
+            use tauri::WindowEvent as W;
+            if w.label() != "main" {
+                return;
+            }
+            let closing = matches!(ev, W::CloseRequested { .. });
+            if !(closing || matches!(ev, W::Moved(_) | W::Resized(_))) {
+                return;
+            }
+            if let Ok(mut g) = win_last.lock() {
+                // While dragging: at most every 0.5 s; always when closing.
+                if !closing && g.1.elapsed() < std::time::Duration::from_millis(500) {
+                    return;
+                }
+                if let Some(s) = crate::window_state::capture(w, g.0) {
+                    crate::window_state::save(&win_cfg, &s);
+                    g.0 = Some(s);
+                }
+                g.1 = std::time::Instant::now();
+            }
+        })
         .run(tauri::generate_context!());
 
     if let Err(e) = result {
