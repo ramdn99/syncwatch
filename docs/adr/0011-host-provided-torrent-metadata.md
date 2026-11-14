@@ -115,3 +115,14 @@ cause, until a 90 s timeout.
   handling. Torrents that live only on web seeds (typical for Internet Archive torrents) show
   "The torrent file was loaded, but no peers are sharing it yet. Its web seeds are not
   supported."
+
+## Succession check (2026-11-14)
+
+Window test `torrent-lab.ps1 -Scenario torrentsucc -SameIpDefault` (three windows, real crash):
+1. Host A shares the multi-file magnet; B and C accept; C leaves.
+2. A's process is killed. B takes over as host, and its torrent keeps streaming.
+3. C joins again. It sees "Member B" as host, accepts, and its player opens 251 ms later. The
+   only torrent phase it showed was "streaming", never "metadata": the file list came from the
+   new host, not from the swarm.
+
+All checks passed in all three windows.

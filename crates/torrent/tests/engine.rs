@@ -722,7 +722,7 @@ async fn a_member_re_dials_the_hosts_engine_within_seconds() {
         bytes.len() as u64,
         magnet(&sd.infohash, "r.mkv", &[]),
     );
-    let host_port = free_port();
+    let host_port = outside_ephemeral_port();
     // The member: no tracker, no DHT; only the host hint.
     let (member, mut mev) = EngineHandle::spawn(engine_cfg(dir.join("member"), free_port()));
     member.start_with_meta(
@@ -814,7 +814,7 @@ async fn a_member_connected_only_to_a_silent_peer_re_dials_the_host() {
         magnet(&sd.infohash, "s.mkv", &[]),
     );
     let silent = silent_peer(sd.infohash).await;
-    let host_port = free_port();
+    let host_port = outside_ephemeral_port();
     let (member, mut mev) = EngineHandle::spawn(engine_cfg(dir.join("member"), free_port()));
     // The room is at the start: the member needs that window (a Room cursor wants data).
     member.duration(sd.infohash, Some(60_000));
@@ -863,4 +863,25 @@ async fn a_member_connected_only_to_a_silent_peer_re_dials_the_host() {
     host.stop(sd.infohash, StopReason::Leave).await;
     member.stop(sd.infohash, StopReason::Leave).await;
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A free port OUTSIDE the OS ephemeral range: tests running in parallel get their ports from
+/// that range, so none of them takes this one while the test waits for the host's engine.
+fn outside_ephemeral_port() -> u16 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let mut x = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(7) as u64
+        | 1;
+    for _ in 0..200 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        let p = 21_000 + (x % 8_000) as u16;
+        if std::net::TcpListener::bind(("127.0.0.1", p)).is_ok() {
+            return p;
+        }
+    }
+    free_port()
 }

@@ -82,6 +82,7 @@ pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -Scenario torrentfile -UpKiB 1
 pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -SameIpDefault   (qBittorrent with one connection per IP: the ADR 0011 member bug setup)
 pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -Scenario torrentgate -SameIpDefault   (ADR 0012: ready gate at the room position, buffering popup; checks a-e)
 pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -Scenario torrentplay -SameIpDefault   (host plays first, member joins a playing room; late join at 40:00)
+pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -Scenario torrentsucc -SameIpDefault   (host crash in a torrent room: B takes over, C rejoins with the file list from B; 3 windows)
 cargo run -p syncwatch-player --example range_probe -- <file> <start_s> <seek_s>   (byte ranges mpv reads to open and seek; D:\libs\mpv on PATH)
 pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -Manual   (hands-on material: prints magnets and the .torrent path; key press or timeout cleans up)
 pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario skiprelay -Ice coturn

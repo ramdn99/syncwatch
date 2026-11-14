@@ -40,7 +40,7 @@ param(
     # source switches magnet -> local -> back (3 windows). torrentgate: ADR 0012 ready gate and
     # buffering popup checks (a)-(e) (2 windows; use with -SameIpDefault). torrentplay: the host
     # plays first and the member joins a playing room; playing part first, late join at 40:00.
-    [ValidateSet('torrent', 'torrentfile', 'torrentgate', 'torrentplay')][string]$Scenario = 'torrent',
+    [ValidateSet('torrent', 'torrentfile', 'torrentgate', 'torrentplay', 'torrentsucc')][string]$Scenario = 'torrent',
     # Hands-on test material: seed both test torrents, print the magnets and .torrent paths, keep
     # qBittorrent running until a key is pressed or -ManualMinutes pass, then clean up.
     [switch]$Manual,
@@ -245,9 +245,9 @@ foreach ($w in 'a', 'b', 'c') {
     if (Test-Path $f) { Get-Content $f | Where-Object { $_ -like 'TS *' } | ForEach-Object { $p = $_ -split ' '; $ts[$p[1]] = [int64]$p[2] } }
 }
 $rows = Import-Csv $csv | ForEach-Object { [pscustomobject]@{ t = [int64]$_.wallMs; up = [int64]$_.qbtUploaded; peers = [int]$_.qbtPeers; conns = [int]$_.connsQbtToUs; peer = [int]$_.peerConns; trk = [int]$_.trackerConns; udp = [int]$_.ourUdp; listen = $_.ourTcpListen; up2 = [int64]$_.qbtUploaded2; peers2 = [int]$_.qbtPeers2 } }
-if ($Scenario -in 'torrentgate', 'torrentplay') {
+if ($Scenario -in 'torrentgate', 'torrentplay', 'torrentsucc') {
     # The checks run inside the windows (PASS/FAIL lines above); here only qBittorrent's total.
-    foreach ($w in 'a', 'b') {
+    foreach ($w in $(if ($Scenario -eq 'torrentsucc') { 'a', 'b', 'c' } else { 'a', 'b' })) {
         $f = Join-Path $raw "scenario-$w.txt"
         if (Test-Path $f) {
             $bad = @(Get-Content $f | Where-Object { $_ -like 'FAIL*' })

@@ -283,6 +283,9 @@ the initial peers. Everyone else keeps the slow swarm retry (15 s, then every 30
 - **Lab run with this mitigation:** `torrentgate` passed (a) to (e) on both windows. While
   neither engine had the data yet (the far seek), the member re-dialed every 5 s. That churn is
   now backed off: 5, 10, 20, 40, then 60 s at most, reset as soon as data arrives.
+- **Limit:** if the hinted address answers TCP but never speaks BitTorrent (another program on
+  that port), a re-dial does not help. librqbit then reconnects on its own schedule, about
+  45–50 s in the tests. In the app the hint is always the host engine's own listen port.
 
 ### Container ranges, measured with mpv
 
