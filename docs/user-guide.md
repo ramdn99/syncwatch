@@ -49,6 +49,23 @@ SyncWatch cannot use **web seeds** (HTTP download addresses inside some torrents
 Internet Archive). A torrent that relies only on web seeds and has no peers will not download.
 The message then says so.
 
+### Two people on the same router
+
+People on the same home network usually share one public IP address. Many swarm clients
+(qBittorrent, Transmission and others based on libtorrent) accept only **one connection per IP
+address**. The first of you gets in; the second may be refused by those peers, or connected but
+never sent any data.
+
+What SyncWatch does about it:
+- **On the same computer** (two windows, as in testing): members never need the swarm. They get
+  the file list from the host, and download from the host's own torrent engine. If that link
+  is lost, or a peer is connected but sends nothing, SyncWatch reconnects to the host within a
+  few seconds.
+- **On other computers in the same network:** each member downloads from the swarm on its own.
+  SyncWatch does not tell members the host's local address, so a refused member depends on the
+  other peers in the swarm. With a large swarm this rarely matters. With a small swarm, start
+  the torrent on one computer first, or use a local file for everyone.
+
 ### When the download is complete
 
 SyncWatch says: **"Downloading and sharing have stopped. No further traffic."**
