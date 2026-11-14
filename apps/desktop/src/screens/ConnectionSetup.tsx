@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { RichText } from '../components/RichText';
 import { connection, looksLikeCredentialsUrl, type ConnectionStatus, type TestOutcome, type TestReport } from '../lib/connection';
+import { FIREWALL_FIRST_RUN } from '../strings/errors';
 import { Icon } from '../ui/icons';
 import {
   fetchErrors,
@@ -88,6 +89,11 @@ export function ConnectionSetup({ status, onDone, onBack }: { status: Connection
           Back
         </button>
         <h1 className="font-brand text-2xl font-bold">{setupText.title}</h1>
+        {!status.configured && (
+          <p className="mt-3 rounded-md border border-info/40 bg-info/10 px-3 py-2 text-sm text-info" data-testid="firewall-hint">
+            {FIREWALL_FIRST_RUN}
+          </p>
+        )}
         <p className="mt-2 text-muted">{setupText.intro}</p>
         {status.devBypass && <p className="mt-2 text-sm text-warning">{setupText.devBypass}</p>}
 

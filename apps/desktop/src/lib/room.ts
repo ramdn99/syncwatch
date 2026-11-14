@@ -132,6 +132,8 @@ export interface RoomState {
   confirmMagnet: { name: string; size: number; infohash: string; torrentName: string | null } | null;
   /** The buffering popup of THIS window's own player (never about another member). */
   stall: { stalled: boolean; wait: BufferWait | null };
+  /** The player could not open the room's video (damaged or unsupported file). */
+  loadError: boolean;
 }
 
 export interface GateWait {
@@ -198,6 +200,7 @@ export const EMPTY_ROOM: RoomState = {
   torrent: null,
   confirmMagnet: null,
   stall: { stalled: false, wait: null },
+  loadError: false,
 };
 
 export type RoomAction =

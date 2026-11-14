@@ -6,7 +6,7 @@ import { RoomEntryDialog } from './components/RoomDialogs';
 import { onRoomState, room } from './lib/room';
 import { ConnectionSetup } from './screens/ConnectionSetup';
 import { Home } from './screens/Home';
-import { Settings } from './screens/Settings';
+import { Settings, type Section } from './screens/Settings';
 
 type View = 'home' | 'setup' | 'settings' | 'room';
 
@@ -17,6 +17,14 @@ export function App() {
   const [entry, setEntry] = useState<'create' | 'join' | null>(null);
   // Every room gets a fresh room view (no UI state carries over from the previous room).
   const [roomSession, setRoomSession] = useState(0);
+  // Settings can open from a room (error actions) and come back to it.
+  const [settingsAt, setSettingsAt] = useState<Section>('Connection');
+  const viewRef = useRef<View>('home');
+  viewRef.current = view;
+  const openSettings = (s: Section) => {
+    setSettingsAt(s);
+    setView('settings');
+  };
   // While the Create/Join dialog is open it decides when to enter the room (it may show a
   // notice first).
   const entryOpen = useRef(false);
@@ -35,7 +43,7 @@ export function App() {
     });
     return onRoomState((s) => {
       if (s.sessionId) setRoomSession(s.sessionId);
-      if (s.active && !entryOpen.current) setView('room');
+      if (s.active && !entryOpen.current && viewRef.current !== 'settings') setView('room');
     });
   }, []);
 
@@ -75,16 +83,24 @@ export function App() {
         />
       );
     case 'settings':
-      return <Settings status={status} onReplace={() => setView('setup')} onBack={() => setView('home')} />;
+      return (
+        <Settings
+          key={settingsAt}
+          status={status}
+          initial={settingsAt}
+          onReplace={() => setView('setup')}
+          onBack={() => void room.state().then((s) => setView(s.active ? 'room' : 'home'))}
+        />
+      );
     case 'room':
-      return <RoomView key={roomSession} onLeave={() => setView('home')} />;
+      return <RoomView key={roomSession} onLeave={() => setView('home')} onOpenSettings={openSettings} />;
     default:
       return (
         <>
           <Home
             status={status}
             onSetup={() => setView('setup')}
-            onSettings={() => setView('settings')}
+            onSettings={() => openSettings('Connection')}
             onCreate={() => status.canConnect && setEntry('create')}
             onJoin={() => status.canConnect && setEntry('join')}
           />
@@ -92,6 +108,10 @@ export function App() {
             <RoomEntryDialog
               mode={entry}
               onClose={() => setEntry(null)}
+              onConnectionSettings={() => {
+                setEntry(null);
+                openSettings('Connection');
+              }}
               onEntered={() => {
                 setEntry(null);
                 setView('room');

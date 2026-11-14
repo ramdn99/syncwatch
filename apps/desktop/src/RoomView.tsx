@@ -17,7 +17,11 @@ import { DiagnosticsDialog, type UiErrorEntry } from './components/Diagnostics';
 import { EMPTY_ROOM, endText, formatCode, friendlyError, onRoomState, PASSWORD_IGNORED_TEXT, chatBlockedReason, gateBannerText, room, type RoomAction, type RoomState } from './lib/room';
 import { chatLines, markerSeconds } from './lib/chat';
 import type { TrackSelection } from './lib/player';
-import { prefs as appPrefs } from './screens/Settings';
+import { prefs as appPrefs, type Section } from './screens/Settings';
+import { ErrorBanner } from './components/ErrorBanner';
+import { connection } from './lib/connection';
+import { roomErrors } from './lib/errors';
+import { FIREWALL_HINT_AFTER_MS, type ErrorAction, type ErrorId } from './strings/errors';
 import { Icon } from './ui/icons';
 
 const EMPTY_STATE: PlaybackState = {
@@ -37,7 +41,7 @@ const VIDEO_EXT = ['mkv', 'mp4', 'webm', 'avi', 'mov', 'm4v', 'ts', 'm2ts', 'wmv
 const SUB_EXT = ['ass', 'ssa', 'srt', 'vtt', 'sub', 'sup', 'idx'];
 const AUDIO_EXT = ['mka', 'aac', 'ac3', 'eac3', 'dts', 'flac', 'mp3', 'opus', 'ogg', 'wav', 'm4a', 'thd'];
 
-export function RoomView({ onLeave }: { onLeave: () => void }) {
+export function RoomView({ onLeave, onOpenSettings }: { onLeave: () => void; onOpenSettings?: (s: Section) => void }) {
   const [prefs, setPrefs] = useState<LayoutPrefs>(loadPrefs);
   const [fullscreen, setFullscreen] = useState(false);
   const [winWidth, setWinWidth] = useState(() => window.innerWidth);
@@ -46,6 +50,8 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [mediaKey, setMediaKey] = useState('none');
   const [rs, setRs] = useState<RoomState>(EMPTY_ROOM);
+  const rsRef = useRef(rs);
+  rsRef.current = rs;
   const gateBanner = useDelayedTrue(rs.active && gateBannerText(rs.gate, rs.me, rs.isHost) != null, GATE_BANNER_DELAY_MS);
   const [toasts, setToasts] = useState<{ id: number; text: string }[]>([]);
   const [dismissedPanel, setDismissedPanel] = useState(0);
@@ -54,6 +60,27 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
   const [ignoredDismissed, setIgnoredDismissed] = useState(false);
   const [noLimit, setNoLimit] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [dismissed, setDismissed] = useState<ReadonlySet<ErrorId>>(new Set());
+  // Firewall hint: a member whose link stays "connecting" for a long time.
+  const connectingSince = useRef(new Map<number, number>());
+  const [slowLink, setSlowLink] = useState(false);
+  useEffect(() => {
+    const t = setInterval(() => {
+      const now = Date.now();
+      const m = connectingSince.current;
+      let slow = false;
+      for (const x of rsRef.current.members) {
+        const waiting = !x.isYou && (x.link === 'connecting' || x.link === 'authenticating');
+        if (!waiting) m.delete(x.id);
+        else {
+          if (!m.has(x.id)) m.set(x.id, now);
+          if (now - m.get(x.id)! >= FIREWALL_HINT_AFTER_MS) slow = true;
+        }
+      }
+      setSlowLink(slow);
+    }, 1000);
+    return () => clearInterval(t);
+  }, []);
   // Settings, Files: "No limit" can be the default for new rooms.
   useEffect(() => {
     void appPrefs
@@ -409,6 +436,35 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
     target.addEventListener('pointerup', up);
   };
 
+  const onErrorAction = (a: ErrorAction) => {
+    switch (a) {
+      case 'chooseFile':
+        if (isHost) setChangeSource({});
+        else void chooseMyFile();
+        break;
+      case 'changeSource':
+        setChangeSource({});
+        break;
+      case 'showTracks':
+        setPrefs((p) => ({ ...p, rightCollapsed: false }));
+        break;
+      case 'alwaysRelay':
+        void connection.setRelayOnly(true);
+        break;
+      case 'networkSettings':
+        onOpenSettings?.('Network');
+        break;
+      case 'filesSettings':
+        onOpenSettings?.('Files');
+        break;
+      case 'connectionSettings':
+        onOpenSettings?.('Connection');
+        break;
+      case 'retry':
+        break;
+    }
+  };
+
   const markers = markerSeconds(chat);
 
   return (
@@ -506,6 +562,10 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
           )}
         </div>
       )}
+      {rs.active &&
+        roomErrors(rs, slowLink)
+          .filter((id) => !dismissed.has(id))
+          .map((id) => <ErrorBanner key={id} id={id} onAction={(a) => onErrorAction(a)} onDismiss={() => setDismissed((d) => new Set(d).add(id))} />)}
       {error && (
         <div role="alert" className="flex items-center gap-3 bg-danger/15 px-3 py-1.5 text-sm text-danger">
           <span className="flex-1">{error}</span>

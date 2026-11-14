@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { endText, friendlyError, loadName, PASSWORD_IGNORED_TEXT, room, saveName } from '../lib/room';
+import { ERRORS, isNoServer } from '../strings/errors';
 
 /** Create or join a room: display name, (code), optional password. */
-export function RoomEntryDialog(props: { mode: 'create' | 'join'; onClose: () => void; onEntered: () => void }) {
+export function RoomEntryDialog(props: { mode: 'create' | 'join'; onClose: () => void; onEntered: () => void; onConnectionSettings?: () => void }) {
   const [name, setName] = useState(loadName);
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
@@ -86,7 +87,25 @@ export function RoomEntryDialog(props: { mode: 'create' | 'join'; onClose: () =>
             </span>
           )}
         </label>
-        {error && (
+        {error && isNoServer(error) && (
+          <div role="alert" className="space-y-2 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger" data-testid="error-noServer">
+            <p>
+              <span className="font-medium">{ERRORS.noServer.title}.</span> {ERRORS.noServer.text}
+            </p>
+            <p className="text-xs text-muted">{error}</p>
+            <div className="flex gap-3">
+              <button type="submit" className="text-text underline" disabled={busy}>
+                {ERRORS.noServer.action!.label}
+              </button>
+              {props.onConnectionSettings && (
+                <button type="button" className="text-text underline" onClick={props.onConnectionSettings}>
+                  Connection settings...
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+        {error && !isNoServer(error) && (
           <p role="alert" className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
             {error}
           </p>

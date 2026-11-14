@@ -364,6 +364,8 @@ pub struct RoomStateDto {
     confirm_magnet: Option<ConfirmMagnetDto>,
     /// The buffering popup of this window's own player (ADR 0012).
     stall: StallDto,
+    /// The player could not open the room's video (damaged or unsupported file).
+    load_error: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -892,6 +894,7 @@ impl Mirror {
                 // "Choose my file" belongs to the previous local file: a torrent (or no media)
                 // has none; a new local file sets it again right after (ShowMissingFilePanel).
                 self.s.missing_file = None;
+                self.s.load_error = false;
             }
             UiEvent::ConfirmMagnet {
                 name,
@@ -1392,6 +1395,16 @@ async fn drive(
             pe = ch.pl.recv() => pe.and_then(|ev| {
                 // The torrent stream is open: from now on only the ranges the player read to
                 // open it count for readiness (not the start-up range).
+                match &ev {
+                    syncwatch_player::PlayerEvent::FileLoaded { .. } => rt.mirror.s.load_error = false,
+                    syncwatch_player::PlayerEvent::EndFile {
+                        reason: syncwatch_player::EndReason::Error,
+                    } => {
+                        rt.mirror.s.load_error = true;
+                        rt.mirror.event("the player could not open the video");
+                    }
+                    _ => {}
+                }
                 if let (syncwatch_player::PlayerEvent::FileLoaded { .. }, Some(ih), Some(_)) =
                     (&ev, rt.torrent, rt.media.torrent_url.as_ref())
                 {
