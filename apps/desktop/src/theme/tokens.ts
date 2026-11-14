@@ -18,6 +18,7 @@ export const tokens = {
   warning: '#E8A33D',
   danger: '#F26B6B',
   info: '#6AA8F7',
+  borderControl: '#6E6E7A',
   letterbox: '#000000',
 } as const;
 

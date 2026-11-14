@@ -166,7 +166,7 @@ export function ConnectionSetup({ status, onDone, onBack }: { status: Connection
   );
 }
 
-const inputCls = 'w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-text placeholder:text-disabled focus:border-accent focus:outline-none';
+const inputCls = 'w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-text placeholder:text-muted focus:border-accent focus:outline-none';
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (

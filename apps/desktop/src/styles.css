@@ -42,8 +42,11 @@
   --color-warning: #e8a33d;
   --color-danger: #f26b6b;
   --color-info: #6aa8f7;
-  --font-sans: 'Inter', 'Segoe UI', system-ui, sans-serif;
-  --font-brand: 'Space Grotesk', 'Inter', 'Segoe UI', system-ui, sans-serif;
+  /* Outline of form controls (WCAG 1.4.11: 3:1 against every panel). */
+  --color-border-control: #6e6e7a;
+  /* Bundled fonts only (public/fonts); the generic family is a last resort. */
+  --font-sans: 'Inter', sans-serif;
+  --font-brand: 'Space Grotesk', 'Inter', sans-serif;
 }
 
 :root {
@@ -76,6 +79,22 @@ body,
 :focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 1px;
+}
+
+/* Unlayered on purpose: wins over the border-border utility on every form control. */
+input:not([type='checkbox']):not([type='radio']):not([type='range']),
+select,
+textarea {
+  border-color: var(--color-border-control);
+}
+input[aria-invalid='true'],
+textarea[aria-invalid='true'] {
+  border-color: var(--color-danger);
+}
+input[type='checkbox'],
+input[type='radio'],
+input[type='range'] {
+  accent-color: var(--color-accent);
 }
 
 .scrim {

@@ -13,7 +13,7 @@ describe('dark theme tokens', () => {
       bg: '--color-bg', surface: '--color-surface', elevated: '--color-elevated', border: '--color-border',
       text: '--color-text', muted: '--color-muted', disabled: '--color-disabled', accent: '--color-accent',
       accentHover: '--color-accent-hover', accentPressed: '--color-accent-pressed', onAccent: '--color-on-accent',
-      success: '--color-success', warning: '--color-warning', danger: '--color-danger', info: '--color-info',
+      borderControl: '--color-border-control', success: '--color-success', warning: '--color-warning', danger: '--color-danger', info: '--color-info',
     };
     for (const [name, cssVar] of Object.entries(pairs)) {
       const value = tokens[name as keyof typeof tokens].toLowerCase();

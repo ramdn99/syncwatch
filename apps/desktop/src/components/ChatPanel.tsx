@@ -118,7 +118,7 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(functio
                   </span>
                   {m.isHost && <span className="rounded bg-accent px-1 text-[10px] font-bold text-on-accent">HOST</span>}
                   {m.chip == null ? (
-                    <span className="text-[11px] text-disabled" data-testid="chip-none">
+                    <span className="text-[11px] text-muted" data-testid="chip-none">
                       no timestamp
                     </span>
                   ) : m.seekMs != null ? (
@@ -140,7 +140,7 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(functio
                       {m.chip}
                     </span>
                   )}
-                  <span className="tabular ml-auto text-xs text-disabled">{m.wallTime}</span>
+                  <span className="tabular ml-auto text-xs text-muted">{m.wallTime}</span>
                   {onDelete && (
                     <button
                       type="button"
@@ -190,7 +190,7 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(functio
             disabled={disabledReason != null}
             placeholder={disabledReason ?? 'Message (Enter to send)'}
             aria-label="Chat message"
-            className="w-full resize-none rounded-md border border-border bg-elevated px-2 py-1.5 text-sm text-text placeholder:text-disabled focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+            className="w-full resize-none rounded-md border border-border bg-elevated px-2 py-1.5 text-sm text-text placeholder:text-muted focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {

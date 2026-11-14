@@ -119,7 +119,7 @@ export function DiagnosticsDialog({ rs, uiErrors, onClose }: { rs: RoomState; ui
             <ol className="tabular space-y-0.5 font-mono text-xs text-muted">
               {[...rs.diag.events].reverse().map((e, i) => (
                 <li key={i}>
-                  <span className="text-disabled">+{e.t.toFixed(1)} s</span> {e.text}
+                  <span className="tabular text-muted">+{e.t.toFixed(1)} s</span> {e.text}
                 </li>
               ))}
             </ol>
