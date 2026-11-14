@@ -1181,11 +1181,13 @@ async fn start(app: AppHandle, name: String, mode: Mode) -> Result<EntryOutcome,
     let sig = SignalingConn::connect(&url)
         .await
         .map_err(|e| e.to_string())?;
+    let prefs = app.state::<crate::prefs::PrefsService>().get();
     let cfg = SessionConfig {
         key: m.key.clone(),
         display_name: name,
         ice,
         max_members: limits::MAX_MEMBERS as u8,
+        gate_timeout_us: Some(prefs.gate_timeout_us()),
     };
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (tr_tx, tr_rx) = mpsc::unbounded_channel();
@@ -1347,7 +1349,19 @@ async fn drive(
     let (mut session, outs) = match mode {
         Mode::Create { password } => {
             rt.mirror.s.has_password = password.is_some();
-            RoomSession::create(cfg, password, clock(epoch))
+            let (mut s, mut outs) = RoomSession::create(cfg, password, clock(epoch));
+            // Room defaults (Settings): who controls playback in a new room.
+            let preset = rt.app.state::<crate::prefs::PrefsService>().get().preset;
+            if preset == "onlyMe" {
+                outs.extend(s.handle(
+                    clock(epoch),
+                    Input::Action(Action::Ui(UiAction::ApplyPreset {
+                        preset: Preset::OnlyMe,
+                        custom: Permissions::ALL,
+                    })),
+                ));
+            }
+            (s, outs)
         }
         Mode::Join { room, password } => RoomSession::join(cfg, room, password, clock(epoch)),
     };
@@ -2893,6 +2907,7 @@ mod tests {
             display_name: "H".into(),
             ice: IceConfig::default(),
             max_members: 12,
+            gate_timeout_us: None,
         };
         let clock = Clock {
             mono_us: 5_000_000,
@@ -3063,5 +3078,106 @@ mod tests {
         assert!(texts.contains(&"Mo joined"));
         assert!(texts.contains(&"Mo dropped (seat kept 20 s)"));
         assert!(texts.contains(&"Mo left"));
+    }
+}
+
+/// "2026-11-14 12:34:56 UTC" for a Unix time in ms (no date crate needed).
+fn utc_text(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let (days, sod) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Civil date from days since 1970-01-01 (H. Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} UTC",
+        sod / 3600,
+        sod % 3600 / 60,
+        sod % 60
+    )
+}
+
+/// The current room's chat as plain text (one line per message, "Now playing" dividers).
+fn chat_text(s: &RoomStateDto) -> (String, usize) {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let mut n = 0;
+    for c in &s.chat {
+        match &c.divider {
+            Some(d) => {
+                let _ = writeln!(out, "--- {d} ---");
+            }
+            None => {
+                n += 1;
+                let host = if c.is_host { " (host)" } else { "" };
+                let _ = writeln!(
+                    out,
+                    "[{}] {}{host}: {}",
+                    utc_text(c.wall_ms),
+                    c.name,
+                    c.text
+                );
+            }
+        }
+    }
+    (out, n)
+}
+
+/// Settings, Chat: export the CURRENT room's chat to a text file the user chose (nothing from
+/// a room is kept by the app itself, ADR 0006). Returns the number of messages written.
+#[tauri::command]
+pub fn room_chat_export(m: State<'_, RoomManager>, path: String) -> Result<usize, String> {
+    let s = m
+        .state
+        .lock()
+        .map_err(|_| "Busy, try again.".to_string())?
+        .clone();
+    if !s.active {
+        return Err("Join a room first: only the current room's chat can be exported.".into());
+    }
+    let (text, n) = chat_text(&s);
+    std::fs::write(&path, text).map_err(|_| "Could not write the file.".to_string())?;
+    Ok(n)
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    #[test]
+    fn utc_text_and_chat_export_format() {
+        assert_eq!(utc_text(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(utc_text(1_794_653_505_775), "2026-11-14 10:51:45 UTC");
+        assert_eq!(utc_text(951_782_400_000), "2000-02-29 00:00:00 UTC");
+        let msg = |name: &str, text: &str, host: bool| ChatDto {
+            id: 1,
+            sender: 1,
+            name: name.into(),
+            is_host: host,
+            text: text.into(),
+            wall_ms: 0,
+            media_time_ms: None,
+            media_epoch: 0,
+            divider: None,
+        };
+        let mut s = RoomStateDto::default();
+        s.chat.push(ChatDto {
+            divider: Some("Now playing: a.mkv".into()),
+            ..msg("", "", false)
+        });
+        s.chat.push(msg("Ana", "hi", true));
+        s.chat.push(msg("Bo", "hello", false));
+        let (t, n) = chat_text(&s);
+        assert_eq!(n, 2);
+        assert_eq!(
+            t,
+            "--- Now playing: a.mkv ---\n[1970-01-01 00:00:00 UTC] Ana (host): hi\n[1970-01-01 00:00:00 UTC] Bo: hello\n"
+        );
     }
 }

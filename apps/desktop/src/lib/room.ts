@@ -264,7 +264,7 @@ export const ROOM_ACTION_EXAMPLES: { [K in RoomAction['type']]: Extract<RoomActi
 /** The arguments object passed to invoke('room_action', ...). */
 export const roomActionArgs = (action: RoomAction) => ({ action });
 
-const call = <T>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
+export const call = <T>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
   inTauri() ? invoke<T>(cmd, args) : Promise.reject(new Error('Rooms need the desktop app.'));
 
 export const room = {

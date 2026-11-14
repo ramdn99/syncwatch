@@ -6,7 +6,7 @@ import { RoomEntryDialog } from './components/RoomDialogs';
 import { onRoomState, room } from './lib/room';
 import { ConnectionSetup } from './screens/ConnectionSetup';
 import { Home } from './screens/Home';
-import { SettingsConnection } from './screens/SettingsConnection';
+import { Settings } from './screens/Settings';
 
 type View = 'home' | 'setup' | 'settings' | 'room';
 
@@ -75,7 +75,7 @@ export function App() {
         />
       );
     case 'settings':
-      return <SettingsConnection status={status} onReplace={() => setView('setup')} onBack={() => setView('home')} />;
+      return <Settings status={status} onReplace={() => setView('setup')} onBack={() => setView('home')} />;
     case 'room':
       return <RoomView key={roomSession} onLeave={() => setView('home')} />;
     default:

@@ -2,10 +2,9 @@ import { useState } from 'react';
 import { connection, type ConnectionStatus, type TestReport } from '../lib/connection';
 import { settingsText, statusText } from '../strings/connection-help';
 import { Results } from './ConnectionSetup';
-import { TorrentSettingsSection } from '../components/TorrentSettings';
-import { Icon } from '../ui/icons';
 
-export function SettingsConnection({ status, onReplace, onBack }: { status: ConnectionStatus; onReplace: () => void; onBack: () => void }) {
+/** Settings · Connection (Metered TURN/STUN): status, test, replace, remove. */
+export function SettingsConnection({ status, onReplace }: { status: ConnectionStatus; onReplace: () => void }) {
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState<TestReport | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
@@ -23,15 +22,8 @@ export function SettingsConnection({ status, onReplace, onBack }: { status: Conn
   };
 
   return (
-    <div className="h-full overflow-y-auto bg-bg">
-      <div className="mx-auto max-w-2xl px-6 py-8">
-        <button type="button" className="mb-4 inline-flex items-center gap-1 text-sm text-muted hover:text-text" onClick={onBack}>
-          <Icon name="back" />
-          Back
-        </button>
-        <h1 className="font-brand text-2xl font-bold">Settings · {settingsText.title}</h1>
-
-        <section className="mt-6 rounded-xl border border-border bg-elevated p-5">
+    <>
+        <section className="rounded-xl border border-border bg-elevated p-5" aria-label={settingsText.title}>
           <p className={`font-medium ${status.verified ? 'text-success' : status.configured ? 'text-warning' : 'text-muted'}`}>
             {status.verified ? statusText.verified : status.configured ? statusText.notVerified : statusText.notConfigured}
             {verifiedAt && <span className="ml-2 text-xs text-muted">({verifiedAt})</span>}
@@ -84,19 +76,7 @@ export function SettingsConnection({ status, onReplace, onBack }: { status: Conn
           )}
         </section>
 
-        <section className="mt-6 rounded-xl border border-border bg-elevated p-5">
-          <label className="flex items-start gap-3">
-            <input type="checkbox" className="mt-1 accent-[#E8A33D]" checked={status.relayOnly} onChange={(e) => void connection.setRelayOnly(e.target.checked)} />
-            <span>
-              <span className="font-medium">{settingsText.relayOnly}</span>
-              <span className="block text-sm text-muted">{settingsText.relayOnlyHint}</span>
-            </span>
-          </label>
-          <p className="mt-3 text-xs text-muted">{settingsText.torrentNote}</p>
-        </section>
-        <TorrentSettingsSection />
-      </div>
-    </div>
+    </>
   );
 }
 

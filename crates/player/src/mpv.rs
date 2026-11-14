@@ -30,6 +30,8 @@ pub struct MpvConfig {
     pub sub_fonts_dir: Option<PathBuf>,
     /// Hardware decoding mode; `auto-safe` with software fallback by default.
     pub hwdec: String,
+    /// Text subtitle scale (mpv `sub-scale`, 1.0 = normal). Image subtitles are not scaled.
+    pub sub_scale: f64,
 }
 
 impl MpvConfig {
@@ -38,6 +40,7 @@ impl MpvConfig {
             wid,
             sub_fonts_dir: None,
             hwdec: "auto-safe".to_owned(),
+            sub_scale: 1.0,
         }
     }
 }
@@ -58,6 +61,11 @@ fn init_options(cfg: &MpvConfig) -> Vec<(&'static str, String, bool)> {
         ("keep-open", "yes".into(), true),
         ("pause", "yes".into(), true),
         ("hwdec", cfg.hwdec.clone(), false),
+        (
+            "sub-scale",
+            format!("{:.2}", cfg.sub_scale.clamp(0.5, 2.0)),
+            false,
+        ),
         ("background-color", "#000000".into(), false),
         // Cache tuning (ADR 0012). A real stall pauses cleanly (cache-pause), and playback
         // resumes only once 2 s are buffered again (cache-pause-wait), so data arriving at about
@@ -470,5 +478,28 @@ mod tests {
         assert_eq!(get("cache-pause-wait").as_deref(), Some("2"));
         assert_eq!(get("cache-pause-initial").as_deref(), Some("no"));
         assert_eq!(get("demuxer-readahead-secs").as_deref(), Some("20"));
+    }
+
+    #[test]
+    fn playback_preferences_reach_mpv() {
+        let mut c = MpvConfig::new(1);
+        c.hwdec = "no".into();
+        c.sub_scale = 1.5;
+        let o = init_options(&c);
+        let get = |k: &str| {
+            o.iter()
+                .find(|(n, _, _)| *n == k)
+                .map(|(_, v, _)| v.clone())
+        };
+        assert_eq!(get("hwdec").as_deref(), Some("no"));
+        assert_eq!(get("sub-scale").as_deref(), Some("1.50"));
+        c.sub_scale = 9.0;
+        assert_eq!(
+            init_options(&c)
+                .iter()
+                .find(|(n, _, _)| *n == "sub-scale")
+                .map(|(_, v, _)| v.as_str()),
+            Some("2.00")
+        );
     }
 }

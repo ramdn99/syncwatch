@@ -61,6 +61,7 @@ fn cfg(name: &str, seed: u8) -> SessionConfig {
         display_name: name.into(),
         ice: IceConfig::default(),
         max_members: 12,
+        gate_timeout_us: None,
     }
 }
 

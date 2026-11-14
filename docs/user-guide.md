@@ -105,3 +105,32 @@ saved; the reason is shown under the field.
 **Your responsibility:** you are responsible for what you stream. Only use torrents you have
 the right to download and share. While a torrent downloads, other people in its swarm can see
 your IP address.
+
+## Settings
+
+Open **Settings** on the home screen. The sections are:
+
+- **Connection:** the relay setup (Metered): status, test, replace, remove.
+- **Playback:**
+  - **Hardware decoding:** on by default, with a safe software fallback.
+  - **Subtitle size:** 50–200%, for text subtitles only. Image subtitles (PGS, VobSub) keep
+    their own size.
+  - **Buffering:** how it works (fixed values).
+
+  Hardware decoding and subtitle size apply the next time SyncWatch starts.
+- **Room defaults:**
+  - who controls playback in a new room (Everyone or Only me);
+  - how long the room waits for members after a seek or a pause for buffering (5–120 s,
+    default 15).
+- **Chat:**
+  - the limits: 500 characters, 5 messages in 5 seconds, a slow mode set by the host, and the
+    history;
+  - **Export this room's chat...**, which saves the current room's chat as a text file.
+    Nothing from a room is kept otherwise.
+- **Files:**
+  - the size ceilings for added subtitle files (20 MB) and audio files (1 GB), and **No
+    limit** as the default for new rooms;
+  - the torrent cache, the largest torrent file list, and the buffering window.
+- **Network:** **Always use relay**, the incoming torrent port, the bind address, and DHT.
+- **About:** the version, the GPL notice, the third-party licenses, and **Copy diagnostics**,
+  which copies a report with credentials, keys, tokens and IP addresses removed.

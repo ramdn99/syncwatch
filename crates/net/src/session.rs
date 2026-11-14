@@ -46,6 +46,8 @@ pub struct SessionConfig {
     pub display_name: String,
     pub ice: IceConfig,
     pub max_members: u8,
+    /// Host: the ready gate's timeout (Settings, Room defaults); `None` = the default.
+    pub gate_timeout_us: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -275,6 +277,9 @@ impl RoomSession {
     ) -> (Self, Vec<Output>) {
         let mut hc = HostConfig::new(cfg.key.public(), &cfg.display_name);
         hc.max_members = cfg.max_members as usize;
+        if let Some(t) = cfg.gate_timeout_us {
+            hc.gate_timeout_us = t;
+        }
         // The app enforces the external-file ceilings itself (with the host's No-limit option).
         hc.max_external_sub = None;
         hc.max_external_audio = None;

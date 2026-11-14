@@ -199,6 +199,7 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
         .setup(move |app| {
             syncwatch_ice_config::install_crypto_provider();
             app.manage(crate::connection::ConnectionManager::new(&conn_paths));
+            app.manage(crate::prefs::PrefsService::load(&conn_paths));
             crate::connection::spawn_background_retest(app.handle().clone());
             tracing::info!(signaling_url = %syncwatch_net::signaling::configured_url(), "signaling server for this instance");
             let (bridge, events) = crate::bridge::Bridge::start(app.handle())?;
@@ -224,6 +225,10 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             if fonts_dir.is_dir() {
                 cfg.sub_fonts_dir = Some(fonts_dir.clone());
             }
+            // Playback preferences (Settings, Playback): applied when mpv starts.
+            let prefs = app.state::<crate::prefs::PrefsService>().get();
+            cfg.hwdec = prefs.mpv_hwdec().to_owned();
+            cfg.sub_scale = f64::from(prefs.sub_scale_pct) / 100.0;
             let (player, rx) = MpvPlayer::new(cfg).map_err(|e| e.to_string())?;
             forward_events(app.handle().clone(), rx);
             app.manage(AppState {
@@ -274,6 +279,9 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             crate::room::room_set_torrent_file,
             crate::torrent::torrent_settings_get,
             crate::torrent::torrent_settings_set,
+            crate::prefs::prefs_get,
+            crate::prefs::prefs_set,
+            crate::room::room_chat_export,
             crate::room::room_set_torrent_media,
             crate::room::room_create,
             crate::room::room_join,

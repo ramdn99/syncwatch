@@ -16,6 +16,7 @@ import { DiagnosticsDialog, type UiErrorEntry } from './components/Diagnostics';
 import { EMPTY_ROOM, endText, formatCode, friendlyError, onRoomState, PASSWORD_IGNORED_TEXT, chatBlockedReason, gateBannerText, room, type RoomAction, type RoomState } from './lib/room';
 import { chatLines, markerSeconds } from './lib/chat';
 import type { TrackSelection } from './lib/player';
+import { prefs as appPrefs } from './screens/Settings';
 import { Icon } from './ui/icons';
 
 const EMPTY_STATE: PlaybackState = {
@@ -51,6 +52,13 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
   const [uiErrors, setUiErrors] = useState<UiErrorEntry[]>([]);
   const [ignoredDismissed, setIgnoredDismissed] = useState(false);
   const [noLimit, setNoLimit] = useState(false);
+  // Settings, Files: "No limit" can be the default for new rooms.
+  useEffect(() => {
+    void appPrefs
+      .get()
+      .then((p) => setNoLimit(p.noLimitDefault))
+      .catch(() => {});
+  }, []);
   const [relayedAsk, setRelayedAsk] = useState<{ kind: 'audio' | 'sub'; path: string; members: string[]; size: number } | null>(null);
   const [overlayInput, setOverlayInput] = useState(false);
   const [error, setError] = useState<string | null>(null);

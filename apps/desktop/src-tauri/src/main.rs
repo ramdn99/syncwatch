@@ -9,6 +9,7 @@ mod media;
 mod native;
 mod netlab;
 mod paths;
+mod prefs;
 mod room;
 mod roommedia;
 #[cfg(test)]
