@@ -2,4 +2,5 @@
 [advisories]
 # ringbuf 0.4.8 via librqbit-utp 0.7.0: unreachable (u8-only ring buffer; uTP disabled, our
 # sessions listen TcpOnly). See deny.toml and docs/build-guide.md "Upgrading librqbit".
+# Re-checked 2026-11-14: still required (librqbit 9.1.0 -> librqbit-utp 0.7.0 -> ringbuf 0.4.x).
 ignore = ["RUSTSEC-2026-0293"]

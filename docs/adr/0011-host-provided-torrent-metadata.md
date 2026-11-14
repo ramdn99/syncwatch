@@ -96,6 +96,16 @@ cause, until a 90 s timeout.
 - librqbit 9.0.1 has no web-seed (BEP 19 `url-list`) support. Our parser keeps at most 8
   validated http/https web-seed URLs, only so that the count can drive the message "The torrent
   file was loaded, but no peers are sharing it yet. Its web seeds are not supported."
+- **Public check 2 (2026-11-14, 60 s, trackers only, DHT off, `inspect_torrent`):**
+  - **Torrent:** Blender's "Sintel" (CC BY 3.0), from the WebTorrent project's
+    `sintel.torrent` (20.8 KB).
+  - **Parsing:** our parser accepted it: 11 files (10 subtitles and a poster, plus
+    `Sintel/Sintel.mp4`, 129,241,752 bytes), 1 web seed.
+  - **Download:** only the MP4 was selected and downloaded. The trackers gave up to 30 TCP
+    peers, mostly at 0.3–1.5 MB/s. The file completed inside the 60 s.
+  - **After completion:** the engine stopped, "stopped" was sent to the trackers, and the
+    engine shut down.
+  - **Cleanup:** the temporary folder was removed by the tool.
 - **Internet Archive check (2026-11-12, about 60 s, trackers only, DHT off):**
   `SteamboatWillie_archive.torrent` (4.7 KB) parsed fine. It has 6 files, 2 of them video;
   2 trackers (bt1/bt2.archive.org); and 2 web seeds. Its trackers returned one peer, which

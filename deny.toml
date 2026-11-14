@@ -28,7 +28,9 @@ ignore = [
   # semver-incompatible bump only librqbit-utp can make). Not reachable for us: (1) librqbit-utp
   # stores only u8 in it (SharedRb<Heap<u8>>), and the bug needs an element Drop that panics;
   # (2) our sessions listen TcpOnly, so no uTP socket exists and uTP never runs. Re-check on
-  # every librqbit upgrade (docs/build-guide.md, "Upgrading librqbit").
+  # every librqbit upgrade (docs/build-guide.md, "Upgrading librqbit"). Re-checked 2026-11-14:
+  # ringbuf is fixed in >= 0.5.2 (latest 0.6.0), but librqbit-utp is still 0.7.0 (ringbuf
+  # "0.4.7"), and librqbit 9.1.0 still depends on librqbit-utp 0.7: upgrading would not help.
   { id = "RUSTSEC-2026-0293", reason = "u8-only ring buffer in librqbit-utp; uTP disabled (TcpOnly)" },
 ]
 
