@@ -42,7 +42,38 @@ pub struct ReadReport {
     pub pos: u64,
     pub new_request: bool,
     pub seq: u64,
+    /// Response bodies still being served: the player is still reading (or waiting) there.
+    pub open: u32,
 }
+
+/// One player request as served: [start, end) read so far; `open` while it is being served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadSpan {
+    /// Request order (increasing).
+    pub seq: u64,
+    pub start: u64,
+    pub end: u64,
+    pub open: bool,
+}
+
+/// Bytes a request must read before it counts as playback (an index read is shorter).
+pub const PLAYBACK_SPAN_MIN: u64 = 1024 * 1024;
+
+/// Where playback resumed after a seek: the start of the first request made after the seek
+/// (`seq >= floor`) that read at least [`PLAYBACK_SPAN_MIN`]. mpv's first request after a
+/// seek is often the index (MKV Cues at the end), never a time -> byte sample (ADR 0012).
+pub fn playback_start_after(spans: &[ReadSpan], floor: u64) -> Option<u64> {
+    spans
+        .iter()
+        .filter(|s| s.seq >= floor && s.end.saturating_sub(s.start) >= PLAYBACK_SPAN_MIN)
+        .min_by_key(|s| s.seq)
+        .map(|s| s.start)
+}
+
+/// Every request is kept (bounded) until the engine takes it: the engine ticks every 200 ms,
+/// while mpv's container reads at open (header, then index, then the position) take
+/// milliseconds each.
+const MAX_SPANS: usize = 64;
 
 #[derive(Clone)]
 struct Shared {
@@ -50,6 +81,18 @@ struct Shared {
     port: u16,
     slot: Arc<RwLock<Option<Slot>>>,
     reads: Arc<watch::Sender<ReadReport>>,
+    spans: Arc<std::sync::Mutex<Vec<(u64, ReadSpan)>>>,
+    next_span: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Shared {
+    fn span_update(&self, id: u64, f: impl FnOnce(&mut ReadSpan)) {
+        if let Ok(mut g) = self.spans.lock()
+            && let Some((_, s)) = g.iter_mut().find(|(i, _)| *i == id)
+        {
+            f(s);
+        }
+    }
 }
 
 pub struct Loopback {
@@ -191,14 +234,47 @@ struct BodyState {
     offset: u64,
     end: u64,
     reader: Option<(Reader, u64)>,
+    span: u64,
+}
+
+impl Drop for BodyState {
+    fn drop(&mut self) {
+        // The response ended or the player closed the connection: it no longer waits here.
+        self.sh.reads.send_modify(|r| {
+            r.open = r.open.saturating_sub(1);
+            r.seq += 1;
+        });
+        self.sh.span_update(self.span, |s| s.open = false);
+    }
 }
 
 fn body(sh: Shared, start: u64, end: u64) -> Body {
+    sh.reads.send_modify(|r| r.open += 1);
+    let span = sh
+        .next_span
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut g) = sh.spans.lock() {
+        if g.len() >= MAX_SPANS {
+            // Keep the newest; drop the oldest finished one (or the oldest).
+            let i = g.iter().position(|(_, s)| !s.open).unwrap_or(0);
+            g.remove(i);
+        }
+        g.push((
+            span,
+            ReadSpan {
+                seq: span,
+                start,
+                end: start,
+                open: true,
+            },
+        ));
+    }
     let st = BodyState {
         sh,
         offset: start,
         end,
         reader: None,
+        span,
     };
     let s = futures_util::stream::unfold(st, |mut st| async move {
         if st.offset >= st.end {
@@ -226,6 +302,7 @@ fn body(sh: Shared, start: u64, end: u64) -> Body {
                 buf.truncate(n);
                 st.offset += n as u64;
                 let pos = st.offset;
+                st.sh.span_update(st.span, |s| s.end = pos);
                 st.sh.reads.send_modify(|r| {
                     r.pos = pos;
                     r.new_request = false;
@@ -266,6 +343,8 @@ impl Loopback {
             port,
             slot: Arc::new(RwLock::new(None)),
             reads: Arc::new(reads),
+            spans: Arc::new(std::sync::Mutex::new(Vec::new())),
+            next_span: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let app = Router::new()
             .route("/{token}/media", axum::routing::get(media).head(media))
@@ -298,6 +377,24 @@ impl Loopback {
 
     pub fn reads(&self) -> watch::Receiver<ReadReport> {
         self.shared.reads.subscribe()
+    }
+
+    /// The sequence number the next request will get.
+    pub fn next_span_seq(&self) -> u64 {
+        self.shared
+            .next_span
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The finished requests since the last call (removed), and a copy of the open ones.
+    pub fn take_spans(&self) -> (Vec<ReadSpan>, Vec<ReadSpan>) {
+        let Ok(mut g) = self.shared.spans.lock() else {
+            return (Vec::new(), Vec::new());
+        };
+        let (done, open): (Vec<_>, Vec<_>) = g.drain(..).partition(|(_, s)| !s.open);
+        let open_copy = open.iter().map(|(_, s)| *s).collect();
+        *g = open;
+        (done.into_iter().map(|(_, s)| s).collect(), open_copy)
     }
 
     fn set(&self, len: u64, source: Source) {
@@ -338,6 +435,24 @@ impl Drop for Loopback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_seek_sample_comes_from_playback_never_from_the_index_read() {
+        let s = |seq, start, len, open| ReadSpan {
+            seq,
+            start,
+            end: start + len,
+            open,
+        };
+        let spans = [
+            s(3, 900, 5_000_000, false),       // before the seek: ignored
+            s(5, 77_400_000, 18_000, false),   // MKV Cues read at the end
+            s(6, 61_000_000, 2_000_000, true), // playback at the new position
+        ];
+        assert_eq!(playback_start_after(&spans, 5), Some(61_000_000));
+        // Only the index read so far: no sample yet.
+        assert_eq!(playback_start_after(&spans[..2], 5), None);
+    }
 
     #[test]
     fn range_parsing() {

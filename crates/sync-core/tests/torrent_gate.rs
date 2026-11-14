@@ -370,3 +370,82 @@ fn a_short_cache_toggle_never_shows_the_popup_but_a_real_stall_does() {
     );
     assert!(w.nodes[HOST].player.is_playing() && w.nodes[m].player.is_playing());
 }
+
+/// ADR 0012 (revised): the stream is offered at once. A member joining a room that already
+/// plays opens its player directly at the room's position, is "downloading" (never blocking
+/// the room) until the player has opened the file, then "ready" and in sync.
+#[test]
+fn a_member_joining_a_playing_room_opens_at_the_room_position_and_plays() {
+    let (mut w, ids) = room(1, 96);
+    let m = ids[0];
+    w.ui(
+        HOST,
+        UiAction::ChangeMedia {
+            descriptor: torrent(),
+            own_file: false,
+        },
+    );
+    // The host plays from 5:00 before the member's stream exists.
+    w.deliver_event(HOST, Event::Torrent(TorrentEvent::Playable));
+    w.run_for(1_000_000);
+    w.ui(HOST, UiAction::Seek(300_000));
+    w.run_for(300_000);
+    w.ui(HOST, UiAction::Play);
+    w.run_for(3_000_000);
+    assert!(w.nodes[HOST].player.is_playing());
+    // The member's stream is offered: it loads at once, at about the room's position.
+    let t = w.now;
+    w.deliver_event(m, progress(TorrentPhase::Streaming, 10));
+    // Its window at the room position is not there yet when its player opens.
+    w.deliver_event(m, short(303_000));
+    w.deliver_event(m, Event::Torrent(TorrentEvent::Playable));
+    let load = w.nodes[m]
+        .effects
+        .iter()
+        .filter(|(at, _)| *at >= t)
+        .find_map(|(_, e)| match e {
+            Effect::Player(PlayerCmd::LoadTorrentStream { start_ms, .. }) => Some(*start_ms),
+            _ => None,
+        })
+        .expect("loads at once");
+    assert!(
+        (load - 303_300).abs() < 1_500,
+        "opens at the room position, not 0: {load}"
+    );
+    // Still "downloading" until the player opened the file: the room keeps playing.
+    assert!(matches!(
+        w.nodes[m].peer.local().status(None, None).media,
+        MediaStatus::Downloading { .. }
+    ));
+    // The player opened (file loaded) while the window is still missing: the member is
+    // catching up and must not pause the room.
+    w.run_for(1_500_000);
+    assert_eq!(
+        w.nodes[m].peer.local().status(None, None).media,
+        MediaStatus::Ready
+    );
+    assert!(w.nodes[m].peer.local().status(None, None).buffering);
+    let paused = w.nodes[HOST]
+        .player
+        .log
+        .iter()
+        .any(|(at, c)| *at >= t && *c == PlayerCmd::SetPaused(true));
+    assert!(!paused, "a joining member never pauses the room");
+    w.deliver_event(m, ready());
+    w.run_for(3_000_000);
+    assert!(
+        w.nodes[HOST].player.is_playing(),
+        "the member's opening never paused the room"
+    );
+    assert_eq!(
+        w.nodes[m].peer.local().status(None, None).media,
+        MediaStatus::Ready
+    );
+    assert!(w.nodes[m].player.is_playing());
+    w.run_for(3_000_000);
+    assert!(
+        w.max_divergence_ms() < 100.0,
+        "in sync: {}",
+        w.max_divergence_ms()
+    );
+}

@@ -188,6 +188,8 @@ pub struct TorrentStatus {
     /// until the room position and a time -> byte mapping are known. This, not the overall
     /// progress or the player's read frontier, says whether this participant is buffering.
     pub window: Option<Readiness>,
+    /// The ranges the player read to open the file and its index (diagnostics, readiness).
+    pub container: Vec<(u64, u64)>,
     /// Only the playback stream is running (window short / just seeked).
     pub exclusive: bool,
     /// What the engine is using to find peers (status text).
@@ -274,6 +276,9 @@ enum Cmd {
     },
     Running {
         reply: oneshot::Sender<bool>,
+    },
+    Opened {
+        infohash: Infohash,
     },
 }
 
@@ -366,6 +371,12 @@ impl EngineHandle {
     /// A room seek to media time `ms`: pre-target the download before the player asks.
     pub fn seek(&self, infohash: Infohash, ms: u64) {
         let _ = self.tx.send(Cmd::Seek { infohash, ms });
+    }
+
+    /// This window's player opened the stream (file loaded): from now on the start-up range
+    /// no longer counts for readiness, only the ranges the player actually read to open it.
+    pub fn opened(&self, infohash: Infohash) {
+        let _ = self.tx.send(Cmd::Opened { infohash });
     }
 
     pub fn duration(&self, infohash: Infohash, ms: Option<u64>) {
@@ -464,13 +475,26 @@ struct Active {
     loopback: Loopback,
     last_read_seq: u64,
     last_read_end: u64,
-    pending_seek_ms: Option<u64>,
+    /// A room seek's media time and the first request number after it (VBR sample pending).
+    pending_seek_ms: Option<(u64, u64)>,
     ready: ReadyTracker,
+    /// Ranges the player read outside playback for this file (header, Cues/moov): readiness.
+    container: Vec<(u64, u64)>,
+    /// The player opened the stream (file loaded).
+    opened: bool,
     playable_sent: bool,
     no_peers_since: Option<Instant>,
     last_retry: Instant,
     failed: bool,
+    /// Added paused: unpaused once our streams are open, so librqbit's own order (first piece,
+    /// last piece, then sequential) never starts before the room window.
+    held: bool,
+    /// Metadata to offer once unpaused.
+    offer: Option<Vec<u8>>,
 }
+
+/// A read span this short, away from the room's part, is a container read (index).
+const CONTAINER_SPAN_MAX: u64 = 2 * 1024 * 1024;
 
 /// The room's playback position as the app knows it (see [`EngineHandle::room`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -749,7 +773,7 @@ impl Actor {
                 if let Some(a) = self.active.get_mut(&infohash) {
                     let b = a.bytes.byte_for(ms);
                     a.policy.on_seek(b, now);
-                    a.pending_seek_ms = Some(ms);
+                    a.pending_seek_ms = Some((ms, a.loopback.next_span_seq()));
                 }
             }
             Cmd::Duration { infohash, ms } => {
@@ -786,6 +810,25 @@ impl Actor {
             }
             Cmd::Running { reply } => {
                 let _ = reply.send(self.session.is_some());
+            }
+            Cmd::Opened { infohash } => {
+                if let Some(a) = self.active.get_mut(&infohash)
+                    && !a.opened
+                {
+                    a.opened = true;
+                    // What this file needed to open (header, index): measured, not assumed.
+                    let (done, _) = a.loopback.take_spans();
+                    let room = a.policy.room();
+                    let mut all = a.container.clone();
+                    for sp in done {
+                        let (s, e) = (sp.start, sp.end.max(sp.start + 1));
+                        if room.is_none_or(|(ra, rb)| e <= ra || s >= rb) {
+                            all.push((s, e));
+                        }
+                    }
+                    a.container = crate::ready::merge(all);
+                    tracing::info!(ranges = ?a.container, "player opened the stream; ranges it read to open");
+                }
             }
         }
     }
@@ -970,6 +1013,7 @@ impl Actor {
                 eta_secs: None,
                 ranges: Vec::new(),
                 window: None,
+                container: Vec::new(),
                 exclusive: true,
                 trackers,
                 dht: self.cfg.dht,
@@ -1013,6 +1057,7 @@ impl Actor {
             only_files: Some(vec![media.file_index as usize]),
             overwrite: true,
             output_folder: Some(dir.to_string_lossy().into_owned()),
+            paused: true,
             trackers: (!parsed.trackers.is_empty()).then(|| parsed.trackers.clone()),
             initial_peers: {
                 let mut p = self.cfg.initial_peers.clone();
@@ -1079,23 +1124,22 @@ impl Actor {
                 last_read_end: 0,
                 pending_seek_ms: None,
                 ready: ReadyTracker::default(),
+                container: Vec::new(),
+                opened: false,
                 loopback,
                 playable_sent: false,
                 no_peers_since: None,
                 last_retry: Instant::now(),
                 failed: false,
+                held: true,
+                offer: None,
             },
         );
-        let port = self
-            .session
-            .as_ref()
-            .and_then(|s| s.listen_addr().map(|a| a.port()))
-            .unwrap_or(0);
-        self.emit(EngineEvent::Metadata {
-            infohash: ih,
-            torrent: meta_bytes,
-            port,
-        });
+        // Offered to members only once unpaused (on_tick): a member connecting to a torrent
+        // that is still paused is refused, and librqbit backs off before retrying that peer.
+        if let Some(a) = self.active.get_mut(&ih) {
+            a.offer = Some(meta_bytes);
+        }
         Ok(())
     }
 
@@ -1147,15 +1191,41 @@ impl Actor {
             if r.seq != a.last_read_seq {
                 a.last_read_seq = r.seq;
                 if r.new_request && r.pos.abs_diff(a.last_read_end) > 1024 * 1024 {
-                    if let Some(ms) = a.pending_seek_ms.take() {
-                        a.bytes.add_sample(ms, r.pos);
-                    }
                     a.policy.on_seek(r.pos, now);
                 } else {
                     a.policy.on_read(r.pos);
                 }
                 a.last_read_end = r.pos;
             }
+            // Container ranges, from every request the player made (header while opening; a
+            // short read away from the room's part afterwards: the index). Never the room's
+            // own part (playback).
+            let (done, open) = a.loopback.take_spans();
+            // The VBR sample of a room seek: where playback actually resumed (not the index
+            // read that often comes first).
+            if let Some((ms, floor)) = a.pending_seek_ms {
+                let all: Vec<_> = done.iter().chain(open.iter()).copied().collect();
+                if let Some(b) = crate::server::playback_start_after(&all, floor) {
+                    a.bytes.add_sample(ms, b);
+                    a.pending_seek_ms = None;
+                }
+            }
+            let room = a.policy.room();
+            for sp in done.iter().chain(open.iter().filter(|_| !a.opened)) {
+                let (s, e) = (sp.start, sp.end.max(sp.start + 1));
+                let away = room.is_none_or(|(ra, rb)| e <= ra || s >= rb);
+                if away && (!a.opened || e - s <= CONTAINER_SPAN_MAX) {
+                    let mut all = std::mem::take(&mut a.container);
+                    all.push((s, e));
+                    a.container = crate::ready::merge(all);
+                    a.container.truncate(16);
+                    if a.opened {
+                        tracing::info!(start = s, end = e, "player read a container range");
+                    }
+                }
+            }
+            // On demand: the player waits for this byte (an open request that is not served).
+            a.policy.set_demand((r.open > 0).then_some(r.pos));
             // The ROOM position (ADR 0012): its window goes first and decides readiness.
             let room = self.rooms.get_mut(&ih).map(|r| {
                 let ms = r.ms_now();
@@ -1195,8 +1265,8 @@ impl Actor {
                     &geo,
                     &have,
                     ms,
-                    cfg.policy.head,
-                    cfg.policy.tail,
+                    &a.container,
+                    a.opened,
                 );
             }
             let plan = a.policy.plan(&have, now);
@@ -1207,6 +1277,26 @@ impl Actor {
                     file: a.file,
                 };
                 a.juggler.apply(&d, &plan.cursors).await;
+            }
+            if a.held
+                && let Some(s) = &self.session
+            {
+                a.held = false;
+                let _ = s.unpause(&a.handle).await;
+            }
+            if !a.held
+                && let Some(torrent) = a.offer.take()
+            {
+                let port = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.listen_addr().map(|a| a.port()))
+                    .unwrap_or(0);
+                let _ = self.events.send(EngineEvent::Metadata {
+                    infohash: ih,
+                    torrent,
+                    port,
+                });
             }
             let stats = a.handle.stats();
             if let Some(err) = &stats.error {
@@ -1267,7 +1357,9 @@ impl Actor {
             } else {
                 Phase::Downloading
             };
-            if plan.playable && !a.playable_sent {
+            // The stream opens at once (ADR 0012): the player asks for what it needs to open
+            // (on demand) instead of the engine guessing a head, a tail and a pre-buffer.
+            if !a.playable_sent {
                 a.playable_sent = true;
                 let _ = self.events.send(EngineEvent::Playable {
                     infohash: ih,
@@ -1286,6 +1378,7 @@ impl Actor {
                     eta_secs: eta,
                     ranges: a.policy.geometry().ranges(&have),
                     window,
+                    container: a.container.clone(),
                     exclusive: plan.exclusive,
                     trackers: a.trackers.len() as u32,
                     dht: cfg.dht,
@@ -1401,6 +1494,7 @@ fn complete_status(size: u64) -> TorrentStatus {
             missing: 0,
             permille: 1000,
         }),
+        container: Vec::new(),
         exclusive: false,
         trackers: 0,
         dht: false,

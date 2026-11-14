@@ -241,10 +241,7 @@ async fn handoff_preserves_position() {
     std::fs::write(src.join("m.mp4"), &bytes).unwrap();
     // Throttled so the read below spans the completion.
     let sw = swarm(&src.join("m.mp4"), "m.mp4", Some(2 * 1024 * 1024)).await;
-    let mut cfg = engine_cfg(dir.join("cache"), free_port());
-    cfg.policy.head = 256 * 1024;
-    cfg.policy.tail = 512 * 1024;
-    cfg.policy.prebuffer = 512 * 1024;
+    let cfg = engine_cfg(dir.join("cache"), free_port());
     let (eng, mut ev) = EngineHandle::spawn(cfg);
     eng.start(media(
         sw.seeder.infohash,

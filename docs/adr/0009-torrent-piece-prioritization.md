@@ -146,3 +146,17 @@ read window, also before this player opened the file or while it waits at the ga
 judged at the room position. Readiness for the ready gate is coverage of that window plus head and
 tail, never overall progress. The lead, tail and fill order above is unchanged once the room window
 is on disk.
+
+## Update 2 (ADR 0012 revision, 2026-11-14)
+
+The head and tail cursors and the "playable" condition (head, tail and pre-buffer) are removed.
+The cursors are now, in order:
+
+1. `Room`: the room window.
+2. `Demand`: the byte the player is blocked on, while it is missing.
+3. `Lead`: the read-ahead.
+4. `Fill`: the rest, from the playhead, wrapping around.
+
+The stream opens at once, at the room position. The container bytes (header, MKV Cues, MP4
+moov) are fetched only when mpv asks for them. Torrents are added paused and unpaused once our
+streams are open.

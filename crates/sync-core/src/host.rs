@@ -742,6 +742,19 @@ impl HostMachine {
                 {
                     self.gate.excused.remove(&m);
                 }
+                // A member whose player has just opened the file (late join, torrent opened at
+                // the room position before its data arrived) catches up without pausing the
+                // room: excused until it has been ready once (ADR 0012).
+                let joined = prev.is_none_or(|p| {
+                    !matches!(p.media, MediaStatus::Ready | MediaStatus::Mismatch)
+                        || p.media_epoch != s.media_epoch
+                });
+                if joined
+                    && matches!(s.media, MediaStatus::Ready | MediaStatus::Mismatch)
+                    && s.buffering
+                {
+                    self.gate.excused.insert(m);
+                }
                 if s.media == MediaStatus::Declined
                     && prev.is_none_or(|p| p.media != MediaStatus::Declined)
                 {

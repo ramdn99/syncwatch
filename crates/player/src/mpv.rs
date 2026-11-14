@@ -343,6 +343,16 @@ impl Player for MpvPlayer {
             .command("loadfile", &[source, "replace"])
             .map_err(cmd_err)
     }
+    fn load_at(&self, source: &str, start_secs: f64) -> Result<()> {
+        self.mpv.set_property("pause", true).map_err(cmd_err)?;
+        // `loadfile <url> <flags> <index> <options>` (mpv 0.38+; index -1 = unused with
+        // "replace"). With `start`, mpv reads the header and index, then seeks before reading
+        // any packets, so a torrent stream fetches the room's part, not the file's start.
+        let start = format!("start={:.3}", start_secs.max(0.0));
+        self.mpv
+            .command("loadfile", &[source, "replace", "-1", &start])
+            .map_err(cmd_err)
+    }
     fn unload(&self) -> Result<()> {
         // `stop` ends the current file; with idle=yes the player stays alive with nothing loaded.
         // The EndFile event then clears the state and the track list.

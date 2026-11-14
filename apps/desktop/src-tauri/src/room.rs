@@ -1373,6 +1373,13 @@ async fn drive(
             },
             ev = ch.tr.recv() => ev.map(Input::Transport),
             pe = ch.pl.recv() => pe.and_then(|ev| {
+                // The torrent stream is open: from now on only the ranges the player read to
+                // open it count for readiness (not the start-up range).
+                if let (syncwatch_player::PlayerEvent::FileLoaded { .. }, Some(ih), Some(_)) =
+                    (&ev, rt.torrent, rt.media.torrent_url.as_ref())
+                {
+                    rt.torrents.engine.opened(ih);
+                }
                 crate::roommedia::player_obs(&rt.media, &*rt.player, &ev)
                     .map(|o| Input::Core(Event::Player(o)))
             }),

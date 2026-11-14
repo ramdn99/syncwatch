@@ -88,6 +88,12 @@ pub enum PlayerEvent {
 pub trait Player: Send + Sync {
     /// Opens a local file (or, later, a loopback URL) and starts paused.
     fn load(&self, source: &str) -> Result<()>;
+    /// Loads and starts at `start_secs` (the player reads the container header and index,
+    /// then goes straight to that position). Default: load, then the caller seeks.
+    fn load_at(&self, source: &str, start_secs: f64) -> Result<()> {
+        let _ = start_secs;
+        self.load(source)
+    }
     /// Stops playback and unloads the file: afterwards nothing is loaded and the track list is
     /// empty (rooms call this when they start and when they end).
     fn unload(&self) -> Result<()>;

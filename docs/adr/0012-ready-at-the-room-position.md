@@ -60,7 +60,8 @@ The suspects from the bug report, checked one by one:
   ready when all of these are on its disk:
   - the window from 1 s before the room position to 5 s after it (at least 2 MiB, at most
     24 MiB);
-  - the file head and tail (the container pieces).
+  - (superseded by the revision below: no head and tail; the container ranges the player
+    read instead).
 
   Overall progress never counts.
 
@@ -143,6 +144,140 @@ The suspects from the bug report, checked one by one:
   - the room was paused at 80% of a 64 MiB file, and the member had no player;
   - it was ready there after 3.2 s with 8.2 MiB downloaded: the head, 51.0–53.2 MiB and the
     tail.
+
+## Revision (2026-11-14): only the playing part first; container bytes on demand
+
+### Problem (manual test)
+
+The host played, but the member stayed at "buffering" and never started. Its log shows the
+torrent added at 09:45:49 and then no "file loaded": its player never opened the stream.
+
+### Root cause
+
+The suspects from the bug report, checked one by one:
+
+- **(a)/(c) The cause.** Opening the stream needed all of these on disk, and the player was
+  opened only after that ("playable"):
+  - the file head (2 MiB);
+  - the file tail (8 MiB);
+  - a 4 MiB pre-buffer at the room position.
+
+  Only the 2 MiB room window was fetched, and the room position moved with playback. Nothing
+  fetched the rest of the pre-buffer: the lead cursor sat at byte 0 because the player had never
+  read anything. So the member downloaded the file front-to-back from 0 and opened only when
+  that download reached the room position.
+  - **Engine test:** `a_member_joining_a_playing_room_opens_and_keeps_up` (room playing from
+    5:00, throttled seeder) FAILED on the old code. The stream became playable only after
+    21.2 s, with 0–36 MiB and 56–64 MiB on disk. After the fix: 0.1 s.
+  - **Two windows:** `torrent-lab.ps1 -Scenario torrentplay -SameIpDefault` on the old build.
+    The member rejoined while the room played at 40:00 and never played within 90 s. Its ranges
+    were 0.0–52.0 MiB (front to back) and 65.7–73.8 MiB (the tail).
+  - **Why the first lab missed it:** in that lab the room was paused at 0:00 when the member
+    started, where byte 0 and the room position coincide.
+- **(d)** Not the cause: the duration reached the member through the heartbeat.
+- **(b)** Not a starvation of player requests: the loopback server's own librqbit stream serves
+  them.
+- **(e), (f), (g)** Not observed.
+
+### Decision
+
+- **Order** (`PiecePolicy`, cursors in priority order):
+  1. `Room`: the first missing byte of the room window.
+  2. `Demand`: the byte the player is blocked on outside the window (the loopback server now
+     reports its open responses). Kept only while that piece is missing.
+  3. `Lead`: the player's read-ahead, from the playhead, or from the room position before the
+     player read anything.
+  4. `Fill`: the rest of the file from the playhead, wrapping around, after the read-ahead has
+     been full and calm.
+
+  While `Room` or `Demand` is needed, nothing else runs. Each room seek, resume, pause or
+  media change moves the window at once; the old window drops to normal priority. There is no
+  head or tail cursor any more.
+- **Open at once, at the room position.** The stream is offered as soon as the torrent is added.
+  Sync-core loads it with `start=<room position>` (`loadfile <url> replace -1 start=…`). mpv
+  reads its header and index on demand, then goes straight to that position. The member stays
+  "downloading" (never blocking the room) until the player has opened the file, then it is
+  "ready".
+- **Readiness** = the room window plus the container ranges this file's player actually read.
+  The engine records them: reads made while opening, and short reads away from the room's part
+  afterwards. They are logged ("player opened the stream; ranges it read to open"). Before the
+  player opened the file, the start-up range `[0, startup_bytes)` (default 1 MiB, configurable)
+  stands in for them. There is no head or tail requirement.
+- **Torrents are added paused** and unpaused once our streams are open. Otherwise librqbit's own
+  order (first piece, last piece, then sequential) would start before the room window.
+
+### Found in the two-window runs and fixed
+
+- **A member whose player has just opened never pauses the room.** It opens within
+  0.3–0.6 s, often before its window arrives. Being "ready" but still buffering, it paused
+  everyone for about 0.5 s. The host now excuses such a member until it has been ready once,
+  like any late joiner.
+- **Container ranges come from a log of every request.** The engine ticks every 200 ms, and the
+  server's read report keeps only the latest value. mpv's open-time reads take milliseconds each
+  (header, then index, then the position), so they were missed. The loopback server now keeps
+  a bounded span log.
+- **The VBR sample of a room seek comes from where playback resumed.** With `start=` opening,
+  mpv reads the MKV Cues lazily at the first seek. That index read at the end of the file was
+  taken as the time-to-byte sample, so 50:00 mapped to the file's end, which was already on
+  disk. Readiness said "ready", and the gate showed only "loading". The sample now comes from
+  the first request after the seek that reads at least 1 MiB.
+- **The host offers its metadata and port only after its torrent is unpaused.** A member
+  connecting to a torrent that is still paused is refused, and librqbit backs off before trying
+  that peer again.
+
+### Lab evidence (final code, one lab at a time)
+
+- **`torrentplay`, old build:** the member that rejoined at 40:00 never played in 90 s, and
+  downloaded front to back (0.0–52.0 MiB plus 65.7–73.8 MiB).
+- **`torrentplay`, new build:** all checks (a) to (e) passed on both windows.
+  - **(a)** The member's player opened 0.36–0.58 s after it accepted; one minute in sync (worst
+    196–294 ms); no popup, no gate.
+  - **(b)** At 55:00 the new data arrived as a separate range at 64.0 MiB (the new position).
+  - **(c)** The late joiner played 0.24–0.34 s after accepting.
+  - **(d)** The seek back to 40:10 played again within 0.33–0.5 s.
+  - **(e)** No popup after 100%.
+- **`torrentgate`:** all checks (a) to (e) passed. In (b) the gate read "buffering at 3000 s,
+  10% → 30% of the window, needs 2.1 MB".
+- **The M7 regression** (`torrent-lab.ps1`): 29/29.
+
+### Open issue
+
+When the host and the member start the same torrent at the same moment (the member accepted
+before the host had the file list), the member got nothing after its first 238 KB in 2 of 5
+`torrentgate` runs. It found a peer again only on librqbit's peer retry, 15–35 s later (log:
+"no peers: retrying peer discovery"). During that time the popup showed, correctly.
+
+The member's link to the host's engine on the same PC apparently drops, and qBittorrent
+refuses it as a second connection from 127.0.0.1. The exact cause is not pinned down. It did
+not happen in `torrentplay` (the reported bug's flow: the host plays first) in 4 of 4 runs.
+
+### Container ranges, measured with mpv
+
+`cargo run -p syncwatch-player --example range_probe -- <file> <start_s> <seek_s>`: a
+throttled (4 MiB/s) local range server and real libmpv with the app's cache options. Each file
+is opened with `start=` at 5:00 (`test.mkv` at 15:00) and then sought.
+
+| File | Read to open at the position (besides the playback data there) | Seek |
+|---|---|---|
+| MKV, Cues at the end (`cues-end.mkv`, 420 MB, 10 min) | 192 KiB at the start, the last 11 KB (Cues) | 1.5 MiB at the target only |
+| MKV, Cues at the start (`cues-front.mkv`, `-reserve_index_space`) | 128 KiB at 0 and 128 KiB at 301 KB (the index) | 1.5 MiB only |
+| MP4, moov at the end (`moov-end.mp4`) | 192 + 128 KiB at the start, the 433 KB moov at the end | 1.5 MiB only |
+| MP4, moov at the start (`+faststart`) | 512 KiB at the start (the moov is inside) | 1.5 MiB only |
+| `D:\media\test.mkv` (1.29 GB, 28 min, mkvmerge) | 128 + 192 KiB at the start, 420 KB at the end | 1.5 MiB only |
+
+Every file opened and seeked with on-demand ranges only. None needed a larger range. The
+largest start-up read was 512 KiB, so the default start-up range is 1 MiB.
+
+### Limits
+
+- **librqbit's stream look-ahead.** librqbit queues the 32 MiB after every open stream. When
+  the player reads its header, the pieces right after it are queued too: about 1–1.5 MiB arrive
+  before the read ends (measured in the engine tests).
+- **librqbit's own order.** When no open stream has a piece a peer could serve, librqbit takes
+  the first piece, then the last piece, then sequential pieces. This never comes before our
+  window: the priority pieces are always tried first. It only uses spare capacity.
+- **Large moov atoms.** The moov of a very long MP4 can be several MB. It is fetched on demand
+  when mpv asks for it; only the readiness estimate of an unopened member assumes 1 MiB.
 
 ## Consequences and limits
 

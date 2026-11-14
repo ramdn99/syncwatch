@@ -141,14 +141,14 @@ mod tests {
     fn diff_closes_first_then_opens_and_seeks() {
         let mut cur = BTreeMap::new();
         cur.insert(CursorKind::Lead, 0);
-        cur.insert(CursorKind::Tail, 90);
+        cur.insert(CursorKind::Demand, 90);
         cur.insert(CursorKind::Fill, 50);
         let ops = diff(&cur, &[c(CursorKind::Lead, 40)]);
         assert_eq!(
             ops,
             vec![
                 Op::Close {
-                    kind: CursorKind::Tail
+                    kind: CursorKind::Demand
                 },
                 Op::Close {
                     kind: CursorKind::Fill
@@ -176,7 +176,7 @@ mod tests {
         rt.block_on(async {
             let d = Fake::default();
             let mut j: Juggler<u64> = Juggler::default();
-            j.apply(&d, &[c(CursorKind::Lead, 0), c(CursorKind::Tail, 90)])
+            j.apply(&d, &[c(CursorKind::Lead, 0), c(CursorKind::Demand, 90)])
                 .await;
             j.apply(&d, &[c(CursorKind::Lead, 40)]).await;
             j.apply(&d, &[c(CursorKind::Lead, 40), c(CursorKind::Fill, 70)])

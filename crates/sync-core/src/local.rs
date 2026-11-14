@@ -70,6 +70,8 @@ pub struct Local {
     /// The host's media duration (heartbeat): maps the room position to bytes before this
     /// player opened the file.
     pub room_duration_ms: Option<u64>,
+    /// The last host time seen (to open a torrent stream at the room's current position).
+    last_host_now: Option<i64>,
     drift: DriftController,
     drift_cooldown_until: i64,
     needs_resync: bool,
@@ -113,6 +115,7 @@ impl Local {
             stall_published: (false, None),
             gate_active: false,
             room_duration_ms: None,
+            last_host_now: None,
             drift: DriftController::default(),
             drift_cooldown_until: i64::MIN,
             needs_resync: false,
@@ -541,7 +544,9 @@ impl Local {
             TorrentEvent::Progress { phase, permille } => {
                 let permille = permille.min(1000) / 10 * 10;
                 self.torrent = Some(TorrentProgress { phase, permille });
-                if !self.torrent_streaming {
+                // Until the player has opened the stream, the member is still "downloading"
+                // (it never blocks the room for that unless "wait for everyone" is on).
+                if !self.loaded && matches!(self.media, MediaStatus::Downloading { .. }) {
                     self.media = MediaStatus::Downloading { permille };
                 }
                 if phase == TorrentPhase::Complete {
@@ -568,11 +573,18 @@ impl Local {
                 if !self.torrent_streaming {
                     self.torrent_streaming = true;
                     self.clear_stall(out);
-                    self.media = MediaStatus::Ready;
+                    // The stream is offered at once (ADR 0012): open it now, at the room's
+                    // position. "Ready" once the player has opened it (file loaded).
+                    let start_ms = match self.last_host_now {
+                        Some(now) => self.room.position_at(now),
+                        None => self.room.position_ms,
+                    }
+                    .max(0);
                     self.request_load(
                         PlayerCmd::LoadTorrentStream {
                             infohash: t.infohash,
                             file_index: t.file_index,
+                            start_ms,
                         },
                         out,
                     );
@@ -600,6 +612,9 @@ impl Local {
                     return;
                 }
                 self.loaded = true;
+                if self.torrent_streaming && matches!(self.media, MediaStatus::Downloading { .. }) {
+                    self.media = MediaStatus::Ready;
+                }
                 self.duration_ms = duration_ms;
                 self.tracks.on_loaded(tracks, out);
                 self.sync_player(host_now, mono, true, out);
@@ -660,6 +675,9 @@ impl Local {
             return;
         }
         let moved = new.epoch != self.room.epoch;
+        if host_now.is_some() {
+            self.last_host_now = host_now;
+        }
         self.room = new;
         if moved {
             // Room seek, pause or resume: the engine re-targets the room window at once.
@@ -789,6 +807,9 @@ impl Local {
     }
 
     pub fn tick(&mut self, host_now: Option<i64>, mono: i64, out: &mut Out) {
+        if host_now.is_some() {
+            self.last_host_now = host_now;
+        }
         self.update_stall(mono, out);
         if !self.loaded {
             return;

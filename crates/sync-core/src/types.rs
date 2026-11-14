@@ -60,6 +60,9 @@ pub enum PlayerCmd {
     LoadTorrentStream {
         infohash: Infohash,
         file_index: u32,
+        /// Open directly at the room position (ADR 0012): the player reads the container
+        /// header and index it needs, then the room's part, not the start of the file.
+        start_ms: MediaMs,
     },
     Stop,
     SetPaused(bool),

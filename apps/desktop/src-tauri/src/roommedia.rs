@@ -304,10 +304,11 @@ impl MediaCtx {
                     Ok(())
                 }
             },
-            PlayerCmd::LoadTorrentStream { .. } => match &self.torrent_url {
+            PlayerCmd::LoadTorrentStream { start_ms, .. } => match &self.torrent_url {
                 // The loopback server streams while downloading and serves the finished file
-                // from the same URL afterwards (no reload at completion).
-                Some(url) => player.load(url),
+                // from the same URL afterwards (no reload at completion). Opened directly at
+                // the room position (ADR 0012).
+                Some(url) => player.load_at(url, start_ms.max(0) as f64 / 1000.0),
                 None => {
                     tracing::warn!("torrent load requested before the stream was ready");
                     Ok(())

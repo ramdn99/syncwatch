@@ -17,8 +17,10 @@ Milestone 9.
   **Download and play** or **Decline**. Nothing is downloaded before they agree. Members never
   look for the file list themselves: they get it from the host. If the host is still getting it,
   they see "Waiting for the host to get the file list" and start as soon as it arrives.
-- Everyone downloads their own copy and starts playing as soon as the beginning and the end of
-  the file are there. Playback stays in sync while downloading.
+- Everyone downloads their own copy, starting with the part the room is playing. A member who
+  joins while the video plays starts right there, within seconds, not from the beginning of the
+  file. Only the few hundred KB the player needs to open the file are taken from elsewhere.
+  Playback stays in sync while downloading.
 - **What counts is the part being played, not the total.** A member at 40% whose current part
   is downloaded is ready and never makes the room wait. Every member's download always fetches
   the part the room is playing first, also while it is still loading or waiting.
