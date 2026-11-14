@@ -64,11 +64,25 @@ the DHT is shut down.
 When you join the room again, or restart SyncWatch, the finished file plays directly.
 SyncWatch never joins the torrent's swarm again for it. There is no "keep seeding" option.
 
-### Settings (Settings, then Torrents)
+### Settings: Files and Network
 
-- Cache folder and size limit.
+**Files:**
+- Torrent cache folder and size limit.
 - Whether finished files are kept after leaving a room.
-- Incoming port and bind address.
+- **Largest torrent file list:** 5 MB by default (1 to 16 MB). Bigger .torrent files, or file
+  lists offered by a host, are refused.
+- **Buffering window:** how much of the video around the room position must be downloaded
+  before you count as ready. The default is 1 s before the position (0 to 10 s) and 5 s after
+  it (2 to 60 s). A larger window waits longer before playing but stalls less on a slow
+  swarm.
+- **Start-up range:** what the player is expected to read to open a file. The default is
+  1024 KB (256 to 8192 KB). Measured: MKV and MP4 files needed at most 512 KB at the start.
+
+Each number shows its default and has **Reset to default**. A value outside its range is not
+saved; the reason is shown under the field.
+
+**Network:**
+- Incoming torrent port and bind address.
 - DHT on or off.
 
 **Your responsibility:** you are responsible for what you stream. Only use torrents you have

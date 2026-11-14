@@ -313,6 +313,10 @@ export interface TorrentSettings {
   bind: string;
   dht: boolean;
   noticeAccepted: boolean;
+  metaCapMb: number;
+  windowBeforeSecs: number;
+  windowAfterSecs: number;
+  startupKb: number;
 }
 
 export const torrents = {

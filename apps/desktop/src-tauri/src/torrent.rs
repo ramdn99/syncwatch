@@ -31,6 +31,54 @@ pub struct TorrentSettings {
     pub notice_accepted: bool,
     /// Largest torrent metadata accepted (a .torrent file or the host's offer), MB.
     pub meta_cap_mb: u32,
+    /// Buffering window (ADR 0012): media time before and after the room position that must
+    /// be on disk to be "ready", in seconds.
+    pub window_before_secs: u32,
+    pub window_after_secs: u32,
+    /// Start-up range counted for a player that has not opened the file yet, KiB.
+    pub startup_kb: u32,
+}
+
+/// Allowed ranges of the numeric settings (also shown in Settings). Inclusive.
+pub const META_CAP_MB: (u32, u32) = (1, 16);
+pub const WINDOW_BEFORE_SECS: (u32, u32) = (0, 10);
+pub const WINDOW_AFTER_SECS: (u32, u32) = (2, 60);
+pub const STARTUP_KB: (u32, u32) = (256, 8192);
+
+impl TorrentSettings {
+    /// Friendly text for the first value outside its range, if any.
+    pub fn validate(&self) -> Result<(), String> {
+        let check = |v: u32, (lo, hi): (u32, u32), what: &str, unit: &str| {
+            if v < lo || v > hi {
+                Err(format!("{what} must be between {lo} and {hi} {unit}."))
+            } else {
+                Ok(())
+            }
+        };
+        check(
+            self.meta_cap_mb,
+            META_CAP_MB,
+            "The metadata size limit",
+            "MB",
+        )?;
+        check(
+            self.window_before_secs,
+            WINDOW_BEFORE_SECS,
+            "The window before the position",
+            "seconds",
+        )?;
+        check(
+            self.window_after_secs,
+            WINDOW_AFTER_SECS,
+            "The window after the position",
+            "seconds",
+        )?;
+        check(self.startup_kb, STARTUP_KB, "The start-up range", "KB")?;
+        if !self.bind.trim().is_empty() && self.bind.trim().parse::<std::net::IpAddr>().is_err() {
+            return Err("The bind address must be an IP address (or empty for all).".into());
+        }
+        Ok(())
+    }
 }
 
 impl Default for TorrentSettings {
@@ -44,6 +92,9 @@ impl Default for TorrentSettings {
             dht: true,
             notice_accepted: false,
             meta_cap_mb: 5,
+            window_before_secs: 1,
+            window_after_secs: 5,
+            startup_kb: 1024,
         }
     }
 }
@@ -95,6 +146,18 @@ fn config_for(default_cache: &Path, s: &TorrentSettings) -> EngineConfig {
     c.metadata_timeout = Duration::from_secs(90);
     c.free_space = Some(Arc::new(free_space));
     c.meta_cap = meta_cap(s);
+    let (wb, wa, sk) = (
+        s.window_before_secs
+            .clamp(WINDOW_BEFORE_SECS.0, WINDOW_BEFORE_SECS.1),
+        s.window_after_secs
+            .clamp(WINDOW_AFTER_SECS.0, WINDOW_AFTER_SECS.1),
+        s.startup_kb.clamp(STARTUP_KB.0, STARTUP_KB.1),
+    );
+    c.ready.back_ms = u64::from(wb) * 1000;
+    c.ready.window_ms = u64::from(wa) * 1000;
+    // The keep window (hysteresis) stays well inside the full window.
+    c.ready.keep_ms = c.ready.window_ms.min(1500).max(c.ready.window_ms * 3 / 10);
+    c.ready.startup_bytes = u64::from(sk) * 1024;
     c
 }
 
@@ -324,10 +387,7 @@ pub fn torrent_settings_get(app: AppHandle) -> TorrentSettings {
 
 #[tauri::command]
 pub fn torrent_settings_set(app: AppHandle, settings: TorrentSettings) -> Result<(), String> {
-    if !settings.bind.trim().is_empty() && settings.bind.trim().parse::<std::net::IpAddr>().is_err()
-    {
-        return Err("The bind address must be an IP address (or empty for all).".into());
-    }
+    settings.validate()?;
     app.state::<Arc<TorrentService>>().save(settings);
     Ok(())
 }
@@ -342,6 +402,83 @@ mod tests {
         assert_eq!(s.cap_gb, 10);
         assert!(s.dht && s.keep_finished && !s.notice_accepted);
         assert_eq!(s.port, 0);
+    }
+
+    #[test]
+    fn numeric_settings_are_validated_and_reach_the_engine() {
+        let d = TorrentSettings::default();
+        assert_eq!(
+            (
+                d.meta_cap_mb,
+                d.window_before_secs,
+                d.window_after_secs,
+                d.startup_kb
+            ),
+            (5, 1, 5, 1024)
+        );
+        assert!(d.validate().is_ok());
+        for bad in [
+            TorrentSettings {
+                meta_cap_mb: 0,
+                ..d.clone()
+            },
+            TorrentSettings {
+                meta_cap_mb: 17,
+                ..d.clone()
+            },
+            TorrentSettings {
+                window_before_secs: 11,
+                ..d.clone()
+            },
+            TorrentSettings {
+                window_after_secs: 1,
+                ..d.clone()
+            },
+            TorrentSettings {
+                window_after_secs: 61,
+                ..d.clone()
+            },
+            TorrentSettings {
+                startup_kb: 100,
+                ..d.clone()
+            },
+            TorrentSettings {
+                startup_kb: 9000,
+                ..d.clone()
+            },
+            TorrentSettings {
+                bind: "nope".into(),
+                ..d.clone()
+            },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
+        let s = TorrentSettings {
+            window_before_secs: 2,
+            window_after_secs: 10,
+            startup_kb: 512,
+            meta_cap_mb: 8,
+            ..d
+        };
+        let c = config_for(Path::new("x"), &s);
+        assert_eq!(
+            (c.ready.back_ms, c.ready.window_ms, c.ready.startup_bytes),
+            (2000, 10_000, 512 * 1024)
+        );
+        assert_eq!(c.meta_cap, 8 * 1024 * 1024);
+        assert!(c.ready.keep_ms < c.ready.window_ms);
+        // Defaults match the engine's own defaults (ADR 0012).
+        let e = config_for(Path::new("x"), &TorrentSettings::default());
+        let r = syncwatch_torrent::ReadyConfig::default();
+        assert_eq!(
+            (
+                e.ready.back_ms,
+                e.ready.window_ms,
+                e.ready.keep_ms,
+                e.ready.startup_bytes
+            ),
+            (r.back_ms, r.window_ms, r.keep_ms, r.startup_bytes)
+        );
     }
 
     #[test]
