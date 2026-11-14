@@ -4,6 +4,7 @@ import { ChatOverlay } from './components/ChatOverlay';
 import { ChangeSourceDialog } from './components/ChangeSourceDialog';
 import { BufferingOverlay, ConfirmMagnetDialog, TorrentBlock } from './components/TorrentPanels';
 import { ChatPanel } from './components/ChatPanel';
+import { ShortcutsHelp } from './components/ShortcutsHelp';
 import { HostControls } from './components/HostControls';
 import { MembersPanel } from './components/MembersPanel';
 import { VideoArea } from './components/VideoArea';
@@ -52,6 +53,7 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
   const [uiErrors, setUiErrors] = useState<UiErrorEntry[]>([]);
   const [ignoredDismissed, setIgnoredDismissed] = useState(false);
   const [noLimit, setNoLimit] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   // Settings, Files: "No limit" can be the default for new rooms.
   useEffect(() => {
     void appPrefs
@@ -365,6 +367,9 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
         case 'cycleSub':
           cycleTrack('sub');
           break;
+        case 'showHelp':
+          setHelpOpen(true);
+          break;
       }
     };
     window.addEventListener('keydown', onKey);
@@ -408,13 +413,14 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
 
   return (
     <div className="flex h-full flex-col">
+      {helpOpen && <ShortcutsHelp isHost={isHost} onClose={() => setHelpOpen(false)} />}
       {!fullscreen && (
         <header className="flex h-10 shrink-0 items-center gap-4 border-b border-border bg-bg px-3">
           <img src={logoUrl} alt="SyncWatch" className="h-5" draggable={false} />
           {rs.roomCode && (
             <button
               type="button"
-              className="font-brand text-sm tracking-[0.2em] text-text hover:text-accent"
+              className="tabular font-brand text-sm tracking-[0.2em] text-text hover:text-accent"
               title="Room code: click to copy"
               onClick={() => void navigator.clipboard?.writeText(formatCode(rs.roomCode))}
             >
@@ -434,6 +440,15 @@ export function RoomView({ onLeave }: { onLeave: () => void }) {
               Diagnostics
             </button>
           )}
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs text-muted hover:bg-surface hover:text-text"
+            title="Keyboard shortcuts (?)"
+            onClick={() => setHelpOpen(true)}
+          >
+            <Icon name="shortcuts" size="xs" />
+            Shortcuts
+          </button>
           <button type="button" className="rounded px-2 py-0.5 text-xs text-muted hover:bg-surface hover:text-text" onClick={leave}>
             {rs.active && rs.isHost ? 'Close room' : 'Leave'}
           </button>

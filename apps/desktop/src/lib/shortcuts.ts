@@ -13,10 +13,27 @@ export type ShortcutAction =
   | 'focusChat'
   | 'exitFullscreen'
   | 'cycleAudio'
-  | 'cycleSub';
+  | 'cycleSub'
+  | 'showHelp';
 
 /** Host-only actions (track control is host-only, spec section 6). */
 export const HOST_ONLY: ReadonlySet<ShortcutAction> = new Set(['cycleAudio', 'cycleSub']);
+
+/** Every shortcut, as shown in the help overlay (one list, used by the overlay and its test). */
+export const SHORTCUTS: { keys: string[]; label: string; action: ShortcutAction }[] = [
+  { keys: ['Space'], label: 'Play or pause', action: 'togglePause' },
+  { keys: ['Left', 'Right'], label: 'Seek 5 seconds back or forward', action: 'seekBack' },
+  { keys: ['Up', 'Down'], label: 'Volume up or down', action: 'volumeUp' },
+  { keys: ['M'], label: 'Mute or unmute', action: 'toggleMute' },
+  { keys: ['F'], label: 'Fullscreen', action: 'toggleFullscreen' },
+  { keys: ['Esc'], label: 'Leave fullscreen', action: 'exitFullscreen' },
+  { keys: ['['], label: 'Show or hide the chat', action: 'toggleLeft' },
+  { keys: [']'], label: 'Show or hide the members panel', action: 'toggleRight' },
+  { keys: ['C'], label: 'Write in the chat', action: 'focusChat' },
+  { keys: ['A'], label: 'Next audio track', action: 'cycleAudio' },
+  { keys: ['S'], label: 'Next subtitle track (or off)', action: 'cycleSub' },
+  { keys: ['?'], label: 'Show these shortcuts', action: 'showHelp' },
+];
 
 export function isTypingTarget(t: EventTarget | null): boolean {
   if (!t || typeof (t as HTMLElement).tagName !== 'string') return false;
@@ -51,6 +68,7 @@ export function mapKey(
     : k === 'Escape' ? 'exitFullscreen'
     : k === 'a' ? 'cycleAudio'
     : k === 's' ? 'cycleSub'
+    : k === '?' ? 'showHelp'
     : null;
   if (action && HOST_ONLY.has(action) && !isHost) return null;
   return action;
