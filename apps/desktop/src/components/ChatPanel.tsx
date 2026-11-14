@@ -2,6 +2,7 @@ import { forwardRef, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { chipText, nearCurrent, spoilerUntil, type ChatLine } from '../lib/chat';
 import type { MockChatMessage } from '../mock/data';
 import { memberColors } from '../theme/tokens';
+import { Icon } from '../ui/icons';
 
 export interface ChatPanelProps {
   /** Room chat lines; plain mock messages (outside a room) get chips from mediaTimeMs. */
@@ -86,7 +87,7 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(functio
             Spoiler guard
           </button>
           <button type="button" className="rounded px-2 text-muted hover:text-text" aria-label="Collapse chat ([)" title="Collapse chat ([)" onClick={onCollapse}>
-            «
+            <Icon name="collapseLeft" />
           </button>
         </div>
       </header>

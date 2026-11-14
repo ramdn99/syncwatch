@@ -1,6 +1,7 @@
 import { forwardRef, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { PlaybackState } from '../lib/player';
 import { formatTime } from '../lib/time';
+import { Icon } from '../ui/icons';
 
 export interface VideoAreaProps {
   state: PlaybackState;
@@ -93,14 +94,14 @@ export const VideoArea = forwardRef<HTMLDivElement, VideoAreaProps>(function Vid
         <SeekBar pct={pct} duration={duration} markers={markers} cacheAhead={state.cacheAhead} pos={pos} onSeek={props.onSeek} downloaded={props.downloaded ?? null} />
         <div className="mt-2 flex items-center gap-3">
           <IconButton label={state.paused ? 'Play (Space)' : 'Pause (Space)'} onClick={props.onTogglePause}>
-            {state.paused ? '▶' : '❚❚'}
+            <Icon name={state.paused ? 'play' : 'pause'} size="md" />
           </IconButton>
           <span className="tabular text-sm">
             {formatTime(state.timePos)} <span className="text-muted">/ {formatTime(state.duration)}</span>
           </span>
           <div className="ml-auto flex items-center gap-2">
             <IconButton label={state.mute ? 'Unmute (M)' : 'Mute (M)'} onClick={props.onToggleMute}>
-              {state.mute ? '🔇' : '🔊'}
+              <Icon name={state.mute ? 'muted' : 'volume'} size="md" />
             </IconButton>
             <input
               type="range"
@@ -108,11 +109,11 @@ export const VideoArea = forwardRef<HTMLDivElement, VideoAreaProps>(function Vid
               max={100}
               value={Math.round(state.volume)}
               aria-label="Volume"
-              className="w-24 accent-[#E8A33D]"
+              className="w-24"
               onChange={(e) => props.onVolume(Number(e.target.value))}
             />
             <IconButton label={fullscreen ? 'Exit fullscreen (F)' : 'Fullscreen (F)'} onClick={props.onToggleFullscreen}>
-              {fullscreen ? '⤡' : '⤢'}
+              <Icon name={fullscreen ? 'exitFullscreen' : 'fullscreen'} size="md" />
             </IconButton>
           </div>
         </div>

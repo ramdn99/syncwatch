@@ -3,6 +3,7 @@ import { connection, type ConnectionStatus, type TestReport } from '../lib/conne
 import { settingsText, statusText } from '../strings/connection-help';
 import { Results } from './ConnectionSetup';
 import { TorrentSettingsSection } from '../components/TorrentSettings';
+import { Icon } from '../ui/icons';
 
 export function SettingsConnection({ status, onReplace, onBack }: { status: ConnectionStatus; onReplace: () => void; onBack: () => void }) {
   const [busy, setBusy] = useState(false);
@@ -24,8 +25,9 @@ export function SettingsConnection({ status, onReplace, onBack }: { status: Conn
   return (
     <div className="h-full overflow-y-auto bg-bg">
       <div className="mx-auto max-w-2xl px-6 py-8">
-        <button type="button" className="mb-4 text-sm text-muted hover:text-text" onClick={onBack}>
-          ← Back
+        <button type="button" className="mb-4 inline-flex items-center gap-1 text-sm text-muted hover:text-text" onClick={onBack}>
+          <Icon name="back" />
+          Back
         </button>
         <h1 className="font-brand text-2xl font-bold">Settings · {settingsText.title}</h1>
 

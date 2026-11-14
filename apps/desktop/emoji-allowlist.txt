@@ -1,0 +1,2 @@
+# Justified exceptions to scripts/emoji-scan.mjs: path prefix | code point | reason.
+crates/torrent/src/validate.rs | U+2603 | test input: a non-ASCII file name the path validator must accept (never shown)

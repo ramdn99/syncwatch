@@ -16,6 +16,7 @@ import { DiagnosticsDialog, type UiErrorEntry } from './components/Diagnostics';
 import { EMPTY_ROOM, endText, formatCode, friendlyError, onRoomState, PASSWORD_IGNORED_TEXT, chatBlockedReason, gateBannerText, room, type RoomAction, type RoomState } from './lib/room';
 import { chatLines, markerSeconds } from './lib/chat';
 import type { TrackSelection } from './lib/player';
+import { Icon } from './ui/icons';
 
 const EMPTY_STATE: PlaybackState = {
   paused: true,
@@ -683,15 +684,15 @@ function Section(props: { title: string; count?: number; collapsed: boolean; onT
     <section className="border-b border-border">
       <div className="flex items-center gap-1 pr-2">
         <button type="button" className="flex flex-1 items-center gap-2 px-3 py-2 text-left" aria-expanded={!props.collapsed} onClick={props.onToggle}>
-          <span className="text-muted" aria-hidden>
-            {props.collapsed ? '▸' : '▾'}
+          <span className="text-muted">
+            <Icon name={props.collapsed ? 'expand' : 'collapse'} />
           </span>
           <h2 className="font-brand text-sm font-bold tracking-wide">{props.title}</h2>
           {props.count != null && <span className="tabular text-xs text-muted">{props.count}</span>}
         </button>
         {props.onCollapseColumn && (
           <button type="button" className="rounded px-2 text-muted hover:text-text" aria-label="Collapse side panel (])" title="Collapse side panel (])" onClick={props.onCollapseColumn}>
-            »
+            <Icon name="collapseRight" />
           </button>
         )}
       </div>
@@ -703,7 +704,7 @@ function Section(props: { title: string; count?: number; collapsed: boolean; onT
 function CollapsedRail({ side, label, onClick }: { side: 'left' | 'right'; label: string; onClick: () => void }) {
   return (
     <button type="button" aria-label={label} title={label} onClick={onClick} className="flex h-full w-6 shrink-0 items-start justify-center bg-surface pt-2 text-muted hover:text-text" data-testid={`rail-${side}`}>
-      {side === 'left' ? '»' : '«'}
+      <Icon name={side === 'left' ? 'collapseRight' : 'collapseLeft'} />
     </button>
   );
 }

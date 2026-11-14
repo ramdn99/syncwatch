@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { LinkState, MediaText, Perms, RoomAction, RoomMember } from '../lib/room';
 import { memberColors } from '../theme/tokens';
+import { Icon, type IconName } from '../ui/icons';
 
 const CONN_TEXT: Record<LinkState, string> = {
   connecting: 'Connecting...',
@@ -15,6 +16,20 @@ const CONN_COLOR: Record<LinkState, string> = {
   direct: 'text-success',
   relayed: 'text-info',
   reconnecting: 'text-warning',
+};
+const CONN_ICON: Partial<Record<LinkState, IconName>> = {
+  direct: 'direct',
+  relayed: 'relayed',
+  reconnecting: 'reconnecting',
+};
+const MEDIA_ICON: Partial<Record<MediaText, IconName>> = {
+  ready: 'ready',
+  verifying: 'buffering',
+  missing: 'missingFile',
+  mismatch: 'mismatch',
+  downloading: 'downloading',
+  declined: 'ban',
+  unavailable: 'warning',
 };
 const MEDIA_TEXT: Record<MediaText, string> = {
   none: 'No video yet',
@@ -86,10 +101,15 @@ export function MembersPanel({
                 {m.name}
                 {m.isYou && <span className="text-muted"> (you)</span>}
               </span>
-              {m.isHost && <span className="rounded bg-accent px-1 text-[10px] font-bold text-on-accent">HOST</span>}
+              {m.isHost && (
+                <span className="inline-flex items-center gap-0.5 rounded bg-accent px-1 text-[10px] font-bold text-on-accent">
+                  <Icon name="host" size="xs" />
+                  HOST
+                </span>
+              )}
               {m.chatMuted && (
-                <span className="text-muted" title="Muted in chat" aria-label="Muted in chat">
-                  🔇
+                <span className="text-muted" title="Muted in chat">
+                  <Icon name="chatMuted" label="Muted in chat" />
                 </span>
               )}
               {!m.isYou && (viewerIsHost ? !m.isHost : true) && (
@@ -99,15 +119,24 @@ export function MembersPanel({
                   aria-label={`Actions for ${m.name}`}
                   aria-haspopup="menu"
                   aria-expanded={menuFor === m.id}
+                  title={`Actions for ${m.name}`}
                   onClick={() => setMenuFor((v) => (v === m.id ? null : m.id))}
                 >
-                  ⋯
+                  <Icon name="more" />
                 </button>
               )}
             </div>
             <div className="mt-0.5 flex flex-wrap gap-x-3 pl-4.5 text-xs">
-              {!m.isYou && m.link && <span className={CONN_COLOR[m.link]}>{CONN_TEXT[m.link]}</span>}
-              <span className={m.media === 'ready' || m.media === 'none' ? 'text-muted' : m.media === 'missing' || m.media === 'mismatch' ? 'text-danger' : 'text-warning'}>
+              {!m.isYou && m.link && (
+                <span className={`inline-flex items-center gap-1 ${CONN_COLOR[m.link]}`} data-testid="member-link">
+                  {CONN_ICON[m.link] && <Icon name={CONN_ICON[m.link]!} size="xs" />}
+                  {CONN_TEXT[m.link]}
+                </span>
+              )}
+              <span
+                className={`inline-flex items-center gap-1 ${m.media === 'ready' || m.media === 'none' ? 'text-muted' : m.media === 'missing' || m.media === 'mismatch' ? 'text-danger' : 'text-warning'}`}
+              >
+                {MEDIA_ICON[m.media] && <Icon name={MEDIA_ICON[m.media]!} size="xs" />}
                 {MEDIA_TEXT[m.media]}
               </span>
               {m.media !== 'none' && <span className={m.tracksInSync ? 'text-muted' : 'text-warning'}>{m.tracksInSync ? 'Tracks in sync' : 'Tracks differ'}</span>}

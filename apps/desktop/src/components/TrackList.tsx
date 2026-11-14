@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from 'react';
 import { trackLabel, type Track, type TrackSelection } from '../lib/player';
+import { Icon } from '../ui/icons';
 
 export interface TrackListProps {
   kind: 'audio' | 'sub';
@@ -40,8 +41,8 @@ export function TrackList({ kind, tracks, isHost, mediaKey, onSelect, onAdd }: T
           onClick={() => setExpanded((v) => !v)}
           title={isHost ? undefined : LOCK_TIP}
         >
-          <span className="text-muted" aria-hidden>
-            {expanded ? '▾' : '▸'}
+          <span className="text-muted">
+            <Icon name={expanded ? 'collapse' : 'expand'} />
           </span>
           <span className="font-brand font-medium">{TITLES[kind]}</span>
           <span className="min-w-0 flex-1 truncate text-muted" data-testid="selected-track">
@@ -51,8 +52,8 @@ export function TrackList({ kind, tracks, isHost, mediaKey, onSelect, onAdd }: T
             {items.length}
           </span>
           {!isHost && (
-            <span className="text-muted" aria-label={LOCK_TIP} title={LOCK_TIP}>
-              🔒
+            <span className="text-muted" title={LOCK_TIP}>
+              <Icon name="lock" size="xs" label={LOCK_TIP} />
             </span>
           )}
         </button>
@@ -109,8 +110,8 @@ function TrackRow(props: { label: string; badge?: string; selected: boolean; dis
         } ${props.selected ? 'text-text' : 'text-muted'}`}
         onClick={props.onClick}
       >
-        <span className={props.selected ? 'text-accent' : 'invisible'} aria-hidden>
-          ●
+        <span className={props.selected ? 'text-accent' : 'invisible'}>
+          <Icon name="selected" size="xs" className="fill-current" />
         </span>
         <span className="min-w-0 flex-1 truncate">{props.label}</span>
         {props.badge && <span className="text-xs text-muted">{props.badge}</span>}

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { RichText } from '../components/RichText';
 import { connection, looksLikeCredentialsUrl, type ConnectionStatus, type TestOutcome, type TestReport } from '../lib/connection';
+import { Icon } from '../ui/icons';
 import {
   fetchErrors,
   inputErrors,
@@ -82,8 +83,9 @@ export function ConnectionSetup({ status, onDone, onBack }: { status: Connection
   return (
     <div className="h-full overflow-y-auto bg-bg">
       <div className="mx-auto max-w-3xl px-6 py-8">
-        <button type="button" className="mb-4 text-sm text-muted hover:text-text" onClick={onBack}>
-          ← Back
+        <button type="button" className="mb-4 inline-flex items-center gap-1 text-sm text-muted hover:text-text" onClick={onBack}>
+          <Icon name="back" />
+          Back
         </button>
         <h1 className="font-brand text-2xl font-bold">{setupText.title}</h1>
         <p className="mt-2 text-muted">{setupText.intro}</p>

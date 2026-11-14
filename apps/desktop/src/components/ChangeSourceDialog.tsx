@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { parseMagnet } from '../lib/magnet';
 import { inTauri } from '../lib/player';
 import { fmtBytes, TORRENT_NOTICE, torrents, type TorrentInfo } from '../lib/room';
+import { Icon } from '../ui/icons';
 
 // Change source (spec section 6): local file OR torrent magnet, in either direction, without
 // leaving the room. The Rust parser is authoritative; the TS mirror gives instant feedback.
@@ -192,8 +193,8 @@ export function ChangeSourceDialog(props: {
       <div className="w-full max-w-lg rounded-xl border border-border bg-elevated p-5 shadow-2xl">
         <div className="flex items-center justify-between">
           <h2 className="font-brand text-lg font-bold">Change source</h2>
-          <button type="button" aria-label="Close" className="rounded px-2 text-muted hover:text-text" onClick={props.onClose}>
-            ✕
+          <button type="button" aria-label="Close" title="Close" className="rounded p-1 text-muted hover:text-text" onClick={props.onClose}>
+            <Icon name="close" />
           </button>
         </div>
         <div className="mt-3 flex gap-1 border-b border-border" role="tablist">
