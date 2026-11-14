@@ -62,6 +62,10 @@ pub struct EngineConfig {
     pub no_peers_after: Duration,
     /// While waiting for peers, restart peer discovery this often.
     pub retry_every: Duration,
+    /// A member that knows the host's engine as a peer (host hint) and has no live peer for
+    /// this long re-dials it, every `host_retry_every` (start race, ADR 0012).
+    pub host_retry_after: Duration,
+    pub host_retry_every: Duration,
     pub free_space: Option<FreeSpace>,
     /// Largest torrent metadata accepted (a .torrent file or the host's offer).
     pub meta_cap: usize,
@@ -84,6 +88,8 @@ impl EngineConfig {
             initial_peers: Vec::new(),
             no_peers_after: Duration::from_secs(15),
             retry_every: Duration::from_secs(30),
+            host_retry_after: Duration::from_secs(3),
+            host_retry_every: Duration::from_secs(5),
             free_space: None,
             meta_cap: meta::DEFAULT_META_CAP,
             tick: Duration::from_millis(200),
@@ -491,6 +497,28 @@ struct Active {
     held: bool,
     /// Metadata to offer once unpaused.
     offer: Option<Vec<u8>>,
+    /// Started with the host's engine as a known peer (a member).
+    host_hint: bool,
+    /// Bytes on disk at the last tick, and since when nothing arrived while data was needed.
+    last_have: u64,
+    stale_since: Option<Instant>,
+    stale_retries: u32,
+}
+
+/// Whether to restart peer discovery now (pause + unpause re-dials the initial peers, which
+/// for a member include the host's engine). A member with a host hint retries after a few
+/// seconds without peers; everyone else after `no_peers_after`, then every `retry_every`.
+pub(crate) fn retry_due(
+    cfg: &EngineConfig,
+    host_hint: bool,
+    no_peers_for: Duration,
+    since_retry: Duration,
+) -> bool {
+    if host_hint {
+        no_peers_for >= cfg.host_retry_after && since_retry >= cfg.host_retry_every
+    } else {
+        no_peers_for >= cfg.no_peers_after && since_retry >= cfg.retry_every
+    }
 }
 
 /// A read span this short, away from the room's part, is a container read (index).
@@ -1031,6 +1059,7 @@ impl Actor {
         extra_peers: Vec<SocketAddr>,
     ) -> Result<(), EngineError> {
         let ih = media.infohash;
+        let extra_hint = extra_peers.clone();
         let entry = info
             .files
             .iter()
@@ -1133,6 +1162,10 @@ impl Actor {
                 failed: false,
                 held: true,
                 offer: None,
+                host_hint: !extra_hint.is_empty(),
+                last_have: 0,
+                stale_since: None,
+                stale_retries: 0,
             },
         );
         // Offered to members only once unpaused (on_tick): a member connecting to a torrent
@@ -1333,17 +1366,57 @@ impl Actor {
             if peers == 0 && !complete {
                 let since = *a.no_peers_since.get_or_insert_with(Instant::now);
                 // Waiting for peers: restart discovery periodically (pause + unpause).
-                if since.elapsed() >= cfg.no_peers_after
-                    && a.last_retry.elapsed() >= cfg.retry_every
+                if retry_due(&cfg, a.host_hint, since.elapsed(), a.last_retry.elapsed())
                     && let Some(s) = &self.session
                 {
                     a.last_retry = Instant::now();
-                    tracing::info!("no peers: retrying peer discovery");
+                    if a.host_hint {
+                        tracing::info!("no peers: re-dialing the host's engine");
+                    } else {
+                        tracing::info!("no peers: retrying peer discovery");
+                    }
                     let _ = s.pause(&a.handle).await;
                     let _ = s.unpause(&a.handle).await;
                 }
             } else {
                 a.no_peers_since = None;
+                // Connected, but no data while we need some (a peer that never sends, such as
+                // a swarm client refusing a second connection from the same address): a member
+                // re-dials the host's engine too (start race, ADR 0012).
+                let wants = plan.cursors.iter().any(|c| {
+                    matches!(
+                        c.kind,
+                        crate::policy::CursorKind::Room | crate::policy::CursorKind::Demand
+                    )
+                });
+                let progressed = have_bytes != a.last_have;
+                if progressed || !wants || complete {
+                    a.last_have = have_bytes;
+                    a.stale_since = None;
+                    if progressed || complete {
+                        a.stale_retries = 0;
+                    }
+                } else if a.host_hint {
+                    let since = *a.stale_since.get_or_insert_with(Instant::now);
+                    // Back off while nobody has the data yet (5, 10, 20, 40, then 60 s).
+                    let every = (cfg.host_retry_every
+                        * 2u32.saturating_pow(a.stale_retries.min(4)))
+                    .min(Duration::from_secs(60));
+                    if since.elapsed() >= cfg.host_retry_after
+                        && a.last_retry.elapsed() >= every
+                        && let Some(s) = &self.session
+                    {
+                        a.last_retry = Instant::now();
+                        a.stale_since = None;
+                        a.stale_retries = a.stale_retries.saturating_add(1);
+                        tracing::info!(
+                            peers,
+                            "no data from the connected peers: re-dialing the host's engine"
+                        );
+                        let _ = s.pause(&a.handle).await;
+                        let _ = s.unpause(&a.handle).await;
+                    }
+                }
             }
             let no_peers = a
                 .no_peers_since
@@ -1505,4 +1578,24 @@ fn complete_status(size: u64) -> TorrentStatus {
 fn is_disk_full(err: &str) -> bool {
     let e = err.to_ascii_lowercase();
     e.contains("os error 112") || e.contains("not enough space") || e.contains("no space")
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn a_member_with_a_host_hint_re_dials_within_seconds() {
+        let c = EngineConfig::new(PathBuf::from("x"));
+        let s = Duration::from_secs;
+        // Member (host hint): after 3 s without peers, then every 5 s.
+        assert!(!retry_due(&c, true, s(2), s(60)));
+        assert!(retry_due(&c, true, s(3), s(60)));
+        assert!(!retry_due(&c, true, s(10), s(4)));
+        assert!(retry_due(&c, true, s(10), s(5)));
+        // Everyone else keeps the slow swarm retry (15 s, then every 30 s).
+        assert!(!retry_due(&c, false, s(10), s(60)));
+        assert!(retry_due(&c, false, s(15), s(30)));
+        assert!(!retry_due(&c, false, s(20), s(10)));
+    }
 }

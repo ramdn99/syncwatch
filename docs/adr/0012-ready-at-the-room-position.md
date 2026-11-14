@@ -240,16 +240,49 @@ The suspects from the bug report, checked one by one:
   10% → 30% of the window, needs 2.1 MB".
 - **The M7 regression** (`torrent-lab.ps1`): 29/29.
 
-### Open issue
+### Open issue: start race (investigated 2026-11-14, mitigated)
 
-When the host and the member start the same torrent at the same moment (the member accepted
-before the host had the file list), the member got nothing after its first 238 KB in 2 of 5
-`torrentgate` runs. It found a peer again only on librqbit's peer retry, 15–35 s later (log:
-"no peers: retrying peer discovery"). During that time the popup showed, correctly.
+**The symptom.** When the host and a member start the same torrent at the same moment, the
+member got nothing after its first 238 KB in 2 of 5 `torrentgate` runs. It found a peer again
+only on librqbit's peer retry, 15–35 s later ("no peers: retrying peer discovery").
 
-The member's link to the host's engine on the same PC apparently drops, and qBittorrent
-refuses it as a second connection from 127.0.0.1. The exact cause is not pinned down. It did
-not happen in `torrentplay` (the reported bug's flow: the host plays first) in 4 of 4 runs.
+**Hypotheses checked in process** (engine tests, real librqbit on 127.0.0.1):
+- **Idle peer link dropped.** librqbit waits for each peer message with a 10 s read timeout,
+  but sends keep-alives only every 120 s. I tested a host–member link with no data on either
+  side for about 50 s: it stayed up, and the member got data the moment the host did. Not the
+  cause.
+- **Crossing connections.** Both engines announced to the same tracker and learned each
+  other's listen address, so they dialed each other at once: the link stayed up for about 53 s.
+  Not the cause.
+- **Unpause order:** already fixed (the host offers its file list only once unpaused).
+- **DHT:** off in the lab, so not involved.
+
+**Not reproduced in process.** The one factor present only in the lab is qBittorrent
+refusing a second connection from 127.0.0.1. The exact sequence that leaves the member
+without its host link is not known.
+
+**Mitigation.** A member started with the host's engine as a known peer (host hint), and
+without any live peer for 3 s, re-dials it every 5 s. librqbit's pause + unpause reconnects
+the initial peers. Everyone else keeps the slow swarm retry (15 s, then every 30 s).
+- **Test:** `a_member_re_dials_the_hosts_engine_within_seconds`. The host's engine comes up
+  6 s after the member. The member got data after 6.1 s; with the old retry timing, after
+  46.0 s.
+- **Unit test:** `retry_due`.
+- **Effect:** a member that loses the host link now waits about 3–8 s instead of 15–35 s.
+
+**Second form, seen in a later lab run** (`torrentgate`, 12:20).
+- **What happened:** the member stalled for about 15–20 s while still connected: the
+  log shows no "no peers" until 23 s after its start.
+- **Likely reason:** its only live peer was qBittorrent, which accepts a second connection
+  from 127.0.0.1 but never sends data.
+- **Mitigation:** a member with a host hint that has received no data for 3 s, while it needs
+  some (room window or player demand), also re-dials the host's engine (every 5 s).
+- **Test:** `a_member_connected_only_to_a_silent_peer_re_dials_the_host`. A fake peer completes
+  the handshake and sends only keep-alives. The member got data after 6.1 s, as soon as the
+  host's engine was up; with the old timing it took 51.0 s.
+- **Lab run with this mitigation:** `torrentgate` passed (a) to (e) on both windows. While
+  neither engine had the data yet (the far seek), the member re-dialed every 5 s. That churn is
+  now backed off: 5, 10, 20, 40, then 60 s at most, reset as soon as data arrives.
 
 ### Container ranges, measured with mpv
 

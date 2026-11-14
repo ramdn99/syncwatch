@@ -699,3 +699,168 @@ async fn cached_only_start_never_touches_the_swarm() {
     assert!(!eng.session_running().await, "no engine session");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Start race mitigation (ADR 0012 follow-up): a member whose only peer is the host's engine
+/// and who lost it (or never reached it) re-dials it within seconds, not after librqbit's
+/// usual 15-30 s retry. Here the host's engine is not listening yet when the member starts;
+/// it comes up 6 s later on the hinted port.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_re_dials_the_hosts_engine_within_seconds() {
+    init();
+    let dir = tmp("redial");
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let bytes = data(8 * 1024 * 1024, 31);
+    std::fs::write(src.join("r.mkv"), &bytes).unwrap();
+    let peers = Arc::new(Mutex::new(Vec::new()));
+    let (hurl, _log) = http_tracker(peers.clone()).await;
+    let sd = seeder(&src.join("r.mkv"), vec![hurl.clone()], None).await;
+    let m = media(
+        sd.infohash,
+        0,
+        "r.mkv",
+        bytes.len() as u64,
+        magnet(&sd.infohash, "r.mkv", &[]),
+    );
+    let host_port = free_port();
+    // The member: no tracker, no DHT; only the host hint.
+    let (member, mut mev) = EngineHandle::spawn(engine_cfg(dir.join("member"), free_port()));
+    member.start_with_meta(
+        m.clone(),
+        sd.torrent.to_vec(),
+        vec![format!("127.0.0.1:{host_port}").parse().unwrap()],
+    );
+    let t0 = Instant::now();
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    // The host's engine comes up (it has the seeder).
+    let (host, _hev) = EngineHandle::spawn(engine_cfg(dir.join("host"), host_port));
+    host.start_with_meta(m, sd.torrent.to_vec(), vec![sd.addr]);
+    let mut seen = Vec::new();
+    let got = wait_event(
+        &mut mev,
+        &mut seen,
+        40,
+        |e| matches!(e, EngineEvent::Status { status, .. } if status.have_bytes > 0),
+    )
+    .await;
+    let t = t0.elapsed();
+    eprintln!("REDIAL member got data {t:?} after starting (host up at 6 s)");
+    assert!(got.is_some(), "member never reached the host");
+    assert!(
+        t < Duration::from_secs(16),
+        "re-dialed promptly, not at the 30 s swarm retry: {t:?}"
+    );
+    host.stop(sd.infohash, StopReason::Leave).await;
+    member.stop(sd.infohash, StopReason::Leave).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A peer that completes the handshake, sends keep-alives and nothing else (like a swarm client
+/// that accepts a second connection from the same address but never serves it).
+async fn silent_peer(infohash: syncwatch_protocol::Infohash) -> std::net::SocketAddr {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            tokio::spawn(async move {
+                let mut hs = [0u8; 68];
+                if s.read_exact(&mut hs).await.is_err() {
+                    return;
+                }
+                let mut reply = Vec::with_capacity(68);
+                reply.push(19);
+                reply.extend_from_slice(b"BitTorrent protocol");
+                reply.extend_from_slice(&[0; 8]);
+                reply.extend_from_slice(&infohash.0);
+                reply.extend_from_slice(b"-XX0000-silentsilent");
+                if s.write_all(&reply).await.is_err() {
+                    return;
+                }
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    tokio::select! {
+                        r = s.read(&mut buf) => if matches!(r, Ok(0) | Err(_)) { return },
+                        _ = tokio::time::sleep(Duration::from_secs(3)) => {
+                            if s.write_all(&[0, 0, 0, 0]).await.is_err() { return }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// Start race, second form: the member IS connected (to a peer that never sends data), so the
+/// "no peers" retry never fires. With no data for a few seconds while it needs some, it re-dials
+/// the host's engine (here up 6 s after the member).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_connected_only_to_a_silent_peer_re_dials_the_host() {
+    init();
+    let dir = tmp("silent");
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let bytes = data(8 * 1024 * 1024, 32);
+    std::fs::write(src.join("s.mkv"), &bytes).unwrap();
+    let peers = Arc::new(Mutex::new(Vec::new()));
+    let (hurl, _log) = http_tracker(peers.clone()).await;
+    let sd = seeder(&src.join("s.mkv"), vec![hurl.clone()], None).await;
+    let m = media(
+        sd.infohash,
+        0,
+        "s.mkv",
+        bytes.len() as u64,
+        magnet(&sd.infohash, "s.mkv", &[]),
+    );
+    let silent = silent_peer(sd.infohash).await;
+    let host_port = free_port();
+    let (member, mut mev) = EngineHandle::spawn(engine_cfg(dir.join("member"), free_port()));
+    // The room is at the start: the member needs that window (a Room cursor wants data).
+    member.duration(sd.infohash, Some(60_000));
+    member.room(
+        sd.infohash,
+        syncwatch_torrent::RoomTarget {
+            ms: 0,
+            playing: false,
+            speed: 1000,
+            retarget: true,
+        },
+    );
+    member.start_with_meta(
+        m.clone(),
+        sd.torrent.to_vec(),
+        vec![silent, format!("127.0.0.1:{host_port}").parse().unwrap()],
+    );
+    let t0 = Instant::now();
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let (host, _hev) = EngineHandle::spawn(engine_cfg(dir.join("host"), host_port));
+    host.start_with_meta(m, sd.torrent.to_vec(), vec![sd.addr]);
+    let mut seen = Vec::new();
+    let got = wait_event(
+        &mut mev,
+        &mut seen,
+        45,
+        |e| matches!(e, EngineEvent::Status { status, .. } if status.have_bytes > 0),
+    )
+    .await;
+    let t = t0.elapsed();
+    let peers_seen = seen
+        .iter()
+        .filter_map(|e| match e {
+            EngineEvent::Status { status, .. } => Some(status.peers),
+            _ => None,
+        })
+        .max();
+    eprintln!(
+        "SILENT member got data {t:?} after starting (host up at 6 s); max live peers {peers_seen:?}"
+    );
+    assert!(got.is_some(), "member never got data");
+    assert!(
+        t < Duration::from_secs(16),
+        "re-dialed the host although a silent peer was connected: {t:?}"
+    );
+    host.stop(sd.infohash, StopReason::Leave).await;
+    member.stop(sd.infohash, StopReason::Leave).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
