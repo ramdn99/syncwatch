@@ -22,13 +22,12 @@ use paths::AppPaths;
 fn main() {
     let paths = AppPaths::resolve();
     paths.ensure();
-    // Debug builds with a dev identity: a separate WebView2 user-data folder per instance.
-    // Instances of one app otherwise share ONE WebView2 browser process, so killing one dev
-    // window (the host-crash test) would take the others' web views down with it.
-    if cfg!(debug_assertions)
-        && std::env::var("SYNCWATCH_DEV_IDENTITY").is_ok_and(|v| !v.is_empty())
-        && std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_none()
-    {
+    // WebView2's own profile (local storage, caches) lives in the app's data folder: in portable
+    // mode <exe>\data\webview2, never next to the exe or in another AppData folder. For dev
+    // identities this also gives each instance its own WebView2 browser process (killing one dev
+    // window, the host-crash test, must not take the others' web views down).
+    // An empty value counts as unset (WebView2 then falls back to a folder next to the exe).
+    if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_none_or(|v| v.is_empty()) {
         // SAFETY: single-threaded at this point (before logging, Tauri or any other thread).
         unsafe { std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", paths.root.join("webview2")) };
     }
@@ -37,6 +36,10 @@ fn main() {
         version = env!("CARGO_PKG_VERSION"),
         portable = paths.portable,
         "SyncWatch starting"
+    );
+    tracing::info!(
+        webview2 = ?std::env::var_os("WEBVIEW2_USER_DATA_FOLDER"),
+        "web view data folder"
     );
 
     #[cfg(windows)]

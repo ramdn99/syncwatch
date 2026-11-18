@@ -86,6 +86,7 @@ pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -Scenario torrentsucc -SameIpD
 cargo run -p syncwatch-player --example range_probe -- <file> <start_s> <seek_s>   (byte ranges mpv reads to open and seek; D:\libs\mpv on PATH)
 pwsh -NoProfile -File scripts/dev/torrent-lab.ps1 -Manual   (hands-on material: prints magnets and the .torrent path; key press or timeout cleans up)
 pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario skiprelay -Ice coturn
+pwsh -NoProfile -File scripts/dev/portable-check.ps1   (portable.flag: everything in data, nothing in the install folder or AppData)
 pwsh -NoProfile -File scripts/check-tls-tree.ps1   (Windows tree: no aws-lc/native-tls/OpenSSL)
 cargo deny --locked check bans advisories sources
 cargo audit

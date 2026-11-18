@@ -93,7 +93,13 @@ async fn scenario(exclusive: bool) -> (Duration, Duration) {
     cfg.policy.exclusive_playback = exclusive;
     let (eng, mut ev) = EngineHandle::spawn(cfg);
     let mag = magnet(&sd.infohash, "w.mkv", &[hurl]);
-    eng.start(media(sd.infohash, 0, "w.mkv", bytes.len() as u64, mag));
+    // The metadata is given (as a host or a .torrent file would): this test is about the
+    // playback window, not about resolving a magnet (that lookup made it flaky under load).
+    eng.start_with_meta(
+        media(sd.infohash, 0, "w.mkv", bytes.len() as u64, mag),
+        sd.torrent.to_vec(),
+        Vec::new(),
+    );
     let mut seen = Vec::new();
     let url = match wait_event(&mut ev, &mut seen, 60, |e| {
         matches!(e, EngineEvent::Playable { .. })

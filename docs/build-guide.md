@@ -307,3 +307,18 @@ git config core.hooksPath scripts/git-hooks
 ## 7. Alignment check (only when nobody is using the machine)
 
 `scripts/dev/alignment-check.ps1` moves the real mouse and sends real keys. See the script header.
+
+## Portable mode check
+
+```
+pwsh -NoProfile -File scripts/dev/portable-check.ps1
+```
+
+The script:
+1. copies the built app into a temporary folder with `portable.flag`;
+2. starts it for 15 s, then closes it;
+3. checks that everything was written to `data` (`config`, `logs`, `cache`, `webview2`), and that
+   nothing was written in the install folder outside `data`, or under `%LOCALAPPDATA%` or `%APPDATA%`.
+
+It starts the app with an empty `WEBVIEW2_USER_DATA_FOLDER` on purpose: the app treats empty as
+unset.
