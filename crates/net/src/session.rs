@@ -198,6 +198,8 @@ struct Link {
     close_at: Option<i64>,
     /// Host: drop the link unless the member re-offers before this.
     reoffer_deadline: Option<i64>,
+    /// Host: this member runs another protocol version and was told so once.
+    version_rejected: bool,
 }
 
 impl Link {
@@ -214,6 +216,7 @@ impl Link {
             interrupted: false,
             close_at: None,
             reoffer_deadline: None,
+            version_rejected: false,
         }
     }
 
@@ -1185,6 +1188,38 @@ impl RoomSession {
                 }
                 let msg = match proto::decode(body) {
                     Ok(m) => m,
+                    // Another SyncWatch version: the envelope version differs, so neither side
+                    // can read the other's Hello or Reject. End with a clear reason instead of
+                    // waiting forever.
+                    Err(proto::ProtocolError::Version(v)) => {
+                        let to_host = Some(peer) == self.host_link;
+                        tracing::warn!(
+                            link = peer,
+                            theirs = v,
+                            ours = proto::PROTOCOL_VERSION,
+                            "peer runs another SyncWatch version"
+                        );
+                        if to_host {
+                            self.end_soon(
+                                clock.mono_us,
+                                EndReason::Refused {
+                                    reason: "version".to_owned(),
+                                },
+                            );
+                        } else if self.peer.is_host()
+                            && let Some(l) = self.links.get_mut(&peer)
+                            && !l.version_rejected
+                        {
+                            // In our version: the member cannot decode it, and its own version
+                            // check then ends its join with the same reason.
+                            l.version_rejected = true;
+                            let reject = Message::Reject {
+                                reason: RejectReason::Version,
+                            };
+                            self.send_room(peer, &reject, out);
+                        }
+                        return;
+                    }
                     Err(e) => {
                         tracing::warn!(link = peer, error = %e, "malformed room message dropped");
                         return;

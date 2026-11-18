@@ -1,7 +1,7 @@
 # SyncWatch user guide
 
-Status: started in Milestone 7 with the torrent section. The full guide is written in
-Milestone 9.
+Status: torrents (Milestone 7), settings, privacy and known limits (Milestone 8). The full
+guide, with installation and first steps, is written in Milestone 9.
 
 ## Watching a torrent together
 
@@ -134,3 +134,56 @@ Open **Settings** on the home screen. The sections are:
 - **Network:** **Always use relay**, the incoming torrent port, the bind address, and DHT.
 - **About:** the version, the GPL notice, the third-party licenses, and **Copy diagnostics**,
   which copies a report with credentials, keys, tokens and IP addresses removed.
+
+## Privacy
+
+- **Chat:** messages are encrypted between each person and the host. The host passes them on
+  to everyone and **can read all of them**. Chat is kept in memory only: it is never written to
+  disk or to the logs. **Export this room's chat...** (Settings, Chat) is the only way to save
+  it.
+- **Your IP address:**
+  - Without **Always use relay**, people you connect to directly (the host, or the members if
+    you are the host) can see your address.
+  - With it on (Settings, Network), they only see the relay's address, which uses more of your
+    relay quota.
+  - The signaling server always sees your address, and so does a torrent's swarm whatever the
+    relay setting is (see "Watching a torrent together").
+- **Latency:** the members list shows each member's round-trip time to the host (for example
+  "Direct · 42 ms"). Everyone in the room can see it. It is not an address.
+- **Rooms without a password:** compare the four words with the other person, by voice or
+  another channel you trust. Different words mean someone is in the middle: leave the room.
+- **No telemetry.** SyncWatch connects only to the signaling server, the relay (STUN/TURN)
+  servers, Metered's API when you set it up, the people in your room and, in torrent rooms, the
+  torrent's swarm.
+- **Diagnostics:** **Copy diagnostics** removes credentials, keys, tokens, IP addresses and
+  folder paths before anything reaches your clipboard. Logs also contain no credentials, no
+  chat and no full paths.
+
+## Known limits
+
+- **Image subtitles (PGS, VobSub, DVB) ignore the subtitle size and style settings.** They are
+  pictures, so they are shown exactly as authored. The size setting (Settings, Playback) applies
+  to text subtitles (SRT, ASS, SSA, WebVTT) only.
+- **Subtitles in non-Latin scripts** use the bundled Noto Sans for Latin, Greek and Cyrillic.
+  Arabic, Hebrew, Chinese, Japanese, Korean, Thai, Hindi and others use the fonts that come
+  with Windows. A script with no Windows font shows boxes. Fonts embedded in an MKV are always
+  used.
+- **File dialogs follow the Windows theme.** The open and save dialogs belong to Windows, so
+  they are light when Windows is set to light mode, even though SyncWatch itself is always dark.
+- **After a torrent finishes, other DHT nodes may list your address for about 30 minutes.**
+  The DHT protocol cannot take an announcement back. Nobody can connect to you in that time:
+  SyncWatch has closed every connection and shut the DHT down (see "When the download is
+  complete").
+- **Two people on the same router** may not both get data from the same outside peer, because
+  many torrent clients accept only one connection per IP address. On separate computers in one
+  network, SyncWatch does not connect members to the host's download, so with a small swarm
+  one of you may wait. See "Two people on the same router" above.
+- **No web seeds.** Torrents that are shared only through web seeds (HTTP download links inside
+  the torrent, common for Internet Archive items) do not download: SyncWatch's torrent engine
+  does not support them. SyncWatch says so when such a torrent has no peers.
+- **A portable copy on another PC or Windows user** cannot read the saved relay setup (it is
+  encrypted for the user who saved it). SyncWatch says so and asks you to set the connection up
+  again.
+- **Everyone needs the same SyncWatch version.** People on different versions cannot be in
+  the same room. SyncWatch says "The host runs a different version of SyncWatch" when this
+  happens.

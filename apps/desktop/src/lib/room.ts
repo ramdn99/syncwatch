@@ -446,7 +446,9 @@ export function endText(r: EndReason | null): string | null {
           ? 'This room is full.'
           : r.reason === 'banned'
             ? 'You are banned from this room for this session.'
-            : 'The room did not accept you.';
+            : r.reason === 'version'
+              ? 'The host runs a different version of SyncWatch. Both of you need the same version to watch together.'
+              : 'The room did not accept you.';
     case 'noSuchRoom':
       return 'There is no room with that code. Check the code with the host.';
     case 'roomFull':

@@ -99,4 +99,11 @@ scenario.
   changes by at least 10 ms and a quarter, so the members list is not rebroadcast for every
   small change.
 
-Peers on different versions are rejected in Hello, so both sides need the same build.
+Both sides need the same version. The version sits in every frame's envelope, so a peer on
+another version cannot read the other side's Hello or Reject. Until Milestone 8 this made a
+member wait at "Joining..." forever. Now the session ends that join with the reason "version"
+("The host runs a different version of SyncWatch..."). The host answers the first undecodable
+frame with a Reject in its own version, and the member ends on the first frame it cannot
+decode. This works against builds from Milestone 8 on; an older build on the other side still
+just waits. Tests: `an_older_member_is_told_the_versions_differ` and
+`a_member_of_another_version_than_the_host_is_told_so` (`crates/net/tests/session.rs`).

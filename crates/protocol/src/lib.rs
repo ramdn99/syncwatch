@@ -24,7 +24,9 @@ pub use tracks::*;
 
 use serde::{Deserialize, Serialize};
 
-/// Bumped on any incompatible change. Peers with a different version are rejected in Hello.
+/// Bumped on any incompatible change. A room frame with another version cannot be decoded;
+/// the session ends such a join with the reason "version" (crates/net, session tests
+/// `an_older_member_is_told_the_versions_differ`, `a_member_of_another_version_than_the_host_is_told_so`).
 pub const PROTOCOL_VERSION: u16 = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

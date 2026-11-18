@@ -53,6 +53,8 @@ struct World {
     /// Fingerprint the HOST side will see for its member (MITM simulation).
     mitm: bool,
     next_room: u32,
+    /// Room frames SENT by this node carry the previous protocol version (an older build).
+    old_version: Option<usize>,
 }
 
 fn cfg(name: &str, seed: u8) -> SessionConfig {
@@ -76,6 +78,7 @@ impl World {
             link_seq: 0,
             mitm: false,
             next_room: 0,
+            old_version: None,
         }
     }
 
@@ -239,7 +242,15 @@ impl World {
                     }
                     _ => {}
                 },
-                Output::Send { peer, lane, data } => {
+                Output::Send {
+                    peer,
+                    lane,
+                    mut data,
+                } => {
+                    // postcard: the envelope starts with the version as a one-byte varint.
+                    if self.old_version == Some(i) && data.first() == Some(&FRAME_ROOM) {
+                        data[1] = (PROTOCOL_VERSION - 1) as u8;
+                    }
                     if let Some((j, q)) = self.links.get(&(i, peer)).and_then(|l| l.remote) {
                         self.queue.push_back(Ev::Tr(
                             j,
@@ -541,6 +552,45 @@ fn chat(w: &mut World, i: usize, text: &str) {
         },
     );
     w.run_for(200_000);
+}
+
+/// Protocol v3 (Milestone 8): an older member joining a newer host is told the versions differ,
+/// instead of waiting forever (the envelope version check used to drop the Hello and the
+/// Reject alike).
+#[test]
+fn an_older_member_is_told_the_versions_differ() {
+    let mut w = World::new();
+    let h = w.host("Hana", 1, None);
+    let next = w.nodes.len();
+    w.old_version = Some(next);
+    let m = w.join("Old", 2, None);
+    assert_eq!(m, next);
+    w.run_for(2_000_000);
+    assert_eq!(
+        w.nodes[m].ended,
+        Some(EndReason::Refused {
+            reason: "version".into()
+        })
+    );
+    assert!(!w.in_room(m));
+    assert!(w.in_room(h));
+}
+
+/// The other way round: a member joining a host that runs another version ends with the same
+/// clear reason.
+#[test]
+fn a_member_of_another_version_than_the_host_is_told_so() {
+    let mut w = World::new();
+    let h = w.host("Hana", 1, None);
+    w.old_version = Some(h);
+    let m = w.join("Mo", 2, None);
+    w.run_for(2_000_000);
+    assert_eq!(
+        w.nodes[m].ended,
+        Some(EndReason::Refused {
+            reason: "version".into()
+        })
+    );
 }
 
 #[test]

@@ -12,6 +12,7 @@ describe('room helpers', () => {
     expect(endText({ kind: 'kicked', banned: true })).toMatch(/banned/);
     expect(endText({ kind: 'refused', reason: 'locked' })).toMatch(/locked/);
     expect(endText({ kind: 'refused', reason: 'full' })).toMatch(/full/);
+    expect(endText({ kind: 'refused', reason: 'version' })).toMatch(/different version of SyncWatch/);
     expect(endText({ kind: 'authRejected', reason: 'TooManyAttempts' })).toMatch(/Too many/);
     expect(endText({ kind: 'hostNotVerified' })).toMatch(/could not be verified/);
     expect(endText({ kind: 'noSuchRoom' })).toMatch(/no room/);
