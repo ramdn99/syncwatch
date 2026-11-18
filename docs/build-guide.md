@@ -322,3 +322,46 @@ The script:
 
 It starts the app with an empty `WEBVIEW2_USER_DATA_FOLDER` on purpose: the app treats empty as
 unset.
+
+## Subtitle font check (non-Latin subtitles)
+
+```
+pwsh -NoProfile -File scripts/dev/sub-font-check.ps1
+```
+
+The script renders `scripts/dev/fixtures/subtitle-scripts.srt` over a short clip with the app's
+own subtitle font setup (`subtitle_font_options` in `crates/player/src/mpv.rs`: the bundled
+Noto Sans, then the Windows system fonts through libass's DirectWrite provider). The text covers
+Latin, Greek, Cyrillic, Arabic, Hebrew, Chinese, Japanese, Korean, Thai and Hindi.
+
+mpv's `vo=image` draws the subtitles into PNG frames, so no window is opened or captured. The
+script makes two runs:
+1. `app`: what the app does. Every line must show real letters, with Arabic joined and right to
+   left.
+2. `nofallback`: the control, with system fonts off. Only Latin, Greek and Cyrillic (from Noto
+   Sans) may render; every other script must show boxes. This proves the check can see boxes.
+
+The script prints the paths of `sheet-app.png` and `sheet-nofallback.png`, with one frame per
+subtitle line. Open both and compare.
+
+Result on the dev machine (Windows 11, 2026-11-18): `app` showed every script correctly;
+`nofallback` showed boxes for Arabic, Hebrew, Chinese, Japanese, Korean, Thai and Hindi.
+
+**On a clean VM (Milestone 9):** copy these files to the VM:
+- `target\debug\examples\sub_font_check.exe`;
+- `libmpv-2.dll`;
+- the `fonts` folder from the install;
+- `scripts\dev\sub-font-check.ps1` and `scripts\dev\fixtures\subtitle-scripts.srt` (same folder
+  is fine);
+- any short video.
+
+Then run:
+
+```
+pwsh -NoProfile -File sub-font-check.ps1 -Exe .\sub_font_check.exe -Fonts .\fonts -Video .\clip.mp4 -Out .\out
+```
+
+Without ffmpeg on the VM, open the PNG frames in `out\app` and `out\nofallback` directly. Also
+do it by hand in the installed app: play the same video, add `subtitle-scripts.srt` with
+**Add subtitle file...**, and step through the eight lines. Repeat on Windows 10 and Windows 11,
+including a VM with only the English language pack installed.

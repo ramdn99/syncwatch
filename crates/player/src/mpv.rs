@@ -79,14 +79,25 @@ fn init_options(cfg: &MpvConfig) -> Vec<(&'static str, String, bool)> {
         ("demuxer-readahead-secs", "20".into(), false),
         // Torrent streams wait for pieces (seek past the frontier, slow swarm): never time out.
         ("network-timeout", "600".into(), false),
-        ("sub-font", "Noto Sans".into(), false),
         ("terminal", "no".into(), false),
         ("msg-level", "all=warn".into(), false),
     ];
-    if let Some(dir) = &cfg.sub_fonts_dir
-        && let Some(s) = dir.to_str()
-    {
-        v.push(("sub-fonts-dir", s.to_owned(), false));
+    v.extend(
+        subtitle_font_options(cfg.sub_fonts_dir.as_deref())
+            .into_iter()
+            .map(|(k, v)| (k, v, false)),
+    );
+    v
+}
+
+/// The subtitle font setup (B8): the bundled Noto Sans is the default text subtitle font, and
+/// glyphs it lacks (Arabic, Hebrew, CJK, Thai, Indic...) fall back to the system fonts through
+/// libass's font provider (DirectWrite on Windows). Public so
+/// `examples/sub_font_check.rs` renders with exactly what the app uses.
+pub fn subtitle_font_options(fonts_dir: Option<&std::path::Path>) -> Vec<(&'static str, String)> {
+    let mut v = vec![("sub-font", "Noto Sans".to_owned())];
+    if let Some(s) = fonts_dir.and_then(|d| d.to_str()) {
+        v.push(("sub-fonts-dir", s.to_owned()));
     }
     v
 }
@@ -478,6 +489,30 @@ mod tests {
         assert_eq!(get("cache-pause-wait").as_deref(), Some("2"));
         assert_eq!(get("cache-pause-initial").as_deref(), Some("no"));
         assert_eq!(get("demuxer-readahead-secs").as_deref(), Some("20"));
+    }
+
+    #[test]
+    fn subtitles_use_the_bundled_noto_sans_with_system_fallback() {
+        let mut c = MpvConfig::new(1);
+        c.sub_fonts_dir = Some(PathBuf::from(r"C:\SyncWatch\fonts"));
+        let o = init_options(&c);
+        let get = |k: &str| {
+            o.iter()
+                .find(|(n, _, _)| *n == k)
+                .map(|(_, v, _)| v.clone())
+        };
+        assert_eq!(get("sub-font").as_deref(), Some("Noto Sans"));
+        assert_eq!(get("sub-fonts-dir").as_deref(), Some(r"C:\SyncWatch\fonts"));
+        // The system fonts stay available for scripts Noto Sans lacks (the provider is not
+        // turned off; scripts/dev/sub-font-check.ps1 proves the fallback renders).
+        assert!(get("sub-font-provider").is_none());
+        // The check example renders with exactly these options.
+        let shared = subtitle_font_options(c.sub_fonts_dir.as_deref());
+        assert!(
+            shared
+                .iter()
+                .all(|(k, v)| get(k).as_deref() == Some(v.as_str()))
+        );
     }
 
     #[test]
