@@ -125,6 +125,9 @@ pub struct MemberDto {
     is_you: bool,
     connected: bool,
     link: Option<LinkState>,
+    /// Latency of the link shown next to it: a member's round-trip time to the host. On a
+    /// member's screen the host row shows the member's own RTT (the only link it has).
+    rtt_ms: Option<u32>,
     media: &'static str,
     buffering: bool,
     tracks_in_sync: bool,
@@ -446,6 +449,11 @@ impl Mirror {
         let me = self.s.me;
         let host_link = self.links.get(&None).copied();
         self.s.host_link = host_link;
+        let my_rtt = self
+            .infos
+            .iter()
+            .find(|i| Some(i.id.0) == me)
+            .and_then(|i| i.rtt_ms);
         self.s.members = self
             .infos
             .iter()
@@ -466,6 +474,11 @@ impl Mirror {
                     is_host: i.is_host,
                     is_you,
                     connected: i.connected,
+                    rtt_ms: match link {
+                        Some(LinkState::Direct | LinkState::Relayed) if i.is_host => my_rtt,
+                        Some(LinkState::Direct | LinkState::Relayed) => i.rtt_ms,
+                        _ => None,
+                    },
                     link,
                     media: media_text(i.media),
                     buffering: i.buffering,
@@ -2841,6 +2854,7 @@ mod tests {
             connected,
             torrent: None,
             wait: None,
+            rtt_ms: None,
         }
     }
 
@@ -3013,6 +3027,38 @@ mod tests {
         assert!(!m.s.missing_file.as_ref().unwrap().panel_open);
         assert_eq!(m.s.file_status, Some("mismatch"));
         assert_eq!(m.s.missing_file.as_ref().unwrap().seq, seq2);
+    }
+
+    /// Spec sections 11 and 12: chat content never reaches the log or the diagnostics events,
+    /// at the most verbose log level (messages, rejections, deletes and clears).
+    #[test]
+    fn chat_content_never_reaches_logs_or_diagnostics() {
+        const TEXT: &str = "zq-private-chat-words-7731";
+        let msg = |id: u64| ChatMessage {
+            id: ChatId(id),
+            seq: id,
+            host_wall_ms: 1_700_000_000_000,
+            sender: MemberId(1),
+            display_name: "Ana".into(),
+            media_epoch: MediaEpoch(1),
+            media_time_ms: Some(12_000),
+            text: format!("{TEXT} {id}"),
+            client_id: id as u32,
+        };
+        let mut m = Mirror::default();
+        let log = crate::logging::tests::capture(|| {
+            m.apply(RoomUi::Core(UiEvent::ChatMessage(msg(1))));
+            m.apply(RoomUi::Core(UiEvent::ChatMessage(msg(2))));
+            m.apply(RoomUi::Core(UiEvent::ChatRejected {
+                client_id: 3,
+                reason: ChatRejectReason::TooLong,
+            }));
+            m.apply(RoomUi::Core(UiEvent::ChatDeleted(ChatId(1))));
+            m.apply(RoomUi::Core(UiEvent::ChatCleared));
+        });
+        assert!(!log.contains(TEXT), "chat text in the log");
+        let diag: String = m.s.diag.events.iter().map(|e| e.text.as_str()).collect();
+        assert!(!diag.contains(TEXT), "chat text in diagnostics");
     }
 
     /// Regression (M7 Part A): the member's chat state must reach the UI mirror on every

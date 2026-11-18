@@ -89,3 +89,14 @@ scenario.
 - Host succession over the network: last item of Milestone 6 (the in-process handover exists now).
 - Warning before sending large externals to relayed peers: needs the connection type
   (available since Milestone 5 as the link state) and is wired in Milestone 6.
+
+## Version history
+- **1:** first version (Milestone 2).
+- **2:** torrent ready gate data (`MemberStatus::wait`, `MemberInfo::wait`,
+  `Heartbeat::duration_ms`; ADR 0012).
+- **3 (Milestone 8):** `MemberInfo::rtt_ms`, each member's round-trip time to the host, shown
+  next to the link in the members list (spec section 7). Members send it again only when it
+  changes by at least 10 ms and a quarter, so the members list is not rebroadcast for every
+  small change.
+
+Peers on different versions are rejected in Hello, so both sides need the same build.

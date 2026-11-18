@@ -545,3 +545,34 @@ fn heartbeat_before_welcome_is_ignored_quietly() {
             .any(|e| matches!(e, Effect::ProtocolViolation { .. }))
     );
 }
+
+/// Members list latency (spec section 7: "direct/relayed/reconnecting with latency"): each
+/// member's clock-sync RTT reaches the host's members list and every member's copy of it.
+#[test]
+fn member_rtt_reaches_the_members_list() {
+    let (mut w, ids) = room(2, 11);
+    w.run_for(5_000_000);
+    let last_members = |idx: usize| -> Vec<MemberInfo> {
+        w.nodes[idx]
+            .ui_events()
+            .filter_map(|e| match e {
+                UiEvent::Members(m) => Some(m.clone()),
+                _ => None,
+            })
+            .last()
+            .expect("a members list")
+    };
+    for viewer in [HOST, ids[0], ids[1]] {
+        let list = last_members(viewer);
+        assert_eq!(list.iter().find(|i| i.is_host).unwrap().rtt_ms, None);
+        for &m in &ids {
+            let id = w.nodes[m].id;
+            let rtt = list.iter().find(|i| i.id == id).unwrap().rtt_ms;
+            // 30 ms each way with 5 ms jitter: about 60 ms round trip.
+            assert!(
+                rtt.is_some_and(|r| (45..=85).contains(&r)),
+                "viewer {viewer}: member {m} rtt {rtt:?}"
+            );
+        }
+    }
+}

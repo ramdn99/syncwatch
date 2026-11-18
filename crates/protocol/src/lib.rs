@@ -25,7 +25,7 @@ pub use tracks::*;
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change. Peers with a different version are rejected in Hello.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Envelope {

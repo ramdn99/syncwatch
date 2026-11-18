@@ -34,10 +34,54 @@ pub fn register_secret(value: &str) {
     }
 }
 
-/// Replaces all registered secrets in `text`.
+/// Shortens every absolute Windows path in `text` to its last component (`...\name.mkv`), so
+/// logs carry no full paths (spec section 11): a path can contain the Windows user name and
+/// the user's folder layout. Covers `C:\..`, `C:/..`, UNC `\\server\..` and the escaped Debug
+/// form (`"C:\\Users\\.."`). A path ends at a quote, a line break, a tab, `|`, `<`, `>`, or where
+/// the next path starts; unquoted paths may contain spaces, so a path is cut at its LAST
+/// separator before that end (with several unquoted paths on one line more text goes, never less).
+pub fn shorten_paths(text: &str) -> String {
+    let b = text.as_bytes();
+    let sep = |c: u8| c == b'\\' || c == b'/';
+    let starts_at = |i: usize| -> bool {
+        let prev_ok = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'\\');
+        let drive =
+            i + 2 < b.len() && b[i].is_ascii_alphabetic() && b[i + 1] == b':' && sep(b[i + 2]);
+        let unc = i + 2 < b.len() && b[i] == b'\\' && b[i + 1] == b'\\' && b[i + 2] != b' ';
+        prev_ok && (drive || unc)
+    };
+    let hard_end = |c: u8| {
+        matches!(
+            c,
+            b'"' | b'\'' | b'\n' | b'\r' | b'\t' | b'|' | b'<' | b'>' | b'`'
+        )
+    };
+    let mut out = String::with_capacity(text.len());
+    let (mut i, mut copied) = (0, 0);
+    while i < b.len() {
+        if !starts_at(i) {
+            i += 1;
+            continue;
+        }
+        let mut end = i + 2;
+        while end < b.len() && !hard_end(b[end]) && !(b[end] == b' ' && starts_at(end + 1)) {
+            end += 1;
+        }
+        // The last separator inside the path (there is at least the one after the drive).
+        let last = (i..end).rev().find(|&k| sep(b[k])).unwrap_or(i + 2);
+        out.push_str(&text[copied..i]);
+        out.push_str("...\\");
+        copied = last + 1;
+        i = end;
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+/// Replaces all registered secrets in `text` and shortens absolute paths.
 pub fn scrub(text: &str) -> String {
     let g = SECRETS.read().unwrap_or_else(|p| p.into_inner());
-    let mut out = text.to_owned();
+    let mut out = shorten_paths(text);
     for s in g.iter() {
         if out.contains(s.as_str()) {
             out = out.replace(s.as_str(), REDACTED);
@@ -147,12 +191,12 @@ pub fn init(logs_dir: &Path) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use tracing::subscriber::with_default;
 
     /// Captures everything logged at the most verbose level through the scrubbing writer.
-    fn capture(f: impl FnOnce()) -> String {
+    pub(crate) fn capture(f: impl FnOnce()) -> String {
         let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         struct Shared(Arc<Mutex<Vec<u8>>>);
         impl Write for Shared {
@@ -189,6 +233,42 @@ mod tests {
         assert!(!out.to_lowercase().contains("testappname42"));
         assert!(!out.contains("FAKE-SECRET-VALUE-for-log-test-0001"));
         assert!(out.contains(REDACTED));
+    }
+
+    #[test]
+    fn logs_carry_no_full_paths() {
+        let cases = [
+            (
+                r"Cannot open file 'C:\Users\John Doe\Videos\My Movie.mkv'",
+                r"Cannot open file '...\My Movie.mkv'",
+            ),
+            (
+                r"native libraries loaded libmpv=C:\Program Files\SyncWatch\libmpv-2.dll vulkan=System",
+                r"native libraries loaded libmpv=...\libmpv-2.dll vulkan=System",
+            ),
+            (
+                r#"webview2=Some("C:\\Users\\jdoe\\AppData\\Local\\SyncWatch\\webview2") ok"#,
+                r#"webview2=Some("...\webview2") ok"#,
+            ),
+            (r"open D:/media/a.mkv", r"open ...\a.mkv"),
+            (r"share \\nas\films\b.mkv done", r"share ...\b.mkv done"),
+            (r"two C:\a\x.srt D:\b\y.srt", r"two ...\x.srt ...\y.srt"),
+            // Not paths: URLs, times, ratios, plain words.
+            (
+                "http://127.0.0.1:8080/x at 12:30 ratio 4:3",
+                "http://127.0.0.1:8080/x at 12:30 ratio 4:3",
+            ),
+            ("nothing here", "nothing here"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(shorten_paths(input), want, "{input}");
+        }
+        let out = capture(|| {
+            tracing::warn!(target: "mpv", r"cannot load C:\Users\jdoe\Videos\x.mkv");
+            tracing::info!(file = ?std::path::Path::new(r"C:\Users\jdoe\Videos\x.mkv"), "opened");
+        });
+        assert!(!out.contains("jdoe"), "{out}");
+        assert!(out.contains(r"...\x.mkv"));
     }
 
     #[test]

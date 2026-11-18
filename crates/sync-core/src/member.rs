@@ -99,6 +99,7 @@ impl MemberMachine {
                 connected: false,
                 torrent: known.and_then(|i| i.torrent),
                 wait: None,
+                rtt_ms: None,
             });
             identities.push((s.id, s.identity));
         }
@@ -227,9 +228,11 @@ impl MemberMachine {
         });
         let rtt = self.clock.rtt_us().map(|r| (r / 1000) as u32);
         let s = self.local.status(rtt, track_override);
-        // Don't spam the host with every RTT wiggle: compare without rtt.
+        // Don't spam the host with every RTT wiggle: compare without rtt, and report the RTT
+        // again only when it moved noticeably (it is shown next to each link in the members list).
         let changed = self.last_status.is_none_or(|l| {
             MemberStatus { rtt_ms: None, ..l } != MemberStatus { rtt_ms: None, ..s }
+                || rtt_moved(l.rtt_ms, s.rtt_ms)
         });
         if changed {
             self.last_status = Some(s);
@@ -649,5 +652,29 @@ impl MemberMachine {
                 self.closed = true;
             }
         }
+    }
+}
+
+/// A new RTT worth reporting: the first sample, or a change of at least 10 ms and a quarter.
+fn rtt_moved(old: Option<u32>, new: Option<u32>) -> bool {
+    match (old, new) {
+        (None, Some(_)) => true,
+        (Some(a), Some(b)) => a.abs_diff(b) >= 10.max(a / 4),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rtt_moved;
+
+    #[test]
+    fn only_noticeable_rtt_changes_are_reported() {
+        assert!(rtt_moved(None, Some(40)));
+        assert!(!rtt_moved(Some(40), None));
+        assert!(!rtt_moved(Some(40), Some(45)));
+        assert!(rtt_moved(Some(40), Some(50)));
+        assert!(!rtt_moved(Some(200), Some(240)));
+        assert!(rtt_moved(Some(200), Some(250)));
     }
 }

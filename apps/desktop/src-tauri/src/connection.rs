@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use syncwatch_ice_config::metered::{self, ApiCredentials, FetchError, InputError};
 use syncwatch_ice_config::probe::{ProbeError, ProbeKind, TestReport};
 use syncwatch_ice_config::store::{
-    self, DpapiFileStore, KeyringStore, LastGood, SecretStore, StoredCredentials,
+    self, DpapiFileStore, KeyringStore, LastGood, SecretStore, StoreError, StoredCredentials,
 };
 use syncwatch_ice_config::{IceServer, ParseError, model, parse_ice_servers, test_servers};
 use tauri::{AppHandle, Emitter, State};
@@ -55,6 +55,17 @@ pub enum Warning {
     UsingCachedServers,
     /// The secure credential store is unavailable.
     StoreUnavailable,
+    /// The saved credentials cannot be decrypted here: they were saved by another Windows user
+    /// or on another PC (a portable copy that was moved). The setup has to be done again.
+    StoreUnreadable,
+}
+
+/// The warning for credentials that cannot be loaded.
+fn load_warning(e: &StoreError) -> Warning {
+    match e {
+        StoreError::Corrupt => Warning::StoreUnreadable,
+        _ => Warning::StoreUnavailable,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -160,10 +171,14 @@ impl ConnectionManager {
             portable: paths.portable,
         };
         // Register secrets with the log scrubber as early as possible.
-        if let Ok(Some(c)) = store::load_credentials(m.store.as_ref()) {
-            for v in c.secret_values() {
-                register_secret(&v);
+        match store::load_credentials(m.store.as_ref()) {
+            Ok(Some(c)) => {
+                for v in c.secret_values() {
+                    register_secret(&v);
+                }
             }
+            Ok(None) => {}
+            Err(e) => m.set_warning(Some(load_warning(&e))),
         }
         m
     }
@@ -199,7 +214,10 @@ impl ConnectionManager {
         let settings = self.settings();
         let dev_bypass = Self::dev_bypass();
         Status {
-            can_connect: settings.verified || dev_bypass,
+            // Credentials that cannot be decrypted here cannot connect: back to setup.
+            can_connect: (settings.verified
+                && self.warning.lock().ok().and_then(|g| *g) != Some(Warning::StoreUnreadable))
+                || dev_bypass,
             settings,
             warning: self.warning.lock().ok().and_then(|g| *g),
             dev_bypass,
@@ -330,8 +348,8 @@ impl ConnectionManager {
         let creds = match store::load_credentials(self.store.as_ref()) {
             Ok(Some(c)) => c,
             Ok(None) => return None,
-            Err(_) => {
-                self.set_warning(Some(Warning::StoreUnavailable));
+            Err(e) => {
+                self.set_warning(Some(load_warning(&e)));
                 return Some(TestOutcome::StoreError);
             }
         };
@@ -552,6 +570,45 @@ mod tests {
         }
         assert!(open_help_link("https://evil.invalid".into()).is_err());
         assert!(open_help_link("file".into()).is_err());
+    }
+
+    #[test]
+    fn credentials_from_another_pc_send_the_user_back_to_setup() {
+        // A portable copy moved to another PC or Windows user: DPAPI cannot decrypt the file.
+        let root = std::env::temp_dir().join(format!("sw-conn-moved-{}", std::process::id()));
+        let paths = AppPaths {
+            exe_dir: root.clone(),
+            root: root.clone(),
+            config: root.join("config"),
+            logs: root.join("logs"),
+            cache: root.join("cache"),
+            portable: true,
+        };
+        std::fs::create_dir_all(&paths.config).unwrap();
+        std::fs::create_dir_all(&paths.cache).unwrap();
+        std::fs::write(
+            paths.config.join("credentials.dpapi"),
+            b"not decryptable here",
+        )
+        .unwrap();
+        let settings = ConnectionSettings {
+            configured: true,
+            mode: Some("apiKey".into()),
+            hostnames: vec![],
+            verified: true,
+            verified_at_unix: Some(1),
+            relay_only: false,
+            last_results: vec![],
+        };
+        std::fs::write(
+            paths.config.join("connection.json"),
+            serde_json::to_vec(&settings).unwrap(),
+        )
+        .unwrap();
+        let st = ConnectionManager::new(&paths).status();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(st.warning, Some(Warning::StoreUnreadable));
+        assert!(st.dev_bypass || !st.can_connect);
     }
 
     #[test]

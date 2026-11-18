@@ -1,5 +1,7 @@
-// "Copy diagnostics": credentials, keys, tokens and IP addresses are removed before anything
-// reaches the clipboard (spec section 11). Loopback addresses stay (they identify nothing).
+// "Copy diagnostics": credentials, keys, tokens and IP addresses are removed, and full paths are
+// shortened to their last part, before anything reaches the clipboard (spec section 11).
+// Loopback addresses stay (they identify nothing). The Rust log scrubber does the same for paths
+// (logging.rs, shorten_paths).
 
 const RULES: [RegExp, string][] = [
   // JSON fields that carry secrets.
@@ -12,6 +14,9 @@ const RULES: [RegExp, string][] = [
   [/\b[\w-]+\.metered\.live\b/gi, '<app-name>.metered.live'],
   // 128-bit tokens (the loopback stream URL) and longer hex secrets.
   [/\b[0-9a-f]{32,}\b/gi, '<token>'],
+  // Absolute Windows paths (C:\..., C:/..., \\server\...): everything up to the last separator
+  // before a quote, line break, tab, | < > or backtick. Paths may contain spaces.
+  [/(?<![\w\\])(?:[A-Za-z]:[\\/]|\\\\(?=[^\s\\]))[^"'\n\r\t|<>`]*[\\/]/g, '...\\'],
   // IPv4 except loopback and 0.0.0.0 (IPv6 below).
   [/\b(?!127\.0\.0\.1\b)(?!0\.0\.0\.0\b)(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/g, '<ip>'],
 ];

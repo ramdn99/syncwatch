@@ -134,6 +134,8 @@ export const statusText = {
     meteredUnreachable: 'Metered could not be reached just now. Your last verified setup is still used.',
     usingCachedServers: 'Fresh connection details could not be fetched; the last good ones are used.',
     storeUnavailable: 'The Windows credential store is not available, so your setup could not be saved.',
+    storeUnreadable:
+      'Your saved connection setup cannot be read here: it was saved on another PC or by another Windows user (for example, a moved portable copy). Set up the connection again.',
   } as Record<string, string>,
 };
 

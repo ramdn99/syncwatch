@@ -24,6 +24,8 @@ export interface RoomMember {
   isYou: boolean;
   connected: boolean;
   link: LinkState | null;
+  /** Latency of the link (round-trip time to the host), when known. */
+  rttMs?: number | null;
   media: MediaText;
   buffering: boolean;
   tracksInSync: boolean;

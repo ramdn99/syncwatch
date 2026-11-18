@@ -160,6 +160,9 @@ pub struct MemberInfo {
     pub torrent: Option<TorrentProgress>,
     /// Torrent rooms: what a buffering member is waiting for.
     pub wait: Option<BufferWait>,
+    /// Round-trip time between this member and the host (clock sync), as last reported.
+    /// None for the host itself and until the first report.
+    pub rtt_ms: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

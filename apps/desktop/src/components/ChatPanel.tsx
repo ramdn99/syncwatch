@@ -3,6 +3,7 @@ import { chipText, nearCurrent, spoilerUntil, type ChatLine } from '../lib/chat'
 import type { MockChatMessage } from '../mock/data';
 import { memberColors } from '../theme/tokens';
 import { Icon } from '../ui/icons';
+import { ChatText } from './ChatText';
 
 export interface ChatPanelProps {
   /** Room chat lines; plain mock messages (outside a room) get chips from mediaTimeMs. */
@@ -157,7 +158,9 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(functio
                 {hiddenUntil != null ? (
                   <p className="text-xs text-muted italic">Hidden until {chipText(hiddenUntil, null)}</p>
                 ) : (
-                  <p className="break-words whitespace-pre-wrap text-text">{m.text}</p>
+                  <p className="break-words whitespace-pre-wrap text-text">
+                    <ChatText text={m.text} />
+                  </p>
                 )}
               </li>
             );

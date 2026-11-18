@@ -37,8 +37,10 @@ fn main() {
         portable = paths.portable,
         "SyncWatch starting"
     );
+    // No full paths in logs (spec section 11): only whether the profile is in the data folder.
     tracing::info!(
-        webview2 = ?std::env::var_os("WEBVIEW2_USER_DATA_FOLDER"),
+        in_data_folder = std::env::var_os("WEBVIEW2_USER_DATA_FOLDER")
+            .is_some_and(|v| std::path::Path::new(&v) == paths.root.join("webview2")),
         "web view data folder"
     );
 

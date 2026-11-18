@@ -20,4 +20,16 @@ describe('diagnostics redaction', () => {
     expect(r).toContain('version 1.2.3');
     expect(r).toContain('10:51:45');
   });
+
+  it('shortens full paths to their last part', () => {
+    const cases: [string, string][] = [
+      ["Cannot open file 'C:\\Users\\John Doe\\Videos\\My Movie.mkv'", "Cannot open file '...\\My Movie.mkv'"],
+      ['libmpv=C:\\Program Files\\SyncWatch\\libmpv-2.dll vulkan=System', 'libmpv=...\\libmpv-2.dll vulkan=System'],
+      ['"C:\\\\Users\\\\jdoe\\\\AppData\\\\x.json"', '"...\\x.json"'],
+      ['open D:/media/a.mkv', 'open ...\\a.mkv'],
+      ['share \\\\nas\\films\\b.mkv done', 'share ...\\b.mkv done'],
+      ['http://127.0.0.1:8080/x at 12:30 ratio 4:3', 'http://127.0.0.1:8080/x at 12:30 ratio 4:3'],
+    ];
+    for (const [input, want] of cases) expect(redact(input), input).toBe(want);
+  });
 });

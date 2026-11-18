@@ -85,11 +85,15 @@ export function RoomView({ onLeave, onOpenSettings }: { onLeave: () => void; onO
   useEffect(() => {
     void appPrefs
       .get()
-      .then((p) => setNoLimit(p.noLimitDefault))
+      .then((p) => {
+        setNoLimit(p.noLimitDefault);
+        setSubScalePct(p.subScalePct);
+      })
       .catch(() => {});
   }, []);
   const [relayedAsk, setRelayedAsk] = useState<{ kind: 'audio' | 'sub'; path: string; members: string[]; size: number } | null>(null);
   const [overlayInput, setOverlayInput] = useState(false);
+  const [subScalePct, setSubScalePct] = useState(100);
   const [error, setError] = useState<string | null>(null);
   const [changeSource, setChangeSource] = useState<{ path?: string } | null>(null);
 
@@ -623,7 +627,7 @@ export function RoomView({ onLeave, onOpenSettings }: { onLeave: () => void; onO
               Joining... catching up with the room
             </div>
           )}
-          {fullscreen && <ChatOverlay messages={chat} inputOpen={overlayInput} onCloseInput={() => setOverlayInput(false)} onSend={sendChat} />}
+          {fullscreen && <ChatOverlay messages={chat} inputOpen={overlayInput} onCloseInput={() => setOverlayInput(false)} onSend={sendChat} subScalePct={subScalePct} />}
         </VideoArea>
         {!fullscreen && cols.right === 0 && <CollapsedRail side="right" label="Show members (])" onClick={() => setPrefs((p) => ({ ...p, rightCollapsed: false }))} />}
         {!fullscreen && cols.right > 0 && (

@@ -1,7 +1,84 @@
 # SyncWatch threat model
 
-Status: started in Milestone 7 (torrents). The full document (spec section 11) is completed
-in Milestone 8.
+Status: complete for Milestone 8 (spec section 11). Milestone 9 adds the installer and the
+updater, and a security review of this document.
+
+## What we protect, and from whom
+
+**Assets:**
+- the user's IP address;
+- the room password;
+- chat content;
+- the Metered credentials (API key, app name, ICE credentials);
+- the user's files and paths;
+- the integrity of what each player plays and shows.
+
+**Not an asset:** the main media file. It is never sent to anyone; each person plays their own
+copy.
+
+**Parties:**
+- a malicious member (inside the room, authenticated);
+- a malicious host;
+- a compromised or hostile signaling server;
+- an outsider who knows or guesses a room code;
+- the TURN relay operator;
+- other programs on the same computer;
+- a BitTorrent swarm (see Torrents).
+
+**Out of scope:** malware already running as the same Windows user, and a compromised build or
+installer (Milestone 9: signed release builds from `scripts/build-release.ps1` only).
+
+## Transport and authentication (ADRs 0005, 0006)
+
+| Threat | What we do | Residual risk |
+|---|---|---|
+| Eavesdropping on room traffic | All room traffic runs over WebRTC data channels (DTLS), host-star: members talk only to the host. TURN relays see only encrypted packets. | The host decrypts everything by design (see Malicious host). |
+| Brute force on a room password | SPAKE2 (the password never leaves the device, and one guess per attempt): backoff up to 8 s between failures, a 10-minute ban of that identity after 6 failures, and a 60 s pause of all password checks after 20 failures in a minute. The proof covers the room code and both DTLS fingerprints. | A weak password can still be guessed slowly. The UI asks for a password or the four words. |
+| Man in the middle through a hostile signaling server | Password rooms: the SPAKE2 proof is bound to both DTLS fingerprints, so a relaying attacker fails the proof. Rooms without a password: both sides show four verification words derived from the fingerprints; the host sees each member's words in the members list. | In a room without a password, an attacker who controls signaling can sit in the middle if nobody compares the words. The user guide says to compare them. |
+| A compromised signaling server | It only forwards SDP and ICE candidates for one room code. It never sees passwords, credentials, chat or media. Limits: 32 connections per IP, 10,000 rooms, a maximum frame size, valid room codes only. | It sees the IP addresses and ICE candidates of everyone who connects, and which room codes meet. It can deny service. |
+| Oversized or malformed messages | Every frame is size-checked before decoding: 64 KiB per protocol frame, 70 KiB per bridge IPC frame, a 1 MiB batch, and 4 KiB per auth frame. Postcard decoding with a version check (protocol v3); per-field limits (names 128 B, chat 4 KiB / 500 graphemes, titles 256 B...); at most 12 members and 32 manifest entries. Anything malformed is dropped and logged as a protocol violation. | A decoder bug in postcard or in our types stays a residual risk (fuzzing: Milestone 9 review item). |
+| A stalled or hung link used to freeze the room | The watchdog shows the interruption banner after 4 s of silence and restarts the peer after 10 s; a hung bridge page is reloaded after 5 s. The ready gate times out (default 15 s) and the host can resume without anyone. | A member can delay the room by up to the gate timeout. |
+
+## Malicious member
+
+| Threat | What we do | Residual risk |
+|---|---|---|
+| Forged track or moderation commands | Track commands (audio, subtitles, delays, externals) and chat moderation are accepted only from the host identity. Anything else is rejected and logged as a protocol violation (named tests in `crates/sync-core/tests`). | None known. |
+| Playback commands without permission | Members only send requests. The host checks the live permissions (play/pause, seek, change media, change speed) and broadcasts one authoritative command with an epoch; stale epochs are dropped. | A member with a permission can use it as much as they like; the host can revoke it live, mute, kick or ban. |
+| Chat flooding, forged timestamps, markup | The host enforces everything: at most 5 messages in 5 s, an optional slow mode, 500 graphemes, control and bidi characters stripped, empty messages rejected. A claimed media time is honoured only within 5 s of the room position. The UI renders plain text only (React escaping); URLs are never linked or opened, only copied. | Offensive text: the host can delete messages, clear the chat, mute or ban. |
+| Malformed file chunks or requests outside the manifest | Chunks are written in order into the per-room cache and the whole file is checked against the manifest's blake3 and size. File requests outside the manifest are protocol violations. | None known. |
+| Lying status (ready, buffering) | It only affects the ready gate, which times out; the host can resume without that member. | See the gate timeout above. |
+
+## Malicious host
+
+| Threat | What we do | Residual risk |
+|---|---|---|
+| Hostile subtitle or audio files | Extension allowlists (subtitles: srt, ass, ssa, vtt, sub, sup; audio: a fixed list), size ceilings (20 MB subtitles, 1 GB audio, unless the member's room uses "No limit"), blake3 checked against the manifest, sanitized file names, a per-room cache deleted when the room ends, and text subtitles decoded to UTF-8. Members see name and size and can cancel. | Parser bugs in libass, FFmpeg or mpv. libmpv stays updatable (pinned build, `docs/libmpv-build.md`). |
+| Unwanted magnets or torrents | Each member confirms a host's magnet (name and size shown) and can decline; the host sees "declined". | See Torrents. |
+| Reading the chat | Chat is encrypted to the host, who relays it and can read all of it. The user guide says so. Chat is never written to disk or logs; members can export it explicitly. | Inherent to the host-star design. |
+| Moderation abuse (mute, kick, ban) | Visible to the affected member; bans last only for the session. | Social, not technical. |
+| Main media requests | The protocol has no message able to carry main-media bytes (enumeration test `no_media_over_datachannel_enumeration`), and only manifest files can be requested. | None known. |
+
+## Your IP address
+
+| Threat | What we do | Residual risk |
+|---|---|---|
+| Room peers learn your IP (WebRTC direct paths) | **Always use relay** (Settings, Network) forces TURN-only ICE, so peers only see the relay's address. | Without it, the host and members on direct paths see each other's addresses. The signaling server always sees your address. |
+| The relay operator | Metered (or your own TURN) sees both ends' addresses and traffic volume, but only encrypted packets. | Inherent to TURN. |
+| The BitTorrent swarm | Shown before the first torrent; see Torrents. | The relay setting does not hide it. |
+| Latency in the members list | Each member's round-trip time to the host is shown next to their link (protocol v3, `MemberInfo.rtt_ms`). | A rough distance hint to other room members; no address. |
+
+## Local data, logs and diagnostics
+
+| Threat | What we do | Residual risk |
+|---|---|---|
+| Secrets in logs | Third-party crates are capped at `warn`; every log line goes through a scrubber that replaces registered secret values (API key, credentials, app name). A test logs the developer's real values at the most verbose level and greps for them. | A secret that was never registered (new code path). Code review in Milestone 9. |
+| Full paths and chat in logs | The scrubber shortens every absolute Windows path to its last component (`...\name.mkv`), which also covers mpv and third-party messages. Chat content is never logged or put in diagnostics (test `chat_content_never_reaches_logs_or_diagnostics`). | File names stay in logs. |
+| "Copy diagnostics" | The report removes credentials, keys, tokens, the Metered app name, IP addresses (except loopback) and full paths before it reaches the clipboard (`src/lib/redact.ts`, tests). | Room codes and file names are included (they help support). |
+| Stored data | Only the user's own preferences, layout, window position, display name and the relay setup are stored (`config`). Nothing from a room is kept (test `persistence.test.ts`). Portable mode keeps everything in `<exe>\data`, including the WebView2 profile (`scripts/dev/portable-check.ps1`). The relay credentials are encrypted with Windows DPAPI for the current user (`credentials.dpapi`, `ice-last-good.dpapi`). | Malware running as the same user can decrypt the credentials. A portable copy moved to another PC or Windows user cannot decrypt them (DPAPI is per user). |
+| Other local programs and the torrent stream server | See Torrents (127.0.0.1 only, random port, 128-bit token). | Same-user processes can read the same files anyway. |
+| Telemetry | None. The app talks only to the signaling server, the TURN/STUN servers, Metered's credentials API (when set up), room peers, and the BitTorrent network in torrent rooms. | None. |
+| Remote content in the UI | All fonts, icons and scripts are bundled; a strict CSP; a test fails on any remote resource. | None known. |
 
 ## Torrents (ADRs 0009, 0010)
 

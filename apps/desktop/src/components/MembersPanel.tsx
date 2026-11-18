@@ -107,6 +107,11 @@ export function MembersPanel({
                   HOST
                 </span>
               )}
+              {locallyMuted.has(m.id) && (
+                <span className="text-muted" title="Muted by you: their messages are hidden on your screen">
+                  <Icon name="mutedByYou" label="Muted by you" />
+                </span>
+              )}
               {m.chatMuted && (
                 <span className="text-muted" title="Muted in chat">
                   <Icon name="chatMuted" label="Muted in chat" />
@@ -131,6 +136,7 @@ export function MembersPanel({
                 <span className={`inline-flex items-center gap-1 ${CONN_COLOR[m.link]}`} data-testid="member-link">
                   {CONN_ICON[m.link] && <Icon name={CONN_ICON[m.link]!} size="xs" />}
                   {CONN_TEXT[m.link]}
+                  {m.rttMs != null && (m.link === 'direct' || m.link === 'relayed') && <span className="tabular">{` · ${m.rttMs} ms`}</span>}
                 </span>
               )}
               <span

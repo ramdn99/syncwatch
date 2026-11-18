@@ -457,6 +457,7 @@ impl HostMachine {
             connected: true,
             torrent: host_status.torrent,
             wait: host_status.wait,
+            rtt_ms: None,
         }];
         v.extend(
             self.members
@@ -477,6 +478,7 @@ impl HostMachine {
                     connected: e.connected,
                     torrent: e.status.and_then(|s| s.torrent),
                     wait: e.status.and_then(|s| s.wait),
+                    rtt_ms: e.status.and_then(|s| s.rtt_ms),
                 }),
         );
         v
