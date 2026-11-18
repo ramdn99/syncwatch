@@ -365,3 +365,23 @@ Without ffmpeg on the VM, open the PNG frames in `out\app` and `out\nofallback` 
 do it by hand in the installed app: play the same video, add `subtitle-scripts.srt` with
 **Add subtitle file...**, and step through the eight lines. Repeat on Windows 10 and Windows 11,
 including a VM with only the English language pack installed.
+
+## A standalone test build (no installer)
+
+For a test on another PC before Milestone 9:
+
+```
+pnpm --dir apps/desktop tauri build --no-bundle
+```
+
+This builds `target\release\syncwatch.exe` with the UI embedded. A plain
+`cargo build --release` does not: that exe loads its UI from the dev server
+(`localhost:1420`). The build script places these next to the exe:
+- `libmpv-2.dll`;
+- `vulkan\vulkan-1.dll`;
+- `fonts\NotoSans-*.ttf` (the subtitle fallback fonts).
+
+Copy those, plus an empty `portable.flag`, into one folder. `scripts/dev/portable-check.ps1
+-Release` starts that layout once without the dev server running. The cross-network checklist
+(`docs/checklists/cross-network.md`) uses this build. Release builds for users come only from
+`scripts/build-release.ps1` (Milestone 9).

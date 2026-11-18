@@ -31,6 +31,22 @@ fn main() {
                 "cargo:warning=bundled Vulkan loader not found; run scripts/fetch-third-party.ps1"
             );
         }
+        // The subtitle fallback fonts go to <exe>\fonts, as in the installed app: the app passes
+        // that folder to mpv (sub-fonts-dir) only when it exists.
+        for name in [
+            "NotoSans-Regular.ttf",
+            "NotoSans-Bold.ttf",
+            "NotoSans-Italic.ttf",
+            "NotoSans-BoldItalic.ttf",
+        ] {
+            let src = manifest.join("../../../third_party/cache/fonts").join(name);
+            println!("cargo:rerun-if-changed={}", src.display());
+            if src.exists() {
+                copy_if_changed(&src, &profile_dir.join("fonts").join(name));
+            } else {
+                println!("cargo:warning={name} not found; run scripts/fetch-third-party.ps1");
+            }
+        }
     }
 
     tauri_build::build();

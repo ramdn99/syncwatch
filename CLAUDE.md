@@ -67,6 +67,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo test --workspace
 pnpm --dir apps/desktop tauri dev
+pnpm --dir apps/desktop tauri build --no-bundle   (standalone test exe with the UI embedded; cargo build --release is NOT standalone)
 cargo run --release -p syncwatch-sim -- --seed 7
 cargo run --release -p syncwatch-sim -- --latency-ms 150 --jitter-ms 60 --loss 0.2
 cargo run -p syncwatch-ice-config --example live_probe   (real Metered account; prints OK/FAIL + latency only)
