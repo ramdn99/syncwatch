@@ -19,6 +19,13 @@ fn ours(log: &TrackerLog) -> Vec<Announce> {
 
 fn init() {
     syncwatch_ice_config::install_crypto_provider();
+    // SW_TEST_LOG=<filter> shows the engine's log (debugging timing tests).
+    if let Ok(f) = std::env::var("SW_TEST_LOG") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(f))
+            .with_test_writer()
+            .try_init();
+    }
 }
 
 struct Swarm {
@@ -714,7 +721,10 @@ async fn a_member_re_dials_the_hosts_engine_within_seconds() {
     std::fs::write(src.join("r.mkv"), &bytes).unwrap();
     let peers = Arc::new(Mutex::new(Vec::new()));
     let (hurl, _log) = http_tracker(peers.clone()).await;
-    let sd = seeder(&src.join("r.mkv"), vec![hurl.clone()], None).await;
+    // The seeder is throttled so the host's engine is still downloading when the member's
+    // re-dial arrives: unthrottled on loopback it had all 8 MiB within 0.1 s and, as designed,
+    // stopped all traffic at 100% (ADR 0010), so a re-dial that came later found nothing.
+    let sd = seeder(&src.join("r.mkv"), vec![hurl.clone()], Some(512 * 1024)).await;
     let m = media(
         sd.infohash,
         0,
@@ -722,7 +732,9 @@ async fn a_member_re_dials_the_hosts_engine_within_seconds() {
         bytes.len() as u64,
         magnet(&sd.infohash, "r.mkv", &[]),
     );
-    let host_port = outside_ephemeral_port();
+    // Reserved (bound, not listening: connections are refused, as with no host) until the
+    // host engine starts, so no other socket can take the port meanwhile.
+    let (host_port, reserved) = reserve_port();
     // The member: no tracker, no DHT; only the host hint.
     let (member, mut mev) = EngineHandle::spawn(engine_cfg(dir.join("member"), free_port()));
     member.start_with_meta(
@@ -733,6 +745,7 @@ async fn a_member_re_dials_the_hosts_engine_within_seconds() {
     let t0 = Instant::now();
     tokio::time::sleep(Duration::from_secs(6)).await;
     // The host's engine comes up (it has the seeder).
+    drop(reserved);
     let (host, _hev) = EngineHandle::spawn(engine_cfg(dir.join("host"), host_port));
     host.start_with_meta(m, sd.torrent.to_vec(), vec![sd.addr]);
     let mut seen = Vec::new();
@@ -805,7 +818,10 @@ async fn a_member_connected_only_to_a_silent_peer_re_dials_the_host() {
     std::fs::write(src.join("s.mkv"), &bytes).unwrap();
     let peers = Arc::new(Mutex::new(Vec::new()));
     let (hurl, _log) = http_tracker(peers.clone()).await;
-    let sd = seeder(&src.join("s.mkv"), vec![hurl.clone()], None).await;
+    // The seeder is throttled so the host's engine is still downloading when the member's
+    // re-dial arrives: unthrottled on loopback it had all 8 MiB within 0.1 s and, as designed,
+    // stopped all traffic at 100% (ADR 0010), so a re-dial that came later found nothing.
+    let sd = seeder(&src.join("s.mkv"), vec![hurl.clone()], Some(512 * 1024)).await;
     let m = media(
         sd.infohash,
         0,
@@ -814,7 +830,9 @@ async fn a_member_connected_only_to_a_silent_peer_re_dials_the_host() {
         magnet(&sd.infohash, "s.mkv", &[]),
     );
     let silent = silent_peer(sd.infohash).await;
-    let host_port = outside_ephemeral_port();
+    // Reserved (bound, not listening: connections are refused, as with no host) until the
+    // host engine starts, so no other socket can take the port meanwhile.
+    let (host_port, reserved) = reserve_port();
     let (member, mut mev) = EngineHandle::spawn(engine_cfg(dir.join("member"), free_port()));
     // The room is at the start: the member needs that window (a Room cursor wants data).
     member.duration(sd.infohash, Some(60_000));
@@ -834,6 +852,7 @@ async fn a_member_connected_only_to_a_silent_peer_re_dials_the_host() {
     );
     let t0 = Instant::now();
     tokio::time::sleep(Duration::from_secs(6)).await;
+    drop(reserved);
     let (host, _hev) = EngineHandle::spawn(engine_cfg(dir.join("host"), host_port));
     host.start_with_meta(m, sd.torrent.to_vec(), vec![sd.addr]);
     let mut seen = Vec::new();
@@ -856,8 +875,10 @@ async fn a_member_connected_only_to_a_silent_peer_re_dials_the_host() {
         "SILENT member got data {t:?} after starting (host up at 6 s); max live peers {peers_seen:?}"
     );
     assert!(got.is_some(), "member never got data");
+    // Worst case by design: the first stale re-dial (5 s) comes just before the host's engine
+    // is up (6 s), and the backoff puts the next one at 15 s. librqbit alone takes 10-60 s+.
     assert!(
-        t < Duration::from_secs(16),
+        t < Duration::from_secs(20),
         "re-dialed the host although a silent peer was connected: {t:?}"
     );
     host.stop(sd.infohash, StopReason::Leave).await;
@@ -865,23 +886,15 @@ async fn a_member_connected_only_to_a_silent_peer_re_dials_the_host() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A free port OUTSIDE the OS ephemeral range: tests running in parallel get their ports from
-/// that range, so none of them takes this one while the test waits for the host's engine.
-fn outside_ephemeral_port() -> u16 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let mut x = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(7) as u64
-        | 1;
-    for _ in 0..200 {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        let p = 21_000 + (x % 8_000) as u16;
-        if std::net::TcpListener::bind(("127.0.0.1", p)).is_ok() {
-            return p;
-        }
-    }
-    free_port()
+/// A port held by a socket that is bound but NOT listening: connections to it are refused (as
+/// when the host's engine is not up yet), and no other socket can take it, including an
+/// outgoing connection's local port. Drop the socket right before the host's engine binds.
+/// (A port picked "outside the ephemeral range" was not enough: on the dev machine the dynamic
+/// range is 1024-65535, and under the full suite's load another socket took the port during
+/// the 6 s wait, so the member re-dialed something that was not the host.)
+fn reserve_port() -> (u16, tokio::net::TcpSocket) {
+    let s = tokio::net::TcpSocket::new_v4().unwrap();
+    s.bind("0.0.0.0:0".parse().unwrap()).unwrap();
+    let port = s.local_addr().unwrap().port();
+    (port, s)
 }

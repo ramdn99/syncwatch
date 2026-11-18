@@ -287,6 +287,30 @@ the initial peers. Everyone else keeps the slow swarm retry (15 s, then every 30
   that port), a re-dial does not help. librqbit then reconnects on its own schedule, about
   45–50 s in the tests. In the app the hint is always the host engine's own listen port.
 
+**Third form, found while making the tests reliable (2026-11-18).** Under the full test suite's
+load both tests above failed now and then (data after 19–51 s, or never). The engine log showed
+three separate causes:
+1. **The tests' hinted port was not reserved.** On the dev machine Windows hands out
+   outgoing ports from 1024–65535 (not 49152 and up), so another socket could take the port
+   while the test waited 6 s. Fixed in the tests: the port is held by a bound socket that does
+   not listen (connections are refused, as when the host is not up) until the host's engine
+   binds it.
+2. **The host's engine finished too early.** Unthrottled on loopback, it had all 8 MiB from
+   the seeder within 0.1 s and, as designed, stopped all traffic at 100% (ADR 0010). A re-dial
+   after that found nothing. Fixed in the tests: the seeder uploads at 512 KiB/s, as a real
+   swarm would.
+3. **A real gap in the engine.** A connection made just as the host's engine came up can hang
+   before the handshake (its torrent still initializing). The member then sat on that silent
+   link until librqbit's 10 s read timeout, because the "no data" re-dial only ran when a play
+   cursor wanted data, and this member had none yet. Fixed in the engine: a member that has
+   received **nothing at all** counts as needing data, so it re-dials after 3–5 s.
+
+After the fixes, 15 runs in a row of the whole engine test file passed. The worst times were
+10.2 s (the hung handshake, now recovered by the re-dial) and 15.1 s (silent peer: the first
+re-dial at 5 s comes just before the host is up at 6 s, and the backoff puts the next one at
+15 s). The silent-peer test now allows 20 s, its designed worst case; librqbit alone takes
+10–60 s or more.
+
 ### Container ranges, measured with mpv
 
 `cargo run -p syncwatch-player --example range_probe -- <file> <start_s> <seek_s>`: a

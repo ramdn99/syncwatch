@@ -1382,13 +1382,17 @@ impl Actor {
                 a.no_peers_since = None;
                 // Connected, but no data while we need some (a peer that never sends, such as
                 // a swarm client refusing a second connection from the same address): a member
-                // re-dials the host's engine too (start race, ADR 0012).
-                let wants = plan.cursors.iter().any(|c| {
-                    matches!(
-                        c.kind,
-                        crate::policy::CursorKind::Room | crate::policy::CursorKind::Demand
-                    )
-                });
+                // re-dials the host's engine too (start race, ADR 0012). Nothing received yet
+                // counts as needing data: a connection made just as the host's engine came up
+                // can hang before the handshake (its torrent still initializing) until the
+                // 10 s read timeout, with no play cursor set yet.
+                let wants = have_bytes == 0
+                    || plan.cursors.iter().any(|c| {
+                        matches!(
+                            c.kind,
+                            crate::policy::CursorKind::Room | crate::policy::CursorKind::Demand
+                        )
+                    });
                 let progressed = have_bytes != a.last_have;
                 if progressed || !wants || complete {
                     a.last_have = have_bytes;
