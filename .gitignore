@@ -49,3 +49,6 @@ graphify-out/
 
 # Stray temp files of dev runs
 /.tmp
+
+# Updater private keys (never in the repository; see docs/release-guide.md)
+*.key
