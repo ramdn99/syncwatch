@@ -21,6 +21,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+/// Largest subtitle margin the UI may set (mpv's scaled pixels, 720 = window height).
+pub const SUB_MARGIN_MAX: u32 = 300;
+
 /// Startup configuration for [`MpvPlayer`].
 #[derive(Debug, Clone)]
 pub struct MpvConfig {
@@ -444,6 +447,11 @@ impl Player for MpvPlayer {
     }
     fn set_sub_delay(&self, seconds: f64) -> Result<()> {
         self.mpv.set_property("sub-delay", seconds).map_err(cmd_err)
+    }
+    fn set_sub_margin(&self, scaled_px: u32) -> Result<()> {
+        self.mpv
+            .set_property("sub-margin-y", i64::from(scaled_px.min(SUB_MARGIN_MAX)))
+            .map_err(cmd_err)
     }
     fn set_audio_delay(&self, seconds: f64) -> Result<()> {
         self.mpv

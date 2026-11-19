@@ -138,6 +138,11 @@ fn player_set_volume(state: State<'_, AppState>, volume: f64) -> CmdResult<()> {
 }
 
 #[tauri::command]
+fn player_set_sub_margin(state: State<'_, AppState>, scaled_px: u32) -> CmdResult<()> {
+    state.player.set_sub_margin(scaled_px).map_err(friendly)
+}
+
+#[tauri::command]
 fn player_set_mute(state: State<'_, AppState>, mute: bool) -> CmdResult<()> {
     state.player.set_mute(mute).map_err(friendly)
 }
@@ -271,6 +276,7 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             player_seek_relative,
             player_set_volume,
             player_set_mute,
+            player_set_sub_margin,
             player_select_track,
             player_add_external,
             crate::connection::connection_status,

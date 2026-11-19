@@ -20,6 +20,8 @@ export interface VideoAreaProps {
   downloaded?: { ranges: [number, number][]; size: number } | null;
   /** Show the raw "Buffering..." pill from mpv (outside a room only; rooms use the debounced popup). */
   cachePill?: boolean;
+  /** Sets mpv's subtitle bottom margin (scaled pixels) so the control bar never covers subtitles. */
+  onSubMargin?: (scaledPx: number) => void;
   children?: ReactNode;
 }
 
@@ -30,6 +32,18 @@ const DEFAULT_EMPTY = {
 };
 
 const HIDE_AFTER_MS = 2500;
+
+/** mpv's default bottom margin for text subtitles (scaled pixels, 720 = video area height). */
+export const SUB_MARGIN_DEFAULT = 22;
+
+/**
+ * The subtitle margin while the control bar (`barPx` tall, in an area `areaPx` tall) is shown:
+ * the default margin plus the bar, in mpv's 720-based scaled pixels. Hidden bar: the default.
+ */
+export function subMarginFor(barPx: number, areaPx: number, shown: boolean): number {
+  if (!shown || areaPx <= 0) return SUB_MARGIN_DEFAULT;
+  return Math.min(300, Math.round(SUB_MARGIN_DEFAULT + (barPx * 720) / areaPx));
+}
 
 /**
  * CENTER column. The element itself is transparent: the mpv window sits underneath and is
@@ -58,13 +72,32 @@ export const VideoArea = forwardRef<HTMLDivElement, VideoAreaProps>(function Vid
   }, [playing]);
 
   const showControls = visible || !playing;
+  const areaRef = useRef<HTMLDivElement | null>(null);
+  const barRef = useRef<HTMLDivElement | null>(null);
+  const lastMargin = useRef<number | null>(null);
+  const { onSubMargin } = props;
+  // Raise the subtitles above the control bar while it is shown (and back down when it hides).
+  useEffect(() => {
+    if (!onSubMargin || !state.fileLoaded) return;
+    const area = areaRef.current?.getBoundingClientRect().height ?? 0;
+    const bar = barRef.current?.getBoundingClientRect().height ?? 0;
+    const m = subMarginFor(bar, area, showControls);
+    if (m !== lastMargin.current) {
+      lastMargin.current = m;
+      onSubMargin(m);
+    }
+  }, [showControls, state.fileLoaded, fullscreen, onSubMargin]);
   const duration = state.duration ?? 0;
   const pos = state.timePos ?? 0;
   const pct = duration > 0 ? Math.min(100, (pos / duration) * 100) : 0;
 
   return (
     <div
-      ref={ref}
+      ref={(el) => {
+        areaRef.current = el;
+        if (typeof ref === 'function') ref(el);
+        else if (ref) ref.current = el;
+      }}
       className={`video-hole relative h-full min-w-0 flex-1 ${showControls ? '' : 'cursor-none'}`}
       onMouseMove={poke}
       onDoubleClick={props.onToggleFullscreen}
@@ -91,8 +124,9 @@ export const VideoArea = forwardRef<HTMLDivElement, VideoAreaProps>(function Vid
         onClick={(e) => e.stopPropagation()}
         onDoubleClick={(e) => e.stopPropagation()}
       >
-        <SeekBar pct={pct} duration={duration} markers={markers} cacheAhead={state.cacheAhead} pos={pos} onSeek={props.onSeek} downloaded={props.downloaded ?? null} />
-        <div className="mt-2 flex items-center gap-3">
+        <div ref={barRef}>
+          <SeekBar pct={pct} duration={duration} markers={markers} cacheAhead={state.cacheAhead} pos={pos} onSeek={props.onSeek} downloaded={props.downloaded ?? null} />
+          <div className="mt-2 flex items-center gap-3">
           <IconButton label={state.paused ? 'Play (Space)' : 'Pause (Space)'} onClick={props.onTogglePause}>
             <Icon name={state.paused ? 'play' : 'pause'} size="md" />
           </IconButton>
@@ -115,6 +149,7 @@ export const VideoArea = forwardRef<HTMLDivElement, VideoAreaProps>(function Vid
             <IconButton label={fullscreen ? 'Exit fullscreen (F)' : 'Fullscreen (F)'} onClick={props.onToggleFullscreen}>
               <Icon name={fullscreen ? 'exitFullscreen' : 'fullscreen'} size="md" />
             </IconButton>
+          </div>
           </div>
         </div>
       </div>

@@ -113,6 +113,12 @@ pub trait Player: Send + Sync {
     fn add_external(&self, kind: TrackKind, path: &Path, select: bool) -> Result<()>;
     fn set_sub_delay(&self, seconds: f64) -> Result<()>;
     fn set_audio_delay(&self, seconds: f64) -> Result<()>;
+    /// Bottom margin of text subtitles in mpv's scaled pixels (720 = window height; mpv's
+    /// default is 22). The app raises it while its control bar is visible, so the bar never
+    /// covers a subtitle line. Players without subtitles ignore it.
+    fn set_sub_margin(&self, _scaled_px: u32) -> Result<()> {
+        Ok(())
+    }
     /// Current tracks (cached from the last event).
     fn tracks(&self) -> Vec<Track>;
     /// Current playback state (cached from the last event).

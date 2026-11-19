@@ -66,6 +66,7 @@ export const player = {
   seekBy: (delta: number) => call('player_seek_relative', { delta }),
   setVolume: (volume: number) => call('player_set_volume', { volume }),
   setMute: (mute: boolean) => call('player_set_mute', { mute }),
+  setSubMargin: (scaledPx: number) => call('player_set_sub_margin', { scaledPx }),
   selectTrack: (kind: TrackKind, selection: TrackSelection) => call('player_select_track', { kind, selection }),
   addExternal: (kind: TrackKind, path: string) => call('player_add_external', { kind, path }),
 };

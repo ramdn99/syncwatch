@@ -93,6 +93,8 @@ export function RoomView({ onLeave, onOpenSettings }: { onLeave: () => void; onO
   }, []);
   const [relayedAsk, setRelayedAsk] = useState<{ kind: 'audio' | 'sub'; path: string; members: string[]; size: number } | null>(null);
   const [overlayInput, setOverlayInput] = useState(false);
+  // Lifts subtitles above the visible control bar (stable callback: VideoArea calls it on change).
+  const subMargin = useCallback((px: number) => void player.setSubMargin(px).catch(() => {}), []);
   const [subScalePct, setSubScalePct] = useState(100);
   const [error, setError] = useState<string | null>(null);
   const [changeSource, setChangeSource] = useState<{ path?: string } | null>(null);
@@ -606,6 +608,7 @@ export function RoomView({ onLeave, onOpenSettings }: { onLeave: () => void; onO
           onSeek={(s) => ctl.seekTo(s)}
           onVolume={(v) => void run(player.setVolume(v))}
           onToggleMute={() => void run(player.setMute(!state.mute))}
+          onSubMargin={subMargin}
           onToggleFullscreen={() => toggleFullscreen()}
           onOpenFile={() => void openFile()}
           emptyState={rs.active ? roomEmptyState(rs) : undefined}
