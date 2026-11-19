@@ -385,3 +385,28 @@ Copy those, plus an empty `portable.flag`, into one folder. `scripts/dev/portabl
 -Release` starts that layout once without the dev server running. The cross-network checklist
 (`docs/checklists/cross-network.md`) uses this build. Release builds for users come only from
 `scripts/build-release.ps1` (Milestone 9).
+
+## Build stability (runtime files next to the exe)
+
+The build script (`apps/desktop/src-tauri/build.rs`) places the runtime files in
+`target\<profile>`, in a fixed order:
+1. `libmpv-2.dll`, from `LIBMPV_DIR`;
+2. `vulkan\vulkan-1.dll`;
+3. `fonts\NotoSans-*.ttf`.
+
+Each step is idempotent: an identical file is left alone, and a changed one is written to a
+temporary file in the same folder and renamed over the old one. If a scanner or a running dev
+app holds the file, the step retries up to 8 times with a growing delay. A step that still
+fails prints the reason as a build warning. A missing source prints which file is missing and
+to run `scripts/fetch-third-party.ps1`.
+
+To check stability, this makes N standalone release builds, each from a clean, separate
+target folder, and checks each output against its source by hash:
+
+```
+pwsh -NoProfile -File scripts/dev/build-repeat.ps1 -Count 10
+```
+
+The unexplained failure seen once on 2026-11-18 (right after a build-script edit) could not be
+reproduced; its error text was not captured. The old copy step wrote over the destination
+directly and only warned on failure.

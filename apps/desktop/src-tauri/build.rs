@@ -1,11 +1,41 @@
-//! Build script: Tauri codegen, libmpv link setup (delay-load), and copying the runtime DLLs
-//! next to the dev executable. Never writes into LIBMPV_DIR.
+//! Build script: Tauri codegen, libmpv link setup (delay-load), and placing the runtime files
+//! next to the executable (`target/<profile>`), in the same layout as the installed app:
+//! `libmpv-2.dll`, `vulkan\vulkan-1.dll`, `fonts\NotoSans-*.ttf`. Never writes into LIBMPV_DIR.
+//!
+//! The copies are idempotent and ordered: one fixed list, processed in order, each written to a
+//! temporary file in the destination folder and then renamed over the target, with retries
+//! (a virus scanner or a running dev app can hold a file for a moment). A file that is already
+//! identical is left alone. Errors are reported with the reason, never swallowed.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// (source relative to the repo root or LIBMPV_DIR, destination relative to target/<profile>).
+const THIRD_PARTY: &[(&str, &str)] = &[
+    (
+        "third_party/cache/vulkan/vulkan-1.dll",
+        "vulkan/vulkan-1.dll",
+    ),
+    (
+        "third_party/cache/fonts/NotoSans-Regular.ttf",
+        "fonts/NotoSans-Regular.ttf",
+    ),
+    (
+        "third_party/cache/fonts/NotoSans-Bold.ttf",
+        "fonts/NotoSans-Bold.ttf",
+    ),
+    (
+        "third_party/cache/fonts/NotoSans-Italic.ttf",
+        "fonts/NotoSans-Italic.ttf",
+    ),
+    (
+        "third_party/cache/fonts/NotoSans-BoldItalic.ttf",
+        "fonts/NotoSans-BoldItalic.ttf",
+    ),
+];
 
 fn main() {
     println!("cargo:rerun-if-env-changed=LIBMPV_DIR");
-    println!("cargo:rerun-if-changed=../../../third_party/cache/vulkan/vulkan-1.dll");
 
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         // libmpv-2.dll is loaded explicitly by absolute path at startup (ADR 0002); the import
@@ -16,35 +46,24 @@ fn main() {
     }
 
     if let Some(profile_dir) = profile_dir() {
-        if let Ok(libmpv) = std::env::var("LIBMPV_DIR") {
-            copy_if_changed(
-                &Path::new(&libmpv).join("libmpv-2.dll"),
-                &profile_dir.join("libmpv-2.dll"),
-            );
-        }
         let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
-        let vulkan = manifest.join("../../../third_party/cache/vulkan/vulkan-1.dll");
-        if vulkan.exists() {
-            copy_if_changed(&vulkan, &profile_dir.join("vulkan").join("vulkan-1.dll"));
+        let repo = manifest.join("../../..");
+        let mut files: Vec<(PathBuf, PathBuf)> = Vec::new();
+        if let Ok(libmpv) = std::env::var("LIBMPV_DIR") {
+            files.push((
+                Path::new(&libmpv).join("libmpv-2.dll"),
+                profile_dir.join("libmpv-2.dll"),
+            ));
         } else {
-            println!(
-                "cargo:warning=bundled Vulkan loader not found; run scripts/fetch-third-party.ps1"
-            );
+            println!("cargo:warning=LIBMPV_DIR is not set; libmpv-2.dll is not placed");
         }
-        // The subtitle fallback fonts go to <exe>\fonts, as in the installed app: the app passes
-        // that folder to mpv (sub-fonts-dir) only when it exists.
-        for name in [
-            "NotoSans-Regular.ttf",
-            "NotoSans-Bold.ttf",
-            "NotoSans-Italic.ttf",
-            "NotoSans-BoldItalic.ttf",
-        ] {
-            let src = manifest.join("../../../third_party/cache/fonts").join(name);
+        for (src, dst) in THIRD_PARTY {
+            files.push((repo.join(src), profile_dir.join(dst)));
+        }
+        for (src, dst) in &files {
             println!("cargo:rerun-if-changed={}", src.display());
-            if src.exists() {
-                copy_if_changed(&src, &profile_dir.join("fonts").join(name));
-            } else {
-                println!("cargo:warning={name} not found; run scripts/fetch-third-party.ps1");
+            if let Err(e) = place(src, dst) {
+                println!("cargo:warning={e}");
             }
         }
     }
@@ -58,25 +77,41 @@ fn profile_dir() -> Option<PathBuf> {
     out.ancestors().nth(3).map(Path::to_path_buf)
 }
 
-fn copy_if_changed(src: &Path, dst: &Path) {
-    let Ok(src_meta) = std::fs::metadata(src) else {
-        println!("cargo:warning=missing {}", src.display());
-        return;
-    };
-    if let Ok(dst_meta) = std::fs::metadata(dst)
-        && dst_meta.len() == src_meta.len()
-        && dst_meta.modified().ok() >= src_meta.modified().ok()
-    {
-        return;
+/// Places `src` at `dst` unless an identical file is already there.
+fn place(src: &Path, dst: &Path) -> Result<(), String> {
+    let src_bytes = std::fs::read(src).map_err(|e| {
+        format!(
+            "{} not found ({e}); run scripts/fetch-third-party.ps1",
+            src.display()
+        )
+    })?;
+    if std::fs::read(dst).is_ok_and(|d| d == src_bytes) {
+        return Ok(());
     }
-    if let Some(parent) = dst.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let parent = dst
+        .parent()
+        .ok_or_else(|| format!("no parent folder for {}", dst.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+    let name = dst
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = parent.join(format!(".{name}.{}.tmp", std::process::id()));
+    let mut last = String::new();
+    for attempt in 0..8u32 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(250 * u64::from(attempt)));
+        }
+        match std::fs::write(&tmp, &src_bytes).and_then(|()| std::fs::rename(&tmp, dst)) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = e.to_string(),
+        }
     }
-    if let Err(e) = std::fs::copy(src, dst) {
-        println!(
-            "cargo:warning=could not copy {} -> {}: {e}",
-            src.display(),
-            dst.display()
-        );
-    }
+    let _ = std::fs::remove_file(&tmp);
+    Err(format!(
+        "could not place {} at {} after 8 tries: {last}",
+        src.display(),
+        dst.display()
+    ))
 }
