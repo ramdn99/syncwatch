@@ -107,7 +107,7 @@ if (-not $UpdaterKey) {
     New-Item -ItemType Directory -Force $tempKeyDir | Out-Null
     $UpdaterKey = Join-Path $tempKeyDir 'dryrun.key'
     $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(24))
-    & $pnpm --dir apps/desktop tauri signer generate -w $UpdaterKey --ci -f *> $null
+    & $pnpm --dir apps/desktop tauri signer generate -w $UpdaterKey -p $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD --ci -f *> $null
     if (-not (Test-Path $UpdaterKey)) { Stop-Release 'could not make the throwaway dry-run key' }
     Ok 'dry run: a throwaway key in a temporary folder (deleted at the end)'
 }
