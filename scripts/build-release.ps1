@@ -61,7 +61,9 @@ if ($Version -and -not $TestBuild -and $Version -ne $conf.version) {
 if (-not $OutRoot) { $OutRoot = Join-Path $repo $(if ($TestBuild) { 'dist\test' } else { 'dist\release' }) }
 $out = Join-Path $OutRoot $version
 $logs = Join-Path $out 'logs'
-if (Test-Path $out) { Remove-Item -Recurse -Force $out }
+# Empty the folder rather than delete it: a virus scanner or the search indexer may still hold
+# the folder itself open for a moment after the previous build.
+if (Test-Path $out) { Get-ChildItem $out -Force | Remove-Item -Recurse -Force }
 New-Item -ItemType Directory -Force $logs | Out-Null
 
 # Runs a step, keeps its full output in logs\<name>.log, stops with the tail on failure.
