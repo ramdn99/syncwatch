@@ -28,6 +28,8 @@ pub struct AppPrefs {
     pub invite_ttl_mins: u32,
     /// Manual invites: how long a dropped member's seat is kept for a re-invite, minutes.
     pub seat_keep_mins: u32,
+    /// Check GitHub for a newer release when SyncWatch starts (Milestone 9, Settings, About).
+    pub check_updates: bool,
 }
 
 impl Default for AppPrefs {
@@ -40,6 +42,7 @@ impl Default for AppPrefs {
             no_limit_default: false,
             invite_ttl_mins: 10,
             seat_keep_mins: 5,
+            check_updates: true,
         }
     }
 }
@@ -100,11 +103,16 @@ pub struct PrefsService {
 impl PrefsService {
     pub fn load(paths: &AppPaths) -> Self {
         let path = paths.config.join("prefs.json");
+        // First start: the installer's default-config.toml (next to the exe) gives the defaults.
         let prefs = std::fs::read(&path)
             .ok()
             .and_then(|b| serde_json::from_slice::<AppPrefs>(&b).ok())
             .filter(|p| p.validate().is_ok())
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                std::fs::read_to_string(paths.exe_dir.join(DEFAULT_CONFIG))
+                    .map(|t| defaults_from_toml(&t))
+                    .unwrap_or_default()
+            });
         Self {
             path,
             prefs: Mutex::new(prefs),
@@ -178,5 +186,89 @@ mod tests {
         ] {
             assert!(bad.validate().is_err(), "{bad:?}");
         }
+    }
+}
+
+/// Shipped next to syncwatch.exe; read only on the first start (no prefs.json yet).
+pub const DEFAULT_CONFIG: &str = "default-config.toml";
+
+/// Defaults from `default-config.toml`: plain `key = value` lines (integers, true/false,
+/// "strings"), comments with #. Unknown keys and invalid values are ignored; the result is
+/// validated as a whole (anything out of range: the built-in defaults). It never holds
+/// credentials or server addresses.
+pub fn defaults_from_toml(text: &str) -> AppPrefs {
+    let mut p = AppPrefs::default();
+    for line in text.lines().take(200) {
+        let line = line.split('#').next().unwrap_or("").trim();
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let (k, v) = (k.trim(), v.trim());
+        let num = || v.parse::<u32>().ok();
+        let flag = || match v {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        };
+        match k {
+            "hwdec" => p.hwdec = flag().unwrap_or(p.hwdec),
+            "sub_scale_pct" => p.sub_scale_pct = num().unwrap_or(p.sub_scale_pct),
+            "gate_timeout_secs" => p.gate_timeout_secs = num().unwrap_or(p.gate_timeout_secs),
+            "no_limit_default" => p.no_limit_default = flag().unwrap_or(p.no_limit_default),
+            "invite_ttl_mins" => p.invite_ttl_mins = num().unwrap_or(p.invite_ttl_mins),
+            "seat_keep_mins" => p.seat_keep_mins = num().unwrap_or(p.seat_keep_mins),
+            "check_updates" => p.check_updates = flag().unwrap_or(p.check_updates),
+            "preset" => {
+                let s = v.trim_matches('"');
+                if matches!(s, "everyone" | "onlyMe") {
+                    p.preset = s.to_owned();
+                }
+            }
+            _ => {}
+        }
+    }
+    if p.validate().is_ok() {
+        p
+    } else {
+        AppPrefs::default()
+    }
+}
+
+#[cfg(test)]
+mod default_config_tests {
+    use super::*;
+
+    #[test]
+    fn shipped_default_config_gives_the_built_in_defaults() {
+        let shipped = include_str!("../default-config.toml");
+        assert_eq!(defaults_from_toml(shipped), AppPrefs::default());
+        // It never names a server or holds a credential.
+        let lower = shipped.to_lowercase();
+        for bad in [
+            "metered", "api_key", "apikey", "password", "wss:", "ws:", "turn:", "signal",
+        ] {
+            assert!(!lower.contains(bad), "{bad} in default-config.toml");
+        }
+    }
+
+    #[test]
+    fn values_are_read_and_bad_ones_ignored() {
+        let p = defaults_from_toml(
+            "invite_ttl_mins = 30\ncheck_updates = false # note\npreset = \"onlyMe\"\nunknown = 5\nhwdec = maybe\n",
+        );
+        assert_eq!(
+            (
+                p.invite_ttl_mins,
+                p.check_updates,
+                p.preset.as_str(),
+                p.hwdec
+            ),
+            (30, false, "onlyMe", true)
+        );
+        // Out of range: all built-in defaults.
+        assert_eq!(
+            defaults_from_toml("seat_keep_mins = 9999"),
+            AppPrefs::default()
+        );
     }
 }

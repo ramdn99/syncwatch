@@ -1,0 +1,144 @@
+#Requires -Version 7.0
+<#
+.SYNOPSIS
+  The only supported release build (Milestone 9): SyncWatch-<version>-x64.msi, the portable
+  zip, SHA256SUMS and (with an updater key) the update signature, all checked by
+  scripts/verify-package.ps1.
+
+.DESCRIPTION
+  1. Verifies every pinned third-party file (fetch-third-party.ps1).
+  2. Stages the runtime files in target\release-stage: libmpv-2.dll, vulkan\vulkan-1.dll,
+     fonts\NotoSans-*.ttf, default-config.toml, licenses\ (SyncWatch GPL-3.0, third-party
+     notices, mpv/FFmpeg/libass, fonts, Vulkan, Lucide, and the Rust crate report from
+     cargo-about).
+  3. Runs `tauri build --bundles msi` with a generated config overlay that adds those files as
+     resources (per-user MSI template in src-tauri\wix, WebView2 offline installer embedded).
+  4. Writes, under dist\release\<version>:
+       SyncWatch-<version>-x64.msi
+       SyncWatch-Portable-<version>-x64.zip  (an extra artifact; not attached to releases)
+       SyncWatch-<version>-x64.msi.sig       (only with -UpdaterKey: Tauri updater signature)
+       SHA256SUMS
+       logs\  (the full output of every step; kept when something fails)
+  5. Runs scripts/verify-package.ps1 on the result.
+
+  The updater key password is read from TAURI_SIGNING_PRIVATE_KEY_PASSWORD if set, otherwise
+  prompted for (never echoed, never written anywhere). This script never prints a secret.
+
+.EXAMPLE
+  pwsh -NoProfile -File scripts/build-release.ps1
+.EXAMPLE
+  pwsh -NoProfile -File scripts/build-release.ps1 -UpdaterKey D:\keys\syncwatch-updater.key
+#>
+param(
+    [string]$UpdaterKey = '',
+    [string]$OutRoot = '',
+    [switch]$SkipVerify
+)
+$ErrorActionPreference = 'Stop'
+$repo = Split-Path $PSScriptRoot -Parent
+Set-Location $repo
+foreach ($kv in @{ RUSTUP_HOME = 'D:\Rust\rustup'; CARGO_HOME = 'D:\Rust\cargo'; LIBMPV_DIR = 'D:\libs\mpv' }.GetEnumerator()) {
+    if (-not [Environment]::GetEnvironmentVariable($kv.Key)) { Set-Item "Env:$($kv.Key)" $kv.Value }
+}
+$env:PATH = "$env:CARGO_HOME\bin;$env:PATH"
+$pnpm = if (Get-Command pnpm.cmd -ErrorAction SilentlyContinue) { 'pnpm.cmd' } else { 'pnpm' }
+
+$conf = Get-Content apps\desktop\src-tauri\tauri.conf.json -Raw | ConvertFrom-Json
+$version = $conf.version
+if (-not $OutRoot) { $OutRoot = Join-Path $repo 'dist\release' }
+$out = Join-Path $OutRoot $version
+$logs = Join-Path $out 'logs'
+if (Test-Path $out) { Remove-Item -Recurse -Force $out }
+New-Item -ItemType Directory -Force $logs | Out-Null
+
+# Runs a step, keeps its full output in logs\<name>.log, stops with the tail on failure.
+function Step([string]$name, [scriptblock]$cmd) {
+    $log = Join-Path $logs "$name.log"
+    Write-Host "== $name"
+    $t = Get-Date
+    & $cmd *>&1 | Out-File -Encoding utf8 $log
+    $code = $LASTEXITCODE
+    if ($code) {
+        Write-Host "FAIL  $name (exit $code). Full log: $log" -ForegroundColor Red
+        Get-Content $log -Tail 30 | ForEach-Object { "    $_" }
+        exit 1
+    }
+    Write-Host ("   ok in {0:N0} s" -f ((Get-Date) - $t).TotalSeconds)
+}
+
+Step 'fetch-third-party' { pwsh -NoProfile -File scripts/fetch-third-party.ps1 }
+
+# ---- stage ---------------------------------------------------------------------------------
+$stage = Join-Path $repo 'target\release-stage'
+if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+foreach ($d in 'vulkan', 'fonts', 'licenses') { New-Item -ItemType Directory -Force (Join-Path $stage $d) | Out-Null }
+$cache = Join-Path $repo 'third_party\cache'
+Copy-Item (Join-Path $env:LIBMPV_DIR 'libmpv-2.dll') $stage
+Copy-Item (Join-Path $cache 'vulkan\vulkan-1.dll') (Join-Path $stage 'vulkan')
+Get-ChildItem (Join-Path $cache 'fonts') -Filter 'NotoSans-*.ttf' | Copy-Item -Destination (Join-Path $stage 'fonts')
+Copy-Item apps\desktop\src-tauri\default-config.toml $stage
+$lic = Join-Path $stage 'licenses'
+Copy-Item LICENSE (Join-Path $lic 'SyncWatch-GPL-3.0.txt')
+Copy-Item THIRD-PARTY-NOTICES.md $lic
+Copy-Item docs\legal-notes.md (Join-Path $lic 'GPL-and-codec-notes.md')
+Get-ChildItem (Join-Path $cache 'licenses') -File | Copy-Item -Destination $lic
+Copy-Item third_party\licenses\lucide-react-LICENSE.txt $lic
+Step 'cargo-about' { cargo about generate --manifest-path apps/desktop/src-tauri/Cargo.toml about.hbs -o (Join-Path $lic 'rust-crates.html') }
+
+# ---- tauri build -----------------------------------------------------------------------------
+$resources = [ordered]@{}
+Get-ChildItem $stage -Recurse -File | ForEach-Object {
+    $rel = [IO.Path]::GetRelativePath($stage, $_.FullName).Replace('\', '/')
+    $resources[$_.FullName.Replace('\', '/')] = $rel
+}
+$overlay = [ordered]@{ bundle = [ordered]@{ active = $true; resources = $resources } }
+$signing = $UpdaterKey -ne ''
+if ($signing) {
+    if (-not (Test-Path $UpdaterKey)) { Write-Host "Updater key not found: $UpdaterKey" -ForegroundColor Red; exit 1 }
+    $overlay.bundle.createUpdaterArtifacts = $true
+    $env:TAURI_SIGNING_PRIVATE_KEY = $UpdaterKey
+    if (-not $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
+        $sec = Read-Host -AsSecureString 'Updater key password'
+        $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = [Net.NetworkCredential]::new('', $sec).Password
+    }
+}
+$overlayPath = Join-Path $stage 'tauri.release.json'
+$overlay | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 $overlayPath
+try {
+    Step 'tauri-build' { & $pnpm --dir apps/desktop tauri build --bundles msi --config $overlayPath }
+} finally {
+    if ($signing) { Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY, Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue }
+}
+
+$msiDir = Join-Path $repo 'target\release\bundle\msi'
+$built = Get-ChildItem $msiDir -Filter "*_${version}_x64_*.msi" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not $built) { Write-Host "FAIL  no MSI for $version in $msiDir" -ForegroundColor Red; exit 1 }
+$msiName = "SyncWatch-$version-x64.msi"
+Copy-Item $built.FullName (Join-Path $out $msiName)
+if ($signing) {
+    $sig = "$($built.FullName).sig"
+    if (-not (Test-Path $sig)) { Write-Host 'FAIL  the updater signature was not created' -ForegroundColor Red; exit 1 }
+    Copy-Item $sig (Join-Path $out "$msiName.sig")
+}
+
+# ---- portable zip ------------------------------------------------------------------------------
+$port = Join-Path $stage 'portable\SyncWatch'
+New-Item -ItemType Directory -Force $port | Out-Null
+Copy-Item target\release\syncwatch.exe $port
+Get-ChildItem $stage -Exclude 'portable', 'tauri.release.json' | Copy-Item -Destination $port -Recurse
+New-Item -ItemType File (Join-Path $port 'portable.flag') | Out-Null
+$zipName = "SyncWatch-Portable-$version-x64.zip"
+Compress-Archive -Path $port -DestinationPath (Join-Path $out $zipName) -CompressionLevel Optimal
+
+# ---- checksums -----------------------------------------------------------------------------------
+$sums = Get-ChildItem $out -File | Where-Object Name -NE 'SHA256SUMS' | Sort-Object Name | ForEach-Object {
+    '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
+}
+$sums | Set-Content -Encoding ascii (Join-Path $out 'SHA256SUMS')
+
+Get-ChildItem $out -File | ForEach-Object { '{0,-44} {1,8:N1} MB' -f $_.Name, ($_.Length / 1MB) }
+if (-not $SkipVerify) {
+    pwsh -NoProfile -File scripts/verify-package.ps1 -Dir $out
+    if ($LASTEXITCODE) { exit 1 }
+}
+Write-Host "Release files: $out"

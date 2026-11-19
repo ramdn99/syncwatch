@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod bridge;
+mod cleanup;
 mod commands;
 mod connection;
 mod logging;
@@ -21,6 +22,18 @@ use paths::AppPaths;
 
 fn main() {
     let paths = AppPaths::resolve();
+    // "Remove all my data" (Settings) and the MSI uninstall with REMOVEUSERDATA=1: no window,
+    // no logging (the log folder is deleted too).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == cleanup::FLAG) {
+        let wait = if args.iter().any(|a| a == "--wait") {
+            60
+        } else {
+            10
+        };
+        let r = cleanup::run(&paths, std::time::Duration::from_secs(wait));
+        std::process::exit(if r.folder_removed { 0 } else { 1 });
+    }
     paths.ensure();
     // WebView2's own profile (local storage, caches) lives in the app's data folder: in portable
     // mode <exe>\data\webview2, never next to the exe or in another AppData folder. For dev

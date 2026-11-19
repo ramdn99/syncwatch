@@ -310,6 +310,7 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             crate::room::room_join_invite,
             crate::room::invite_preview,
             crate::room::room_handshake,
+            crate::cleanup::remove_all_user_data,
             crate::room::dev_join_invite,
             crate::room::room_invite_create,
             crate::room::room_invite_reply,

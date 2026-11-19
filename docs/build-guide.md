@@ -410,3 +410,40 @@ pwsh -NoProfile -File scripts/dev/build-repeat.ps1 -Count 10
 The unexplained failure seen once on 2026-11-18 (right after a build-script edit) could not be
 reproduced; its error text was not captured. The old copy step wrote over the destination
 directly and only warned on failure.
+
+## Release build (MSI)
+
+```
+pwsh -NoProfile -File scripts/build-release.ps1
+```
+
+This is the only supported release build (ADR 0015). It writes `dist\release\<version>\`:
+- `SyncWatch-<version>-x64.msi`: per-user, no administrator rights, with the WebView2 offline
+  installer embedded;
+- `SyncWatch-Portable-<version>-x64.zip`: an extra artifact, not attached to releases;
+- `SHA256SUMS`;
+- `logs\`: the full output of every step, kept when a step fails.
+
+Then it runs:
+
+```
+pwsh -NoProfile -File scripts/verify-package.ps1 -Dir dist\release\<version>
+```
+
+The check covers:
+- the files in the MSI and the zip (unpacked; nothing is installed);
+- the per-user properties and the fixed UpgradeCode;
+- that the embedded WebView2 installer carries Microsoft's signature;
+- imports, the TLS tree and the real Metered values (never shown);
+- `SHA256SUMS` and the sizes.
+
+Nothing needs to be installed for it: Tauri downloads WiX 3.14 itself and checks it by
+SHA-256, and cargo-about generates the Rust license report.
+
+Silent install and uninstall (for tests):
+
+```
+msiexec /i SyncWatch-0.1.0-x64.msi /qn
+msiexec /i SyncWatch-0.1.0-x64.msi /qn INSTALLDESKTOPSHORTCUT=0
+msiexec /x SyncWatch-0.1.0-x64.msi /qn REMOVEUSERDATA=1
+```

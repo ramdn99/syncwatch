@@ -1,0 +1,22 @@
+# SyncWatch default settings, installed next to syncwatch.exe.
+#
+# Read only on the first start, before any settings were saved; after that, Settings in the
+# app is what counts. Change a value here to give every new user of this computer a different
+# default. Values out of range are ignored (the built-in defaults apply).
+#
+# This file never holds credentials or server addresses: the relay setup is done in the app
+# (Settings, Connection) and stored encrypted for each Windows user.
+
+# Playback
+hwdec = true                # hardware decoding with a safe software fallback
+sub_scale_pct = 100         # text subtitle size, 50 to 200
+
+# New rooms
+preset = "everyone"         # who controls playback: "everyone" or "onlyMe"
+gate_timeout_secs = 15      # how long the room waits for members, 5 to 120
+no_limit_default = false    # no size limit for added subtitle and audio files
+invite_ttl_mins = 10        # how long an invite stays valid, 1 to 1440
+seat_keep_mins = 5          # how long a dropped member's seat is kept, 1 to 60
+
+# Updates
+check_updates = true        # check GitHub for a newer release when SyncWatch starts

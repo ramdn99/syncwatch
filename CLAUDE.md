@@ -98,7 +98,12 @@ pwsh -NoProfile -File scripts/ci.ps1
 pwsh -NoProfile -File scripts/verify-imports.ps1
 pwsh -NoProfile -File scripts/secret-scan.ps1 -Mode All
 ```
-`scripts/build-release.ps1` (M9) is the only supported release build path.
+`scripts/build-release.ps1` (M9) is the only supported release build path (per-user MSI, ADR 0015):
+```
+pwsh -NoProfile -File scripts/build-release.ps1   (distelease<version>: MSI, portable zip, SHA256SUMS, logs)
+pwsh -NoProfile -File scripts/verify-package.ps1 -Dir distelease<version>
+pwsh -NoProfile -File scripts/dev/build-repeat.ps1 -Count 10   (clean-build stability; keeps the full log of any failure)
+```
 
 ## Testing notes
 - Run tests in the default (debug) profile: overflow checks caught a real bug that release

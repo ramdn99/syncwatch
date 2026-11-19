@@ -59,11 +59,30 @@
   },
   "bundle": {
     "active": false,
+    "targets": [
+      "msi"
+    ],
+    "publisher": "SyncWatch",
+    "copyright": "SyncWatch contributors, GPL-3.0",
+    "homepage": "https://github.com/ramdn99/syncwatch",
+    "license": "GPL-3.0-only",
+    "shortDescription": "Watch videos together, in sync, peer to peer",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller",
+        "silent": true
+      },
+      "wix": {
+        "upgradeCode": "b04c9e7e-3415-4c46-8dcf-6b4e8ddd2472",
+        "template": "wix/main.wxs",
+        "language": "en-US"
+      }
+    }
   }
 }

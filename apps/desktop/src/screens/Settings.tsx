@@ -19,8 +19,10 @@ export interface AppPrefs {
   /** Manual invites (ADR 0014). */
   inviteTtlMins: number;
   seatKeepMins: number;
+  /** Check GitHub for a newer release at start (Milestone 9). */
+  checkUpdates: boolean;
 }
-export const PREFS_DEFAULTS: AppPrefs = { hwdec: true, subScalePct: 100, preset: 'everyone', gateTimeoutSecs: 15, noLimitDefault: false, inviteTtlMins: 10, seatKeepMins: 5 };
+export const PREFS_DEFAULTS: AppPrefs = { hwdec: true, subScalePct: 100, preset: 'everyone', gateTimeoutSecs: 15, noLimitDefault: false, inviteTtlMins: 10, seatKeepMins: 5, checkUpdates: true };
 export const prefs = {
   get: () => (inTauri() ? call<AppPrefs>('prefs_get') : Promise.resolve(PREFS_DEFAULTS)),
   set: (p: AppPrefs) => call<void>('prefs_set', { prefs: p }),
@@ -285,9 +287,15 @@ export const THIRD_PARTY = [
   ['Inter, Space Grotesk, Noto Sans', 'SIL Open Font License 1.1'],
 ] as const;
 
+/** Settings, About: what "Remove all my SyncWatch data" does (also in the user guide). */
+export const REMOVE_DATA_TEXT =
+  'Uninstalling SyncWatch keeps your settings and relay setup in case you install it again. To remove them, use this button before uninstalling (or uninstall with REMOVEUSERDATA=1).';
+
 function AboutSection({ status, prefsNow }: { status: ConnectionStatus; prefsNow: AppPrefs | null }) {
   const [version, setVersion] = useState<string>('');
   const [copied, setCopied] = useState<string | null>(null);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
   useEffect(() => {
     if (!inTauri()) return;
     void import('@tauri-apps/api/app')
@@ -332,6 +340,30 @@ function AboutSection({ status, prefsNow }: { status: ConnectionStatus; prefsNow
         <p className="text-xs text-muted" role="status">
           {copied}
         </p>
+      )}
+      <h3 className="pt-2 font-medium">Your data</h3>
+      <p className="text-xs text-muted">{REMOVE_DATA_TEXT}</p>
+      {!confirmRemove ? (
+        <button type="button" className={btn} data-testid="remove-data" onClick={() => setConfirmRemove(true)}>
+          Remove all my SyncWatch data...
+        </button>
+      ) : (
+        <div role="alertdialog" aria-label="Remove all my SyncWatch data" className="space-y-2 rounded-md border border-danger/40 bg-danger/10 p-3">
+          <p className="text-sm">SyncWatch will close and remove its settings, relay setup, identity, logs and caches for this Windows user. This cannot be undone.</p>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className="rounded-md bg-danger px-3 py-1.5 text-sm font-semibold text-bg"
+              onClick={() => void call<void>('remove_all_user_data').catch((e) => setRemoveError(String(e)))}
+            >
+              Remove and close
+            </button>
+            <button type="button" className={btn} onClick={() => setConfirmRemove(false)}>
+              Cancel
+            </button>
+          </div>
+          {removeError && <p className="text-xs text-danger">{removeError}</p>}
+        </div>
       )}
     </section>
   );

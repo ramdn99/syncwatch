@@ -15,7 +15,8 @@ generated at release time (`licenses\rust-crates.html`, cargo-about).
 | Inter | pinned in `third_party/pins.json` | SIL OFL 1.1 | UI text |
 | Noto Sans | pinned in `third_party/pins.json` | SIL OFL 1.1 | Subtitle fallback font |
 | Lucide icons (`lucide-react` 1.66.0) | npm | ISC (icons derived from Feather: MIT) | `third_party/licenses/lucide-react-LICENSE.txt` |
-| Microsoft Edge WebView2 Runtime | Microsoft | Microsoft software license | Installed by the SyncWatch installer if missing; not redistributed in source form |
+| MSI template (`apps/desktop/src-tauri/wix/main.wxs`) | tauri-bundler 2.10.4 | MIT OR Apache-2.0 | Modified for a per-user install (ADR 0015); not shipped as a file |
+| Microsoft Edge WebView2 Runtime | Microsoft | Microsoft software license | The MSI embeds Microsoft's offline installer and runs it only when WebView2 is missing |
 | Rust crates (Tauri, librqbit, rustls, ring, tokio and others) | `Cargo.lock` | MIT, Apache-2.0, BSD, ISC, MPL-2.0 and others | Full report: `licenses\rust-crates.html` in each release |
 | npm packages (React, Tailwind CSS and others) | `pnpm-lock.yaml` | MIT and others | Bundled into the app's web UI |
 
