@@ -59,7 +59,7 @@ it('Create/Join: no server reachable offers Try again and Connection settings', 
   const { RoomEntryDialog } = await import('../components/RoomDialogs');
   const onSettings = vi.fn();
   render(<RoomEntryDialog mode="create" onClose={() => {}} onEntered={() => {}} onConnectionSettings={onSettings} />);
-  fireEvent.change(screen.getByLabelText(/name/i), { target: { value: 'Ana' } });
+  fireEvent.change(screen.getByLabelText(/your name/i), { target: { value: 'Ana' } });
   fireEvent.submit(screen.getByRole('dialog').querySelector('form')!);
   await waitFor(() => expect(screen.getByTestId('error-noServer')).toBeTruthy());
   expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();

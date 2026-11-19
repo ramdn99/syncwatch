@@ -24,6 +24,10 @@ pub struct AppPrefs {
     pub gate_timeout_secs: u32,
     /// "No size limit" for added external files, on by default in new rooms.
     pub no_limit_default: bool,
+    /// Manual invites (ADR 0014): how long an invite stays valid, minutes.
+    pub invite_ttl_mins: u32,
+    /// Manual invites: how long a dropped member's seat is kept for a re-invite, minutes.
+    pub seat_keep_mins: u32,
 }
 
 impl Default for AppPrefs {
@@ -34,12 +38,16 @@ impl Default for AppPrefs {
             preset: "everyone".into(),
             gate_timeout_secs: 15,
             no_limit_default: false,
+            invite_ttl_mins: 10,
+            seat_keep_mins: 5,
         }
     }
 }
 
 pub const SUB_SCALE_PCT: (u32, u32) = (50, 200);
 pub const GATE_TIMEOUT_SECS: (u32, u32) = (5, 120);
+pub const INVITE_TTL_MINS: (u32, u32) = (1, 1440);
+pub const SEAT_KEEP_MINS: (u32, u32) = (1, 60);
 
 impl AppPrefs {
     pub fn validate(&self) -> Result<(), String> {
@@ -55,6 +63,16 @@ impl AppPrefs {
             self.gate_timeout_secs,
             GATE_TIMEOUT_SECS,
             "The wait for members (seconds)",
+        )?;
+        range(
+            self.invite_ttl_mins,
+            INVITE_TTL_MINS,
+            "How long an invite is valid (minutes)",
+        )?;
+        range(
+            self.seat_keep_mins,
+            SEAT_KEEP_MINS,
+            "How long a seat is kept (minutes)",
         )?;
         if !matches!(self.preset.as_str(), "everyone" | "onlyMe") {
             return Err("Unknown permission preset.".into());

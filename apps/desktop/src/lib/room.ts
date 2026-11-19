@@ -36,6 +36,8 @@ export interface RoomMember {
   torrent: { phase: TorrentPhase; permille: number } | null;
   /** Torrent rooms: what a buffering member waits for. */
   wait: BufferWait | null;
+  /** Invite rooms: dropped out, seat kept for a re-invite. */
+  seatKept?: boolean;
 }
 
 /** A buffering participant's missing window at the room position (ADR 0012). */
@@ -96,7 +98,30 @@ export type EndReason =
   | { kind: 'noSuchRoom' }
   | { kind: 'roomFull' }
   | { kind: 'hostNotVerified' }
+  | { kind: 'connectionLost'; seatKeepSecs: number }
+  | { kind: 'notAdmitted' }
   | { kind: 'error'; message: string };
+
+/** Host, manual invites (ADR 0014): one invite as the Invites list shows it. */
+export interface InviteView {
+  id: string;
+  status: 'preparing' | 'waiting' | 'replied' | 'admitted' | 'joined' | 'refused' | 'expired' | 'failed';
+  text: string | null;
+  expiresUnix: number;
+  memberName: string | null;
+  words: [string, string, string, string] | null;
+  /** A re-invite: the seat it is bound to. */
+  forMember: number | null;
+}
+
+/** What the Join dialog shows about a pasted invite. */
+export interface InvitePreview {
+  roomName: string;
+  hostId: string;
+  password: boolean;
+  expiresUnix: number;
+  reinvite: boolean;
+}
 
 export interface RoomState {
   active: boolean;
@@ -136,6 +161,14 @@ export interface RoomState {
   stall: { stalled: boolean; wait: BufferWait | null };
   /** The player could not open the room's video (damaged or unsupported file). */
   loadError: boolean;
+  /** "manual" (copy-paste invites, release builds) or "signaling" (dev and tests). */
+  handshake: 'manual' | 'signaling' | '';
+  /** Host, manual invites. */
+  invites: InviteView[];
+  /** Member, manual invites: the reply to send back to the host. */
+  reply: { text: string; words: [string, string, string, string] } | null;
+  /** The last refused invite or reply (seq changes on every refusal). */
+  inviteError: { seq: number; message: string } | null;
 }
 
 export interface GateWait {
@@ -203,6 +236,10 @@ export const EMPTY_ROOM: RoomState = {
   confirmMagnet: null,
   stall: { stalled: false, wait: null },
   loadError: false,
+  handshake: '',
+  invites: [],
+  reply: null,
+  inviteError: null,
 };
 
 export type RoomAction =
@@ -273,7 +310,18 @@ export const call = <T>(cmd: string, args?: Record<string, unknown>): Promise<T>
   inTauri() ? invoke<T>(cmd, args) : Promise.reject(new Error('Rooms need the desktop app.'));
 
 export const room = {
-  create: (name: string, password: string | null) => call<EntryOutcome>('room_create', { name, password }),
+  create: (name: string, password: string | null, roomName: string | null = null) => call<EntryOutcome>('room_create', { name, password, roomName }),
+  /** Manual invites: join with a pasted invite (the outcome is "reply" once the reply is ready). */
+  joinInvite: (name: string, invite: string, password: string | null) => call<EntryOutcome>('room_join_invite', { name, invite, password }),
+  /** Checks a pasted invite without joining (no network). */
+  invitePreview: (text: string) => call<InvitePreview>('invite_preview', { text }),
+  /** "manual" in release builds; "signaling" when a dev signaling server is configured. */
+  handshake: () => (inTauri() ? invoke<'manual' | 'signaling'>('room_handshake') : Promise.resolve<'manual' | 'signaling'>('manual')),
+  invite: {
+    create: (forMember: number | null = null) => call<void>('room_invite_create', { forMember }),
+    reply: (text: string) => call<void>('room_invite_reply', { text }),
+    decide: (id: string, decision: 'admit' | 'refuse' | 'remove') => call<void>('room_invite_decide', { id, decision }),
+  },
   join: (name: string, code: string, password: string | null) => call<EntryOutcome>('room_join', { name, code, password }),
   state: () => (inTauri() ? invoke<RoomState>('room_state') : Promise.resolve(EMPTY_ROOM)),
   leave: () => call<void>('room_leave'),
@@ -455,6 +503,10 @@ export function endText(r: EndReason | null): string | null {
       return 'This room is full.';
     case 'hostNotVerified':
       return 'The host could not be verified, so the connection was closed for your safety.';
+    case 'connectionLost':
+      return `The connection to the host was lost. Ask the host to re-invite you: your seat is kept for ${Math.max(1, Math.round(r.seatKeepSecs / 60))} minutes.`;
+    case 'notAdmitted':
+      return 'The host did not let you in before the invite expired. Ask for a new invite.';
     case 'error':
       return r.message;
   }

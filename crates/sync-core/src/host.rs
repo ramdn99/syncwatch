@@ -24,6 +24,9 @@ pub struct HostConfig {
     /// External file ceilings; `None` = "No limit".
     pub max_external_sub: Option<u64>,
     pub max_external_audio: Option<u64>,
+    /// How long a dropped member's seat is kept (20 s with a signaling server; minutes with
+    /// manual invites, where coming back needs a re-invite from the host, ADR 0014).
+    pub seat_keep_us: i64,
 }
 
 impl HostConfig {
@@ -35,6 +38,7 @@ impl HostConfig {
             gate_timeout_us: GATE_TIMEOUT_US,
             max_external_sub: Some(DEFAULT_MAX_EXTERNAL_SUB),
             max_external_audio: Some(DEFAULT_MAX_EXTERNAL_AUDIO),
+            seat_keep_us: SEAT_RETENTION_US,
         }
     }
 }
@@ -614,9 +618,10 @@ impl HostMachine {
     // ------------------------------------------------------------------ tick --------------
 
     fn on_tick(&mut self, now: i64, out: &mut Out) {
-        // A dropped member keeps their seat for 20 s (spec section 1); then it is freed.
+        // A dropped member keeps their seat for a while (20 s by default, spec section 1).
+        let keep = self.cfg.seat_keep_us;
         self.members
-            .retain(|_, e| e.connected || e.left_at.is_none_or(|t| now - t < SEAT_RETENTION_US));
+            .retain(|_, e| e.connected || e.left_at.is_none_or(|t| now - t < keep));
         self.local.tick(Some(now), now, out);
         if self.gate.pending.is_some() {
             self.try_resume(now, out);

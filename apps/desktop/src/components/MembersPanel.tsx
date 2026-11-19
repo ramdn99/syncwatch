@@ -53,10 +53,15 @@ export function MembersPanel({
   members,
   viewerIsHost,
   onAction,
+  invites = false,
+  onReinvite,
 }: {
   members: RoomMember[];
   viewerIsHost: boolean;
   onAction: (a: RoomAction) => void;
+  /** The room uses manual invites: no "Make host"; a dropped member gets "Re-invite". */
+  invites?: boolean;
+  onReinvite?: (member: number) => void;
 }) {
   const [menuFor, setMenuFor] = useState<number | null>(null);
   const [permsFor, setPermsFor] = useState<number | null>(null);
@@ -74,7 +79,11 @@ export function MembersPanel({
           ? [
               { label: 'Permissions...', run: () => (setMenuFor(null), setPermsFor((v) => (v === m.id ? null : m.id))) },
               { label: m.chatMuted ? 'Unmute in chat' : 'Mute in chat', run: () => act({ type: 'muteChat', member: m.id, muted: !m.chatMuted }) },
-              { label: 'Make host', run: () => act({ type: 'makeHost', member: m.id }) },
+              ...(invites
+                ? !m.connected && onReinvite
+                  ? [{ label: 'Re-invite...', run: () => (setMenuFor(null), onReinvite(m.id)) }]
+                  : []
+                : [{ label: 'Make host', run: () => act({ type: 'makeHost', member: m.id }) }]),
               { label: 'Kick', danger: true, run: () => act({ type: 'kick', member: m.id }) },
               { label: 'Ban for this session', danger: true, run: () => act({ type: 'ban', member: m.id }) },
             ]
@@ -132,6 +141,11 @@ export function MembersPanel({
               )}
             </div>
             <div className="mt-0.5 flex flex-wrap gap-x-3 pl-4.5 text-xs">
+              {m.seatKept && (
+                <span className="text-warning" data-testid="member-seat-kept">
+                  Disconnected · seat kept
+                </span>
+              )}
               {!m.isYou && m.link && (
                 <span className={`inline-flex items-center gap-1 ${CONN_COLOR[m.link]}`} data-testid="member-link">
                   {CONN_ICON[m.link] && <Icon name={CONN_ICON[m.link]!} size="xs" />}

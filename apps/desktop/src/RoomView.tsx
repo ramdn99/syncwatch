@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import logoUrl from './assets/logo-lockup.svg';
 import { ChatOverlay } from './components/ChatOverlay';
+import { InvitesPanel } from './components/InvitesPanel';
 import { ChangeSourceDialog } from './components/ChangeSourceDialog';
 import { BufferingOverlay, ConfirmMagnetDialog, TorrentBlock } from './components/TorrentPanels';
 import { ChatPanel } from './components/ChatPanel';
@@ -479,7 +480,12 @@ export function RoomView({ onLeave, onOpenSettings }: { onLeave: () => void; onO
       {!fullscreen && (
         <header className="flex h-10 shrink-0 items-center gap-4 border-b border-border bg-bg px-3">
           <img src={logoUrl} alt="SyncWatch" className="h-5" draggable={false} />
-          {rs.roomCode && (
+          {rs.roomCode && rs.handshake === 'manual' && (
+            <span className="font-brand text-sm text-text" title="Room name" data-testid="room-name">
+              {rs.roomCode}
+            </span>
+          )}
+          {rs.roomCode && rs.handshake !== 'manual' && (
             <button
               type="button"
               className="tabular font-brand text-sm tracking-[0.2em] text-text hover:text-accent"
@@ -638,7 +644,18 @@ export function RoomView({ onLeave, onOpenSettings }: { onLeave: () => void; onO
             <div className="w-1 shrink-0 cursor-col-resize bg-border hover:bg-accent" role="separator" aria-orientation="vertical" aria-label="Resize members" onPointerDown={startDrag('right')} data-testid="resizer-right" />
             <div ref={rightRef} style={{ width: cols.right }} className="flex h-full shrink-0 flex-col overflow-y-auto bg-surface" data-testid="col-right">
               <Section title="Members" count={rs.members.length} collapsed={prefs.membersCollapsed} onToggle={() => setPrefs((p) => ({ ...p, membersCollapsed: !p.membersCollapsed }))} onCollapseColumn={() => setPrefs((p) => ({ ...p, rightCollapsed: true }))}>
-                <MembersPanel members={rs.members} viewerIsHost={isHost} onAction={act} />
+                <MembersPanel
+                  members={rs.members}
+                  viewerIsHost={isHost}
+                  onAction={act}
+                  invites={rs.handshake === 'manual'}
+                  onReinvite={(m) => void room.invite.create(m).catch((e) => setError(friendlyError(e).text))}
+                />
+                {isHost && rs.handshake === 'manual' && (
+                  <div className="border-t border-border p-3">
+                    <InvitesPanel rs={rs} />
+                  </div>
+                )}
               </Section>
               <Section title={isHost ? 'Host controls' : 'Room'} collapsed={prefs.hostCollapsed} onToggle={() => setPrefs((p) => ({ ...p, hostCollapsed: !p.hostCollapsed }))}>
                 <HostControls

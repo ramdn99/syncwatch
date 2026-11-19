@@ -16,8 +16,11 @@ export interface AppPrefs {
   preset: 'everyone' | 'onlyMe';
   gateTimeoutSecs: number;
   noLimitDefault: boolean;
+  /** Manual invites (ADR 0014). */
+  inviteTtlMins: number;
+  seatKeepMins: number;
 }
-export const PREFS_DEFAULTS: AppPrefs = { hwdec: true, subScalePct: 100, preset: 'everyone', gateTimeoutSecs: 15, noLimitDefault: false };
+export const PREFS_DEFAULTS: AppPrefs = { hwdec: true, subScalePct: 100, preset: 'everyone', gateTimeoutSecs: 15, noLimitDefault: false, inviteTtlMins: 10, seatKeepMins: 5 };
 export const prefs = {
   get: () => (inTauri() ? call<AppPrefs>('prefs_get') : Promise.resolve(PREFS_DEFAULTS)),
   set: (p: AppPrefs) => call<void>('prefs_set', { prefs: p }),
@@ -146,6 +149,26 @@ function RoomDefaultsSection({ p, save }: { p: AppPrefs; save: (p: AppPrefs) => 
         help="After a seek or a pause for buffering, the room waits this long for everyone, then plays without those still loading (you can always choose Resume without them)."
         testId="setting-gate-timeout"
         onSave={(v) => save({ ...p, gateTimeoutSecs: v })}
+      />
+      <NumberSetting
+        label="Invites stay valid for"
+        unit="minutes"
+        value={p.inviteTtlMins}
+        def={10}
+        range={[1, 1440]}
+        help="After this time an invite can no longer be used; make a new one. Shorter is safer if you post invites where others can see them."
+        testId="setting-invite-ttl"
+        onSave={(v) => save({ ...p, inviteTtlMins: v })}
+      />
+      <NumberSetting
+        label="Keep a dropped member's seat for"
+        unit="minutes"
+        value={p.seatKeepMins}
+        def={5}
+        range={[1, 60]}
+        help="If someone's connection is lost, use Re-invite in their menu: they get their seat back within this time."
+        testId="setting-seat-keep"
+        onSave={(v) => save({ ...p, seatKeepMins: v })}
       />
     </section>
   );

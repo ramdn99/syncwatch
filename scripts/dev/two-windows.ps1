@@ -41,6 +41,9 @@ param(
     # Scripted end-to-end checks (debug builds): chat, rooms, sync, chattime, late (3 windows).
     [ValidateSet('', 'chat', 'rooms', 'sync', 'chattime', 'late', 'popup', 'succession', 'torrent', 'skiprelay', 'torrentfile', 'torrentgate', 'torrentplay', 'torrentsucc')][string]$Scenario = '',
     [switch]$Docker,
+    # signaling = the dev signaling server (default). manual = copy-paste invites as in release
+    # builds (ADR 0014): the windows exchange the invite and reply texts through files.
+    [ValidateSet('signaling', 'manual')][string]$Handshake = 'signaling',
     # Stop a stale Vite/node process of THIS repo that still holds port 1420.
     [switch]$FreePort,
     [string]$Media = '',
@@ -142,6 +145,7 @@ try {
     $env:SYNCWATCH_SIGNALING_URL = 'ws://127.0.0.1:8787/ws'
     $env:SYNCWATCH_DEV_BYPASS_CONNECTION = '1'
     $env:SYNCWATCH_DEV_ICE = $(if ($Ice -eq 'metered') { '' } else { $Ice })
+    $env:SYNCWATCH_HANDSHAKE = $(if ($Handshake -eq 'manual') { 'manual' } else { '' })
     # -Ice metered: relay-only through your Metered account (keep such runs short: quota).
     $env:SYNCWATCH_DEV_FORCE_RELAY = $(if ($Ice -eq 'metered') { '1' } else { '' })
     $env:SYNCWATCH_DEV_ROOM_FILE = Join-Path $work 'room.txt'

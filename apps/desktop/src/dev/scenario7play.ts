@@ -5,6 +5,7 @@
 // runs against the build from before the fix (to reproduce the stuck member).
 
 import { invoke } from '@tauri-apps/api/core';
+import { devJoin } from './devjoin';
 import { room, torrents, type RoomState } from '../lib/room';
 import { act, check, current, has, sleep, waitFor, type Report } from './scenario';
 
@@ -205,7 +206,7 @@ export async function playMember(report: Report) {
     await room.leave();
     await waitFor('left', (s) => !s.active, 20_000);
     await sleep(6000);
-    await room.join('Member B', code, null);
+    await devJoin('Member B', code, null);
     await waitFor('confirm again', (x) => x.confirmMagnet != null, 60_000);
     const t0 = Date.now();
     await act({ type: 'acceptMagnet' });

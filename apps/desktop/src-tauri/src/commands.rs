@@ -213,7 +213,14 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             app.manage(crate::connection::ConnectionManager::new(&conn_paths));
             app.manage(crate::prefs::PrefsService::load(&conn_paths));
             crate::connection::spawn_background_retest(app.handle().clone());
-            tracing::info!(signaling_url = %syncwatch_net::signaling::configured_url(), "signaling server for this instance");
+            let manual = !cfg!(debug_assertions)
+                || std::env::var("SYNCWATCH_HANDSHAKE").as_deref() == Ok("manual");
+            match syncwatch_net::signaling::configured_url().filter(|_| !manual) {
+                Some(url) => {
+                    tracing::info!(signaling_url = %url, "dev signaling server for this instance")
+                }
+                None => tracing::info!("rooms use manual invites (no signaling server)"),
+            }
             let (bridge, events) = crate::bridge::Bridge::start(app.handle())?;
             app.manage(Arc::clone(&bridge));
             app.manage(crate::room::RoomManager::new(&conn_paths));
@@ -300,6 +307,13 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             crate::room::room_set_torrent_media,
             crate::room::room_create,
             crate::room::room_join,
+            crate::room::room_join_invite,
+            crate::room::invite_preview,
+            crate::room::room_handshake,
+            crate::room::dev_join_invite,
+            crate::room::room_invite_create,
+            crate::room::room_invite_reply,
+            crate::room::room_invite_decide,
             crate::room::room_state,
             crate::room::room_leave,
             crate::room::room_password,

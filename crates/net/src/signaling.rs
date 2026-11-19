@@ -9,15 +9,16 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-/// Compiled-in production URL (placeholder until deployment, spec section 1).
-pub const DEFAULT_SIGNALING_URL: &str = "wss://signal.example.invalid/ws";
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 /// Client keepalive interval (the server closes connections idle for 60 s).
 pub const KEEPALIVE_EVERY: Duration = Duration::from_secs(20);
 
-/// The URL to use: `SYNCWATCH_SIGNALING_URL` if set, else the compiled-in default.
-pub fn configured_url() -> String {
-    std::env::var("SYNCWATCH_SIGNALING_URL").unwrap_or_else(|_| DEFAULT_SIGNALING_URL.to_owned())
+/// The signaling server for development and tests: `SYNCWATCH_SIGNALING_URL` if set. There is
+/// no compiled-in server: release builds join rooms with manual invites (ADR 0014).
+pub fn configured_url() -> Option<String> {
+    std::env::var("SYNCWATCH_SIGNALING_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

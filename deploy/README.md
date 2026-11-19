@@ -57,9 +57,9 @@ Caddy proxies WebSocket upgrades without extra settings.
 Recommended extras:
 - Firewall: open only 80/443 (Caddy) to the internet; keep 8787 local.
 - Rate limits at the edge, if you have a CDN or a WAF, on top of the built-in per-IP limits.
-- Point the app at the server: set the compiled-in default URL
-  (`DEFAULT_SIGNALING_URL` in `crates/net/src/signaling.rs`) at release time, or use
-  `SYNCWATCH_SIGNALING_URL` for development builds.
+- Point a development build at the server with `SYNCWATCH_SIGNALING_URL`. Release builds
+  contain no signaling URL and never use a server: they join rooms with manual invites
+  (ADR 0014). This server is for development and tests only.
 
 ## Local development stack
 

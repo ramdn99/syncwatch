@@ -4,6 +4,7 @@
 // outcome in its own room state. No mouse or keyboard input is simulated.
 
 import { invoke } from '@tauri-apps/api/core';
+import { devJoin } from './devjoin';
 import { onRoomState, room, type RoomAction, type RoomState } from '../lib/room';
 
 export type Report = (line: string) => void;
@@ -199,7 +200,7 @@ async function lateChat(report: Report) {
     if (!code) await sleep(300);
   }
   if (!code) throw new Error('no room code from the host');
-  await room.join('Late C', code, null);
+  await devJoin('Late C', code, null);
   await waitFor('in the room', (s) => s.phase === 'inRoom' && s.members.some((m) => m.isHost), 60_000);
   await check(report, 'joined late while chat is off: input disabled with the right text', async () => {
     await waitFor('chat off in snapshot', (s) => !s.chatState.enabled, 10_000);
@@ -288,7 +289,7 @@ async function roomsMember(report: Report, media: string) {
       if (!code) await sleep(300);
     }
     if (!code) throw new Error('no room 2 code');
-    const out = await room.join('Member B', code, null);
+    const out = await devJoin('Member B', code, null);
     if (out.status !== 'inRoom') throw new Error(`join: ${out.status}`);
     await assertCleanRoom('member');
   });

@@ -5412,10 +5412,12 @@ dependencies = [
 name = "syncwatch-net"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "blake3",
  "ed25519-dalek",
  "futures-util",
  "getrandom 0.4.3",
+ "miniz_oxide 0.9.1",
  "postcard",
  "rustls",
  "rustls-platform-verifier",

@@ -26,13 +26,19 @@ pub fn usable(s: WindowState, monitors: &[Area]) -> Option<WindowState> {
     if s.w < MIN_W || s.h < MIN_H || s.w > 16_384 || s.h > 16_384 {
         return None;
     }
-    let grab = monitors.iter().any(|&(mx, my, mw, mh)| {
+    let grab = monitors.iter().find(|&&(mx, my, mw, mh)| {
         let (mr, mb) = (mx + mw as i32, my + mh as i32);
         let (l, r) = (s.x.max(mx), (s.x + s.w as i32).min(mr));
         let (t, b) = (s.y.max(my), (s.y + 40).min(mb));
         r - l >= 100 && b - t >= 20
-    });
-    grab.then_some(s)
+    })?;
+    // Never larger than the monitor the title bar is on (it may have a smaller resolution or
+    // a higher scale than when the size was saved); keep it on that monitor.
+    let &(mx, my, mw, mh) = grab;
+    let (w, h) = (s.w.min(mw.max(MIN_W)), s.h.min(mh.max(MIN_H)));
+    let x = s.x.clamp(mx - (w as i32 - 100), mx + mw as i32 - 100);
+    let y = s.y.clamp(my, (my + mh as i32 - 40).max(my));
+    Some(WindowState { x, y, w, h, ..s })
 }
 
 pub fn path(config: &Path) -> PathBuf {
@@ -126,6 +132,12 @@ mod tests {
         assert!(usable(st(0, 0, 50_000, 900), &[MAIN]).is_none());
         // No monitors known: nothing restored.
         assert!(usable(st(100, 100, 1440, 860), &[]).is_none());
+        // Saved larger than the monitor (another resolution or scale): shrunk to fit it.
+        let fit = usable(st(0, 0, 2028, 1362), &[MAIN]).unwrap();
+        assert_eq!((fit.w, fit.h), (1920, 1040));
+        // A title bar above the screen top is moved down onto it.
+        let y = usable(st(100, -10, 1440, 860), &[MAIN]).map(|s| s.y);
+        assert!(y.is_none() || y == Some(0));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 // "INFO text". The lab script adds the outside evidence (qBittorrent's counters, our sockets).
 
 import { invoke } from '@tauri-apps/api/core';
+import { devJoin } from './devjoin';
 import { room, torrents, type RoomState } from '../lib/room';
 import { act, check, current, has, sleep, waitFor, type Report } from './scenario';
 
@@ -194,7 +195,7 @@ export async function torrentMember(report: Report, fileName: string) {
     await room.leave();
     await waitFor('left', (s) => !s.active, 20_000);
     report(`TS rejoin_start ${Date.now()}`);
-    await room.join('Member B', code, null);
+    await devJoin('Member B', code, null);
     await waitFor('confirm again', (x) => x.confirmMagnet != null, 60_000);
     await act({ type: 'acceptMagnet' });
     await waitFor('complete at once', (s) => s.torrent?.phase === 'complete', 20_000);
@@ -310,7 +311,7 @@ export async function torrentFileLate(report: Report) {
     if (!code) throw new Error('no room code');
     await room.leave();
     await waitFor('left', (s) => !s.active, 20_000);
-    await room.join('Member C', code, null);
+    await devJoin('Member C', code, null);
     const s = await waitFor('confirm again', (x) => x.confirmMagnet != null, 60_000);
     report(`INFO C confirm after rejoin: ${s.confirmMagnet?.name} ${s.confirmMagnet?.size}`);
     await act({ type: 'acceptMagnet' });

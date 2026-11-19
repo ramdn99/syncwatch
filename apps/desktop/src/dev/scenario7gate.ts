@@ -8,6 +8,7 @@
 // followed mpv's paused-for-cache flag) to reproduce the bug.
 
 import { invoke } from '@tauri-apps/api/core';
+import { devJoin } from './devjoin';
 import { room, torrents, type RoomState } from '../lib/room';
 import { act, check, current, has, sleep, waitFor, type Report } from './scenario';
 
@@ -262,7 +263,7 @@ export async function gateMember(report: Report) {
     // Wait until the host is paused at 40:00 (its chat marker arrives after rejoining: poll
     // the room from outside is not possible, so give the host time to pause and seek).
     await sleep(8000);
-    await room.join('Member B', code, null);
+    await devJoin('Member B', code, null);
     await waitFor('confirm again', (x) => x.confirmMagnet != null, 60_000);
     const t0 = Date.now();
     await act({ type: 'acceptMagnet' });

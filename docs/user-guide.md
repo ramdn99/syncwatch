@@ -1,7 +1,97 @@
 # SyncWatch user guide
 
-Status: torrents (Milestone 7), settings, privacy and known limits (Milestone 8). The full
-guide, with installation and first steps, is written in Milestone 9.
+Status: rooms with invites (Milestone 9), torrents, settings, privacy and known limits.
+
+## Rooms: create, invite, join
+
+SyncWatch has no server of its own. Each person connects with their own Metered relay account
+(Settings, Connection). People join a room with a **copy-and-paste invite**:
+1. The host sends an invite.
+2. The member sends a reply back.
+3. Both compare four words.
+4. The host lets the member in.
+
+Any chat app works for sending the texts: messages, email, a group chat.
+
+### Host: create the room
+
+1. Click **Create room**.
+2. Enter your name and a room name (the room name is what the people you invite see).
+3. Optionally add a password. Without one, the four words are your protection; with one,
+   everyone also needs the password.
+
+![Create a room](images/invites/01-create.png)
+
+### Host: invite someone
+
+1. In the room, under **Members**, click **Invite a member**.
+2. After a few seconds the invite appears. Click **Copy** and send it to **one** person.
+   - Each invite works **once**, for one person.
+   - It stays valid for 10 minutes (Settings, Room defaults).
+
+![An invite ready to copy](images/invites/02-invite.png)
+
+### Member: join with the invite
+
+1. Click **Join room** and enter your name.
+2. Paste the invite. SyncWatch shows the room name and how long the invite is still valid.
+   If the room has a password, type it here.
+3. Click **Create my reply**.
+
+![Pasting an invite](images/invites/03-join.png)
+
+4. Click **Copy** and send the reply back to the host.
+5. Read your **four words** to the host (a call or voice message is best), and wait. Nothing
+   connects to the host until they let you in.
+
+![The reply and the four words](images/invites/04-reply.png)
+
+### Host: let them in
+
+1. Paste the reply under **Paste a reply** and click **Add reply**.
+2. The invite now shows the person's name and four words. Ask them to read their words.
+   **Admit** only if all four match exactly; otherwise click **Refuse**.
+
+![Comparing words before admitting](images/invites/05-admit.png)
+
+The member joins within a few seconds. Both of you keep seeing the same words in the room
+(next to the member's name, and at the top of the member's window).
+
+![The host after admitting](images/invites/06-joined-host.png)
+![The member in the room](images/invites/07-joined-member.png)
+
+### If something goes wrong
+
+SyncWatch tells you what to fix when a pasted text cannot be used:
+- **The text was cut off or changed while copying:** copy it again in full.
+- **A reply was pasted where an invite belongs (or the other way round):** paste it on the
+  other computer.
+- **The invite expired or was already used:** ask the host for a new one.
+- **The text was made by another SyncWatch version:** both of you need the same version
+  (see Updates).
+- **The connection did not match the invite:** something changed the texts on the way. Make
+  a new invite and compare the words carefully.
+
+### When someone drops out
+
+- **Short hiccups** (a few seconds of Wi-Fi trouble) recover by themselves.
+- **A connection that is really gone:**
+  - The member sees "The connection to the host was lost".
+  - The host sees the member as **Disconnected · seat kept**.
+  - The host opens that member's menu (the dots next to the name), clicks **Re-invite...**,
+    and sends the new invite.
+  - The member joins with it as above and gets their seat back. Only that person can use a
+    re-invite.
+  - The seat is kept for 5 minutes (Settings, Room defaults).
+
+![Re-inviting a dropped member](images/invites/08-reinvite.png)
+
+### What is different from a room code
+
+- Each person needs their own invite, and joining takes two copy-pastes.
+- **Make host** is not available in rooms joined with invites.
+- If the **host** leaves or loses their connection, the room ends for everyone. Someone creates
+  a new room and invites the others again.
 
 ## Watching a torrent together
 
@@ -146,15 +236,23 @@ Open **Settings** on the home screen. The sections are:
     you are the host) can see your address.
   - With it on (Settings, Network), they only see the relay's address, which uses more of your
     relay quota.
-  - The signaling server always sees your address, and so does a torrent's swarm whatever the
-    relay setting is (see "Watching a torrent together").
+  - **Invites and replies contain your connection addresses** (the network addresses WebRTC
+    found, or only the relay's with **Always use relay**). Send them only to the person you
+    invite. They never contain your Metered key or relay credentials.
+  - A torrent's swarm sees your address whatever the relay setting is (see "Watching a
+    torrent together").
 - **Latency:** the members list shows each member's round-trip time to the host (for example
   "Direct · 42 ms"). Everyone in the room can see it. It is not an address.
-- **Rooms without a password:** compare the four words with the other person, by voice or
-  another channel you trust. Different words mean someone is in the middle: leave the room.
-- **No telemetry.** SyncWatch connects only to the signaling server, the relay (STUN/TURN)
-  servers, Metered's API when you set it up, the people in your room and, in torrent rooms, the
-  torrent's swarm.
+- **The four words:** compare them with the other person by voice or another channel you trust
+  before the host clicks **Admit**. Someone who copied an invite from a group chat, or who
+  changed the texts on the way, gets different words: refuse them. The password (if the room
+  has one) and Kick and Ban protect the room as well.
+- **No telemetry.** SyncWatch connects only to:
+  - the relay (STUN/TURN) servers;
+  - Metered's API, when you set it up;
+  - GitHub, to check for updates (Settings, About; it can be turned off);
+  - the people in your room;
+  - in torrent rooms, the torrent's swarm.
 - **Diagnostics:** **Copy diagnostics** removes credentials, keys, tokens, IP addresses and
   folder paths before anything reaches your clipboard. Logs also contain no credentials, no
   chat and no full paths.

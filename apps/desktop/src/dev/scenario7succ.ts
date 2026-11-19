@@ -6,6 +6,7 @@
 // Real UI code path, real mpv, real engine; no mouse or keyboard.
 
 import { invoke } from '@tauri-apps/api/core';
+import { devJoin } from './devjoin';
 import { room, torrents } from '../lib/room';
 import { act, check, current, has, sleep, waitFor, type Report } from './scenario';
 
@@ -88,7 +89,7 @@ export async function succLate(report: Report) {
   // Wait for the crash and the takeover (c is outside the room: it cannot see the chat).
   await sleep(75_000);
   await check(report, 'c joins after the succession and starts directly on the chosen file (file list from the new host, no swarm lookup)', async () => {
-    await room.join('Late C', code!, null);
+    await devJoin('Late C', code!, null);
     const s = await waitFor('confirm again', (x) => x.confirmMagnet != null, 90_000);
     const host = s.members.find((m) => m.isHost)?.name;
     report(`INFO c sees host: ${host}`);

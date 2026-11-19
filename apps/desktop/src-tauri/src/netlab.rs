@@ -211,7 +211,7 @@ impl Lab {
                 self.r.loopback_mb_s = Some(bytes as f64 / 1e6 / d.as_secs_f64().max(1e-6));
             }
         }
-        let url = configured_url();
+        let url = configured_url().unwrap_or_else(|| "ws://127.0.0.1:8787/ws".to_owned());
         let mut sig = SignalingConn::connect(&url)
             .await
             .map_err(|e| e.to_string())?;

@@ -37,7 +37,7 @@ export function Home(props: {
       )}
       <main className="flex flex-1 flex-col items-center justify-center gap-4 px-6">
         <h1 className="font-brand text-3xl font-bold">Watch together, in sync.</h1>
-        <p className="max-w-md text-center text-muted">Everyone plays their own copy; SyncWatch keeps you together.</p>
+        <p className="max-w-md text-center text-muted">Everyone plays their own copy; SyncWatch keeps you together. Create a room, then invite each person with a copy-and-paste invite.</p>
         <div className="mt-4 flex gap-3">
           <button
             type="button"

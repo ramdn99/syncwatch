@@ -53,12 +53,12 @@ impl IdentityKey {
         Identity(self.0.verifying_key().to_bytes())
     }
 
-    fn sign(&self, msg: &[u8]) -> Vec<u8> {
+    pub(crate) fn sign(&self, msg: &[u8]) -> Vec<u8> {
         self.0.sign(msg).to_bytes().to_vec()
     }
 }
 
-fn verify(id: &Identity, msg: &[u8], sig: &[u8]) -> bool {
+pub(crate) fn verify(id: &Identity, msg: &[u8], sig: &[u8]) -> bool {
     let Ok(sig) = <[u8; 64]>::try_from(sig) else {
         return false;
     };
@@ -120,7 +120,7 @@ pub const WORDS: [&str; 256] = [
 
 pub type VerificationWords = [&'static str; 4];
 
-fn words_for(transcript: &[u8; 32]) -> VerificationWords {
+pub(crate) fn words_for(transcript: &[u8; 32]) -> VerificationWords {
     let h = blake3::derive_key("syncwatch auth v1 verification words", transcript);
     [
         WORDS[h[0] as usize],

@@ -22,6 +22,9 @@ ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std
 blake3.workspace = true
 getrandom = "0.4.3"
 postcard = { workspace = true }
+# Manual invites (ADR 0014): deflate + base64url text. Both versions are already in the tree.
+miniz_oxide = { version = "=0.9.1", default-features = false, features = ["with-alloc"] }
+base64 = { version = "=0.22.1", default-features = false, features = ["alloc"] }
 syncwatch-sync-core = { workspace = true }
 
 [dev-dependencies]

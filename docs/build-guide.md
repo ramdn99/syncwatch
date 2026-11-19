@@ -88,7 +88,7 @@ Development environment variables:
 | `SYNCWATCH_DEV_LAYOUT_PROBE=1` | Write `%LOCALAPPDATA%\SyncWatch\dev\layout-probe.json` after every video placement |
 | `SYNCWATCH_DEV_BYPASS_CONNECTION=1` | Debug builds only: allow Create/Join without a verified connection (release builds have no bypass) |
 | `SYNCWATCH_LOG` | App log level (`trace`/`debug`/`info`/`warn`/`error`). Third-party crates stay at `warn` |
-| `SYNCWATCH_SIGNALING_URL` | Signaling server for this instance (default `wss://signal.example.invalid/ws`, a placeholder until deployment). `ws://` is accepted only for localhost. The URL is logged at startup |
+| `SYNCWATCH_SIGNALING_URL` | Dev signaling server for this instance (debug builds only; no default). Without it, or with `SYNCWATCH_HANDSHAKE=manual`, rooms use manual invites as in release builds (ADR 0014). `ws://` is accepted only for localhost. The URL is logged at startup |
 | `SYNCWATCH_DEV_IDENTITY=a` | Debug builds: use `%LOCALAPPDATA%\SyncWatch-dev-a` as the data folder, so two instances can run side by side |
 
 Logs go to `%LOCALAPPDATA%\SyncWatch\logs\syncwatch.log` (in portable mode: `<exe>\data\logs`).

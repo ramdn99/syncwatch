@@ -44,6 +44,8 @@ param(
     # Hands-on test material: seed both test torrents, print the magnets and .torrent paths, keep
     # qBittorrent running until a key is pressed or -ManualMinutes pass, then clean up.
     [switch]$Manual,
+    # signaling (dev server) or manual (copy-paste invites as in release builds, ADR 0014).
+    [ValidateSet('signaling', 'manual')][string]$Handshake = 'signaling',
     [int]$ManualMinutes = 60
 )
 # -SameIpDefault: qBittorrent keeps libtorrent's ONE connection per IP and sits on 127.0.0.2, so the
@@ -231,7 +233,7 @@ $env:SYNCWATCH_LAB_FILE = 'long.mkv'
 $env:SYNCWATCH_DEV_TORRENT_BIND = '127.0.0.1'
 $env:SYNCWATCH_DEV_TORRENT_DHT = '0'
 $env:SYNCWATCH_LAB_TORRENT_FILE = $filmTorrent
-$out = pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario $Scenario 2>&1
+$out = pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario $Scenario -Handshake $Handshake 2>&1
 $out | Where-Object { $_ -notmatch '^(Building|.*started \(PID)' } | ForEach-Object { Write-Host $_ }
 $raw = ($out | Select-String 'Raw results: (.*)$').Matches | Select-Object -Last 1 | ForEach-Object { $_.Groups[1].Value.Trim() }
 Stop-Job $mon; Remove-Job $mon -Force
@@ -305,7 +307,12 @@ if ($lastDone -and $ts['idle_end']) {
     Result ($before.Count -gt 0 -and ($before | Measure-Object up -Maximum).Maximum -gt 0) "qBittorrent uploaded while we downloaded (max $((($before | Measure-Object up -Maximum).Maximum / 1MB).ToString('0.0')) MiB)"
     $ups = $after | ForEach-Object up | Sort-Object -Unique
     Result ($after.Count -ge 10 -and @($ups).Count -eq 1) "after 100%: qBittorrent uploaded 0 more bytes over $($after.Count) s (incl. the rejoin)"
-    Result (@($after | Where-Object { $_.peers -gt 0 }).Count -eq 0) 'after 100%: qBittorrent sees no peer'
+    # qBittorrent may list our OLD address for a moment while it retries it (it learned it from the
+    # tracker or PEX before our stopped announce). Such a retry is refused: we hold no socket. What
+    # must never happen is a listed peer with a live connection to our processes.
+    $retries = @($after | Where-Object { $_.peers -gt 0 -and $_.conns -eq 0 }).Count
+    if ($retries) { Write-Host "INFO  after 100%: qBittorrent listed our old address in $retries sample(s) while retrying it (refused: no socket on our side)" }
+    Result (@($after | Where-Object { $_.peers -gt 0 -and $_.conns -gt 0 }).Count -eq 0) 'after 100%: qBittorrent has no connected peer'
     Result (@($after | Where-Object { $_.peer -gt 0 }).Count -eq 0) 'after 100%: no peer connection between qBittorrent and our processes'
     Result (@($after | Where-Object { $_.trk -gt 0 }).Count -eq 0) 'after 100%: no tracker connection left open (stopped announce done, no keep-alive)'
     Result (@($after | Where-Object { $_.udp -gt 0 }).Count -eq 0) 'after 100%: our processes hold no UDP socket (no DHT, no tracker client)'

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { endText, friendlyError, loadName, PASSWORD_IGNORED_TEXT, room, saveName } from '../lib/room';
 import { ERRORS, isNoServer } from '../strings/errors';
+import { INVITE_TEXT } from '../strings/invites';
+import { InviteJoin } from './InviteJoin';
 
 /** Create or join a room: display name, (code), optional password. */
 export function RoomEntryDialog(props: { mode: 'create' | 'join'; onClose: () => void; onEntered: () => void; onConnectionSettings?: () => void }) {
@@ -10,14 +12,26 @@ export function RoomEntryDialog(props: { mode: 'create' | 'join'; onClose: () =>
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ignoredNotice, setIgnoredNotice] = useState(false);
+  const [roomName, setRoomName] = useState('');
+  // Release builds join with manual invites (ADR 0014); dev builds may use a signaling server.
+  const [handshake, setHandshake] = useState<'manual' | 'signaling'>('manual');
+  useEffect(() => {
+    void room
+      .handshake()
+      .then(setHandshake)
+      .catch(() => {});
+  }, []);
   const create = props.mode === 'create';
+  const manual = handshake === 'manual';
+  // Manual join: once the reply is ready, the dialog shows only the reply step.
+  const [replyStep, setReplyStep] = useState(false);
 
   const submit = async () => {
     setError(null);
     setBusy(true);
     try {
       saveName(name.trim());
-      const outcome = create ? await room.create(name, password || null) : await room.join(name, code, password || null);
+      const outcome = create ? await room.create(name, password || null, manual ? roomName.trim() || null : null) : await room.join(name, code, password || null);
       if (outcome.status === 'ended') {
         setError(endText(outcome.ended) ?? 'Could not join the room.');
         return;
@@ -47,7 +61,7 @@ export function RoomEntryDialog(props: { mode: 'create' | 'join'; onClose: () =>
         <h2 id="room-dialog-title" className="font-brand text-lg font-bold">
           {create ? 'Create a room' : 'Join a room'}
         </h2>
-        <label className="block text-sm">
+        <label className="block text-sm" hidden={replyStep}>
           <span className="text-muted">Your name</span>
           <input
             autoFocus
@@ -58,7 +72,40 @@ export function RoomEntryDialog(props: { mode: 'create' | 'join'; onClose: () =>
             className="mt-1 w-full rounded-md border border-border bg-surface px-3 py-2 text-text focus:border-accent focus:outline-none"
           />
         </label>
-        {!create && (
+        {!create && manual && (
+          <>
+            {!replyStep && <p className="text-xs text-muted">{INVITE_TEXT.joinIntro}</p>}
+            <InviteJoin
+              name={name}
+              onReplyStep={() => setReplyStep(true)}
+              onEntered={props.onEntered}
+              onCancel={props.onClose}
+              onNameRequired={() => {
+                if (name.trim()) {
+                  saveName(name.trim());
+                  return true;
+                }
+                setError('Enter your name first.');
+                return false;
+              }}
+            />
+          </>
+        )}
+        {create && manual && (
+          <label className="block text-sm">
+            <span className="text-muted">Room name (shown to the people you invite)</span>
+            <input
+              maxLength={40}
+              value={roomName}
+              placeholder={name.trim() ? `${name.trim()}'s room` : 'Movie night'}
+              onChange={(e) => setRoomName(e.target.value)}
+              data-testid="room-name-input"
+              className="mt-1 w-full rounded-md border border-border bg-surface px-3 py-2 text-text focus:border-accent focus:outline-none"
+            />
+            <span className="mt-1 block text-xs text-muted">{INVITE_TEXT.createIntro}</span>
+          </label>
+        )}
+        {!create && !manual && (
           <label className="block text-sm">
             <span className="text-muted">Room code</span>
             <input
@@ -71,7 +118,7 @@ export function RoomEntryDialog(props: { mode: 'create' | 'join'; onClose: () =>
             />
           </label>
         )}
-        <label className="block text-sm">
+        <label className="block text-sm" hidden={!create && manual}>
           <span className="text-muted">{create ? 'Password (optional)' : 'Password (if the room has one)'}</span>
           <input
             type="password"
@@ -118,7 +165,7 @@ export function RoomEntryDialog(props: { mode: 'create' | 'join'; onClose: () =>
             </button>
           </div>
         )}
-        <div className="flex justify-end gap-2" hidden={ignoredNotice}>
+        <div className="flex justify-end gap-2" hidden={ignoredNotice || (!create && manual)}>
           <button type="button" className="rounded-md px-4 py-2 text-muted hover:text-text" onClick={props.onClose}>
             Cancel
           </button>

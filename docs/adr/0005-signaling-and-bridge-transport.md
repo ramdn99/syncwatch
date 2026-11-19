@@ -36,8 +36,9 @@ Known pitfalls from the earlier build (spec section 2):
   - DNS, TCP and the handshake run as separate steps, so the error says which host failed and why
     (DNS / refused / timed out / TLS / HTTP status / version). It never includes credentials.
   - `ws://` is accepted only for localhost.
-  - The default URL is a placeholder (`wss://signal.example.invalid/ws`) until deployment.
-    `SYNCWATCH_SIGNALING_URL` overrides it and the URL in use is logged at startup.
+  - There is no default URL. Since Milestone 9, release builds join with manual invites (ADR
+    0014) and use no server. `SYNCWATCH_SIGNALING_URL` points development builds at the
+    dev server, and the URL in use is logged at startup.
 
 ### Bridge transport
 - One hidden window (`visible(false)`, no taskbar entry, 1x1) loads `bridge.html`, a second Vite

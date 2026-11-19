@@ -33,6 +33,7 @@ import {
   RefreshCw,
   Server,
   UserMinus,
+  UserPlus,
   Volume2,
   VolumeX,
   X,
@@ -74,6 +75,7 @@ export const ICONS = {
   mutedByYou: EyeOff,
   copy: Copy,
   kick: UserMinus,
+  invite: UserPlus,
   ban: Ban,
   shortcuts: Keyboard,
 } as const satisfies Record<string, LucideIcon>;

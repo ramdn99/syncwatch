@@ -55,6 +55,9 @@ struct World {
     next_room: u32,
     /// Room frames SENT by this node carry the previous protocol version (an older build).
     old_version: Option<usize>,
+    /// Manual invites: offers and answers are real-looking SDP with an a=fingerprint line,
+    /// followed by one candidate and end-of-candidates (as the bridge reports them).
+    sdp_mode: bool,
 }
 
 fn cfg(name: &str, seed: u8) -> SessionConfig {
@@ -64,6 +67,7 @@ fn cfg(name: &str, seed: u8) -> SessionConfig {
         ice: IceConfig::default(),
         max_members: 12,
         gate_timeout_us: None,
+        handshake: syncwatch_net::handshake::HandshakeMode::Signaling,
     }
 }
 
@@ -79,6 +83,7 @@ impl World {
             mitm: false,
             next_room: 0,
             old_version: None,
+            sdp_mode: false,
         }
     }
 
@@ -181,27 +186,34 @@ impl World {
                         },
                     );
                     if role == IceRole::Offerer {
+                        let sdp = self.sdp_of(&fp);
                         self.queue.push_back(Ev::Tr(
                             i,
                             TransportEvent::LocalSignal {
                                 peer,
-                                data: SignalData::Offer { sdp: fp },
+                                data: SignalData::Offer { sdp },
                             },
                         ));
+                        self.gathered(i, peer);
                     }
                 }
                 Output::RemoteSignal { peer, data } => match data {
                     SignalData::Offer { .. } => {
-                        let fp = self.links[&(i, peer)].fp.clone();
+                        let Some(l) = self.links.get(&(i, peer)) else {
+                            continue;
+                        };
+                        let sdp = self.sdp_of(&l.fp.clone());
                         self.queue.push_back(Ev::Tr(
                             i,
                             TransportEvent::LocalSignal {
                                 peer,
-                                data: SignalData::Answer { sdp: fp },
+                                data: SignalData::Answer { sdp },
                             },
                         ));
+                        self.gathered(i, peer);
                     }
                     SignalData::Answer { sdp } => {
+                        let sdp = syncwatch_net::sdp::dtls_fingerprint(&sdp).unwrap_or(sdp);
                         // Pair with the answerer that owns this fingerprint.
                         let other = self
                             .links
@@ -269,6 +281,32 @@ impl World {
                 }
                 Output::Player(_) | Output::Core(_) => {}
             }
+        }
+    }
+
+    fn sdp_of(&self, fp: &str) -> String {
+        if self.sdp_mode {
+            format!("v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\na=fingerprint:{fp}\r\n")
+        } else {
+            fp.to_owned()
+        }
+    }
+
+    /// Manual invites: one host candidate and end-of-candidates after the description.
+    fn gathered(&mut self, i: usize, peer: PeerId) {
+        if !self.sdp_mode {
+            return;
+        }
+        for data in [
+            SignalData::Candidate {
+                candidate: "candidate:1 1 udp 2122260223 192.0.2.1 50000 typ host".into(),
+                sdp_mid: Some("0".into()),
+                sdp_m_line_index: Some(0),
+            },
+            SignalData::EndOfCandidates,
+        ] {
+            self.queue
+                .push_back(Ev::Tr(i, TransportEvent::LocalSignal { peer, data }));
         }
     }
 
@@ -1363,4 +1401,368 @@ fn the_next_successor_is_updated_when_the_first_one_leaves() {
             reason: "banned".into()
         })
     );
+}
+
+// ---------------------------------------------------------------------- manual invites ----
+// ADR 0014: copy-paste invites and replies, no signaling server. The host is the offerer of
+// each invite link; the reply is applied only after Admit.
+
+use syncwatch_net::handshake::HandshakeMode;
+use syncwatch_net::invite::{Invite, InviteError};
+
+fn manual_cfg(name: &str, seed: u8) -> SessionConfig {
+    let mut c = cfg(name, seed);
+    c.handshake = HandshakeMode::manual_default();
+    c
+}
+
+impl World {
+    fn now_unix(&self) -> u64 {
+        (self.clock().wall_ms / 1000) as u64
+    }
+
+    fn host_manual(&mut self, name: &str, seed: u8, password: Option<&str>) -> usize {
+        self.sdp_mode = true;
+        let (s, outs) = RoomSession::create_manual(
+            manual_cfg(name, seed),
+            password.map(str::to_owned),
+            "Movie night",
+            self.clock(),
+        );
+        self.push(s, outs)
+    }
+
+    /// The host makes an invite; returns its id and text.
+    fn make_invite(&mut self, h: usize, for_member: Option<MemberId>) -> (String, String) {
+        self.act(h, Action::CreateInvite { for_member });
+        self.run_for(100_000);
+        let v = self.invites(h);
+        let last = v.iter().find(|i| i.status == "waiting" && i.text.is_some());
+        let inv = last.expect("an invite ready");
+        (inv.id.clone(), inv.text.clone().unwrap())
+    }
+
+    fn invites(&self, i: usize) -> Vec<InviteView> {
+        self.nodes[i]
+            .ui
+            .iter()
+            .rev()
+            .find_map(|u| match u {
+                RoomUi::Invites(v) => Some(v.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    fn invite_errors(&self, i: usize) -> Vec<String> {
+        self.nodes[i]
+            .ui
+            .iter()
+            .filter_map(|u| match u {
+                RoomUi::InviteError(e) => Some(e.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A member pastes the invite; returns the node and the reply text.
+    fn answer(
+        &mut self,
+        name: &str,
+        seed: u8,
+        text: &str,
+        password: Option<&str>,
+    ) -> (usize, String) {
+        let inv = Invite::decode(text, self.now_unix()).expect("a valid invite");
+        let (s, outs) = RoomSession::join_invite(
+            manual_cfg(name, seed),
+            inv,
+            password.map(str::to_owned),
+            self.clock(),
+        );
+        let m = self.push(s, outs);
+        self.run_for(100_000);
+        let reply = self.nodes[m]
+            .ui
+            .iter()
+            .find_map(|u| match u {
+                RoomUi::Reply { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .expect("a reply");
+        (m, reply)
+    }
+
+    fn reply_words(&self, m: usize) -> [&'static str; 4] {
+        self.nodes[m]
+            .ui
+            .iter()
+            .find_map(|u| match u {
+                RoomUi::Reply { words, .. } => Some(*words),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    fn admit_by_reply(&mut self, h: usize, id: &str, reply: &str) {
+        self.act(h, Action::SubmitReply(reply.to_owned()));
+        self.act(h, Action::Admit(id.to_owned()));
+        self.run_for(500_000);
+    }
+
+    /// Links that have an open connection (both sides know each other).
+    fn connected(&self, i: usize) -> usize {
+        self.links
+            .iter()
+            .filter(|((n, _), l)| *n == i && l.remote.is_some())
+            .count()
+    }
+}
+
+#[test]
+fn invite_reply_admit_then_the_room_works() {
+    let mut w = World::new();
+    let h = w.host_manual("Hana", 1, None);
+    assert!(w.in_room(h), "the host is in its room at once (no server)");
+    let (id, text) = w.make_invite(h, None);
+    assert!(text.starts_with("SWINV1-"), "{text}");
+    let (m, reply) = w.answer("Mo", 2, &text, None);
+    assert!(reply.starts_with("SWREP1-"));
+    // Before the host acts nothing is connected.
+    assert_eq!(w.connected(m), 0);
+    assert!(!w.in_room(m));
+    w.act(h, Action::SubmitReply(reply.clone()));
+    let v = w.invites(h);
+    let pending = v.iter().find(|i| i.id == id).unwrap();
+    assert_eq!(pending.status, "replied");
+    assert_eq!(pending.member_name.as_deref(), Some("Mo"));
+    // The host sees the same four words the member sees.
+    assert_eq!(pending.words, Some(w.reply_words(m)));
+    // Still not connected: the reply is applied only after Admit.
+    assert_eq!(w.connected(h), 0);
+    w.act(h, Action::Admit(id.clone()));
+    w.run_for(500_000);
+    assert!(w.in_room(m), "{:?}", w.phases(m));
+    assert_eq!(
+        w.invites(h).iter().find(|i| i.id == id).unwrap().status,
+        "joined"
+    );
+    // After joining, both sides show the invite words (not a second, different set).
+    assert_eq!(w.words(m).last().unwrap().1, w.reply_words(m));
+    assert_eq!(w.words(h).last().unwrap().1, w.reply_words(m));
+    chat(&mut w, m, "hello host");
+    assert_eq!(w.chats(h), vec!["hello host"]);
+    assert_eq!(w.chats(m), vec!["hello host"]);
+}
+
+#[test]
+fn an_unadmitted_reply_never_gets_room_data() {
+    let mut w = World::new();
+    let h = w.host_manual("Hana", 1, None);
+    let (id, text) = w.make_invite(h, None);
+    let (m, reply) = w.answer("Eve", 3, &text, None);
+    w.act(h, Action::SubmitReply(reply));
+    w.act(h, Action::Refuse(id.clone()));
+    w.run_for(1_000_000);
+    assert_eq!(
+        w.invites(h).iter().find(|i| i.id == id).unwrap().status,
+        "refused"
+    );
+    assert_eq!(w.connected(m), 0, "never connected");
+    assert!(
+        w.members(m).is_empty(),
+        "no room state reached the refused member"
+    );
+    assert!(w.chats(m).is_empty());
+    // A replied-but-never-admitted member gives up after the invite's lifetime.
+    w.run_for(13 * 60 * 1_000_000);
+    assert_eq!(w.nodes[m].ended, Some(EndReason::NotAdmitted));
+}
+
+#[test]
+fn reused_expired_tampered_and_unknown_replies_are_refused() {
+    let mut w = World::new();
+    let h = w.host_manual("Hana", 1, None);
+    let (id, text) = w.make_invite(h, None);
+    let (_m, reply) = w.answer("Mo", 2, &text, None);
+    // Tampered: one character changed.
+    let mut b: Vec<char> = reply.chars().collect();
+    let k = b.len() / 2;
+    b[k] = if b[k] == 'x' { 'y' } else { 'x' };
+    w.act(h, Action::SubmitReply(b.into_iter().collect()));
+    assert_eq!(
+        w.invite_errors(h).last().unwrap(),
+        &InviteError::Damaged.to_string()
+    );
+    // The real reply works once...
+    w.act(h, Action::SubmitReply(reply.clone()));
+    assert_eq!(
+        w.invites(h).iter().find(|i| i.id == id).unwrap().status,
+        "replied"
+    );
+    // ...and a second reply to the same invite is refused (single use).
+    let (_m2, reply2) = w.answer("Eve", 3, &text, None);
+    w.act(h, Action::SubmitReply(reply2));
+    assert_eq!(
+        w.invite_errors(h).last().unwrap(),
+        &InviteError::Used.to_string()
+    );
+    // An invite pasted where a reply belongs.
+    w.act(h, Action::SubmitReply(text.clone()));
+    assert_eq!(
+        w.invite_errors(h).last().unwrap(),
+        &InviteError::InviteNotReply.to_string()
+    );
+    // Expired: a second invite, 11 minutes later.
+    let (id2, text2) = w.make_invite(h, None);
+    let (_m3, reply3) = w.answer("Late", 4, &text2, None);
+    w.run_for(11 * 60 * 1_000_000);
+    assert_eq!(
+        w.invites(h).iter().find(|i| i.id == id2).unwrap().status,
+        "expired"
+    );
+    w.act(h, Action::SubmitReply(reply3));
+    assert_eq!(
+        w.invite_errors(h).last().unwrap(),
+        &InviteError::Expired.to_string()
+    );
+    // The member side refuses an expired invite too.
+    assert_eq!(
+        Invite::decode(&text2, w.now_unix()),
+        Err(InviteError::Expired)
+    );
+    // A reply for an invite this host never made.
+    let mut w2 = World::new();
+    let other = w2.host_manual("Other", 9, None);
+    w2.act(other, Action::SubmitReply(reply));
+    assert_eq!(
+        w2.invite_errors(other).last().unwrap(),
+        &InviteError::UnknownInvite.to_string()
+    );
+}
+
+#[test]
+fn invites_and_replies_carry_no_relay_credentials() {
+    let mut w = World::new();
+    w.sdp_mode = true;
+    let mut c = manual_cfg("Hana", 1);
+    c.ice = IceConfig {
+        ice_servers: vec![IceServerJs {
+            urls: vec!["turns:relay.example.invalid:443?transport=tcp".into()],
+            username: Some("FAKE-TURN-USERNAME-1234".into()),
+            credential: Some("FAKE-TURN-CREDENTIAL-5678".into()),
+        }],
+        relay_only: true,
+    };
+    let (s, outs) = RoomSession::create_manual(c, None, "Room", w.clock());
+    let h = w.push(s, outs);
+    let (_id, text) = w.make_invite(h, None);
+    let inv = Invite::decode(&text, w.now_unix()).unwrap();
+    let all = format!("{text} {inv:?}");
+    for secret in [
+        "FAKE-TURN-USERNAME-1234",
+        "FAKE-TURN-CREDENTIAL-5678",
+        "relay.example.invalid",
+    ] {
+        assert!(!all.contains(secret), "{secret} leaked into the invite");
+    }
+    let (_m, reply) = w.answer("Mo", 2, &text, None);
+    let r = syncwatch_net::invite::Reply::decode(&reply).unwrap();
+    assert!(!format!("{reply} {r:?}").contains("FAKE-TURN"));
+}
+
+#[test]
+fn password_rooms_with_invites_and_wrong_password_throttling() {
+    let mut w = World::new();
+    let h = w.host_manual("Hana", 1, Some("s3cret"));
+    let (id, text) = w.make_invite(h, None);
+    assert!(Invite::decode(&text, w.now_unix()).unwrap().password);
+    let (m, reply) = w.answer("Mo", 2, &text, Some("wrong"));
+    w.admit_by_reply(h, &id, &reply);
+    assert!(!w.in_room(m));
+    assert!(
+        w.need_password(m).iter().any(|(wrong, _)| *wrong),
+        "{:?}",
+        w.need_password(m)
+    );
+    w.run_for(3_000_000);
+    w.act(m, Action::SubmitPassword("s3cret".into()));
+    w.run_for(1_000_000);
+    assert!(w.in_room(m), "{:?}", w.phases(m));
+}
+
+#[test]
+fn a_connection_that_does_not_match_the_reply_is_closed() {
+    let mut w = World::new();
+    let h = w.host_manual("Hana", 1, None);
+    let (id, text) = w.make_invite(h, None);
+    let (m, reply) = w.answer("Mo", 2, &text, None);
+    // Someone in the middle: the host sees another certificate than the reply named.
+    w.mitm = true;
+    w.admit_by_reply(h, &id, &reply);
+    assert!(!w.in_room(m));
+    assert!(w.members(h).iter().all(|i| i.is_host), "nobody else got in");
+}
+
+#[test]
+fn a_dropped_member_rejoins_its_kept_seat_with_a_re_invite() {
+    let mut w = World::new();
+    let h = w.host_manual("Hana", 1, None);
+    let (id, text) = w.make_invite(h, None);
+    let (m, reply) = w.answer("Mo", 2, &text, None);
+    w.admit_by_reply(h, &id, &reply);
+    assert!(w.in_room(m));
+    let seat = w.members(h).iter().find(|i| !i.is_host).unwrap().id;
+    // The connection is really gone (no signaling: no automatic reconnect).
+    let link = w.host_link_of(m);
+    w.close_sim(m, link);
+    w.input(
+        m,
+        Input::Transport(TransportEvent::Closed {
+            peer: link,
+            reason: "gone".into(),
+        }),
+    );
+    w.settle();
+    assert_eq!(
+        w.nodes[m].ended,
+        Some(EndReason::ConnectionLost {
+            seat_keep_secs: 300
+        })
+    );
+    w.run_for(60 * 1_000_000);
+    // The seat is still kept after a minute (5 minutes with invites).
+    assert!(w.members(h).iter().any(|i| i.id == seat && !i.connected));
+    let (rid, rtext) = w.make_invite(h, Some(seat));
+    // Someone else cannot use the re-invite.
+    let (_e, ereply) = w.answer("Eve", 3, &rtext, None);
+    w.act(h, Action::SubmitReply(ereply));
+    assert_eq!(
+        w.invite_errors(h).last().unwrap(),
+        &InviteError::WrongMember.to_string()
+    );
+    // The same person (same identity) gets the same seat back.
+    let (m2, rreply) = w.answer("Mo", 2, &rtext, None);
+    w.admit_by_reply(h, &rid, &rreply);
+    assert!(w.in_room(m2));
+    assert!(w.members(h).iter().any(|i| i.id == seat && i.connected));
+}
+
+#[test]
+fn make_host_is_refused_in_invite_rooms() {
+    let mut w = World::new();
+    let h = w.host_manual("Hana", 1, None);
+    let (id, text) = w.make_invite(h, None);
+    let (m, reply) = w.answer("Mo", 2, &text, None);
+    w.admit_by_reply(h, &id, &reply);
+    let seat = w.members(h).iter().find(|i| !i.is_host).unwrap().id;
+    w.ui_action(h, UiAction::MakeHost(seat));
+    assert!(
+        w.nodes[h]
+            .ui
+            .iter()
+            .any(|u| matches!(u, RoomUi::Error(e) if e.contains("Make host")))
+    );
+    assert!(w.nodes[h].s.is_host());
+    assert!(w.in_room(m));
 }

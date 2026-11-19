@@ -9,7 +9,8 @@
   `pnpm --dir apps/desktop tauri build --no-bundle`, and check that syncwatch.exe,
   libmpv-2.dll, vulkan\vulkan-1.dll and the four NotoSans fonts are there and identical to
   their sources. Prints one line per run and a summary; deletes the folder at the end.
-  Exit code 1 if any run failed.
+  Exit code 1 if any run failed. The full output of a failed build is saved to
+  %TEMP%\sw-build-fail-<time>-run<N>.log and its path printed.
 
 .EXAMPLE
   pwsh -NoProfile -File scripts/dev/build-repeat.ps1 -Count 10
@@ -50,6 +51,10 @@ for ($i = 1; $i -le $Count; $i++) {
     if ($problems) {
         $failed++
         Write-Host ("run {0,2}: FAIL in {1} s: {2}" -f $i, $secs, ($problems -join ', ')) -ForegroundColor Red
+        # The full output of every failed build is kept (the cause of a one-off failure must never be lost).
+        $keep = Join-Path ([IO.Path]::GetTempPath()) ("sw-build-fail-{0:yyyyMMdd-HHmmss}-run{1}.log" -f (Get-Date), $i)
+        $log | Set-Content -Encoding utf8 $keep
+        Write-Host "    full log: $keep"
         $log -split "`n" | Where-Object { $_ -match 'error|failed|warning: syncwatch-desktop' } | Select-Object -First 15 | ForEach-Object { "    $_" }
     } else {
         Write-Host ("run {0,2}: PASS in {1} s (build-script warnings: {2})" -f $i, $secs, $warn)

@@ -15,6 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use syncwatch_ice_config::store::{DpapiFileStore, KeyringStore, SecretStore};
 use syncwatch_net::auth::IdentityKey;
+use syncwatch_net::handshake::{HandshakeMode, HandshakeTransport, NoNetwork};
+use syncwatch_net::invite::Invite;
+use syncwatch_net::session::InviteView;
 use syncwatch_net::session::*;
 use syncwatch_net::signaling::{SignalingConn, configured_url};
 use syncwatch_net::*;
@@ -138,6 +141,9 @@ pub struct MemberDto {
     torrent: Option<TorrentMemberDto>,
     /// Torrent rooms: what a buffering member waits for (position and window progress).
     wait: Option<WaitDto>,
+    /// Manual invites: the member dropped out; their seat is kept for a re-invite (they do not
+    /// come back by themselves).
+    seat_kept: bool,
 }
 
 /// A buffering participant's missing window at the room position (ADR 0012).
@@ -369,6 +375,29 @@ pub struct RoomStateDto {
     stall: StallDto,
     /// The player could not open the room's video (damaged or unsupported file).
     load_error: bool,
+    /// "manual" (invites, release builds) or "signaling" (dev and tests).
+    handshake: &'static str,
+    /// Host, manual invites: the invite list.
+    invites: Vec<InviteView>,
+    /// Member, manual invites: the reply to send back, with the words.
+    reply: Option<ReplyDto>,
+    /// The last refused invite or reply text (friendly message), with a counter so the UI
+    /// notices a repeat of the same message.
+    invite_error: Option<InviteErrorDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplyDto {
+    text: String,
+    words: [&'static str; 4],
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InviteErrorDto {
+    seq: u32,
+    message: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -463,6 +492,8 @@ impl Mirror {
                     None
                 } else if i.is_host && !self.s.is_host {
                     host_link
+                } else if !i.connected && self.s.handshake == "manual" {
+                    None
                 } else if !i.connected {
                     Some(LinkState::Reconnecting)
                 } else {
@@ -489,6 +520,7 @@ impl Mirror {
                         permille: t.permille,
                     }),
                     wait: i.wait.filter(|_| i.buffering).map(WaitDto::from),
+                    seat_kept: !i.connected && self.s.handshake == "manual",
                     permissions: i.permissions.into(),
                     words: self.words.get(&i.id.0).copied(),
                 }
@@ -699,6 +731,18 @@ impl Mirror {
                     None => "joining connection".to_owned(),
                 };
                 self.reject(member.map(|m| m.0), who, what);
+            }
+            RoomUi::Invites(v) => {
+                self.s.invites = v;
+            }
+            RoomUi::Reply { text, words } => {
+                self.event("reply ready");
+                self.s.reply = Some(ReplyDto { text, words });
+            }
+            RoomUi::InviteError(message) => {
+                self.event(format!("invite or reply refused: {message}"));
+                let seq = self.s.invite_error.as_ref().map_or(1, |e| e.seq + 1);
+                self.s.invite_error = Some(InviteErrorDto { seq, message });
             }
             RoomUi::Core(ev) => self.apply_core(ev),
         }
@@ -1120,18 +1164,42 @@ pub async fn session_ice(app: &AppHandle) -> Result<IceConfig, String> {
 enum Mode {
     Create {
         password: Option<String>,
+        room_name: String,
     },
     Join {
         room: String,
         password: Option<String>,
     },
+    JoinInvite {
+        invite: Box<Invite>,
+        password: Option<String>,
+    },
+}
+
+/// The handshake for a new room (ADR 0014). Release builds: always manual invites. Debug
+/// builds (labs and tests): the dev signaling server when SYNCWATCH_SIGNALING_URL is set,
+/// unless SYNCWATCH_HANDSHAKE=manual.
+fn handshake_for(app: &AppHandle) -> (HandshakeMode, Option<String>) {
+    let prefs = app.state::<crate::prefs::PrefsService>().get();
+    let manual = HandshakeMode::ManualInvite {
+        invite_ttl_secs: u64::from(prefs.invite_ttl_mins) * 60,
+        seat_keep_us: i64::from(prefs.seat_keep_mins) * 60 * 1_000_000,
+    };
+    if !cfg!(debug_assertions) || std::env::var("SYNCWATCH_HANDSHAKE").as_deref() == Ok("manual") {
+        return (manual, None);
+    }
+    match configured_url() {
+        Some(url) => (HandshakeMode::Signaling, Some(url)),
+        None => (manual, None),
+    }
 }
 
 /// What happened right after Create/Join, for the dialog.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryOutcome {
-    /// "inRoom", "needPassword", "pending" (still connecting) or "ended".
+    /// "inRoom", "needPassword", "reply" (manual invites: the reply is ready to send back),
+    /// "pending" (still connecting) or "ended".
     status: &'static str,
     password_ignored: bool,
     ended: Option<EndReason>,
@@ -1153,6 +1221,8 @@ async fn wait_outcome(app: &AppHandle, max: Duration) -> EntryOutcome {
             Some("needPassword")
         } else if s.phase == Some(Phase::InRoom) {
             Some("inRoom")
+        } else if s.reply.is_some() {
+            Some("reply")
         } else {
             None
         };
@@ -1192,11 +1262,21 @@ async fn start(app: AppHandle, name: String, mode: Mode) -> Result<EntryOutcome,
         return Err("Enter a display name.".into());
     }
     let ice = session_ice(&app).await?;
-    let url = configured_url();
-    tracing::info!(signaling_url = %url, "connecting to the signaling server");
-    let sig = SignalingConn::connect(&url)
-        .await
-        .map_err(|e| e.to_string())?;
+    let (handshake, url) = handshake_for(&app);
+    if matches!(mode, Mode::Join { .. }) && url.is_none() {
+        return Err("Rooms are joined with an invite: paste the invite the host sent you.".into());
+    }
+    let sig: Box<dyn HandshakeTransport> = match &url {
+        Some(url) => {
+            tracing::info!(signaling_url = %url, "connecting to the dev signaling server");
+            Box::new(
+                SignalingConn::connect(url)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            )
+        }
+        None => Box::new(NoNetwork),
+    };
     let prefs = app.state::<crate::prefs::PrefsService>().get();
     let cfg = SessionConfig {
         key: m.key.clone(),
@@ -1204,6 +1284,7 @@ async fn start(app: AppHandle, name: String, mode: Mode) -> Result<EntryOutcome,
         ice,
         max_members: limits::MAX_MEMBERS as u8,
         gate_timeout_us: Some(prefs.gate_timeout_us()),
+        handshake,
     };
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (tr_tx, tr_rx) = mpsc::unbounded_channel();
@@ -1237,7 +1318,10 @@ async fn start(app: AppHandle, name: String, mode: Mode) -> Result<EntryOutcome,
             cfg,
             mode,
             sig,
-            DriveIds { url, session_id },
+            DriveIds {
+                url: url.unwrap_or_default(),
+                session_id,
+            },
             chans,
         )
         .await;
@@ -1269,10 +1353,10 @@ fn signaling_host(url: &str) -> String {
 }
 
 async fn recv_sig(
-    sig: &mut Option<SignalingConn>,
+    sig: &mut Option<Box<dyn HandshakeTransport>>,
 ) -> Result<syncwatch_protocol::signaling::ServerMsg, ()> {
     match sig {
-        Some(s) => s.recv().await.map_err(|_| ()),
+        Some(s) => s.recv().await.ok_or(()),
         None => std::future::pending().await,
     }
 }
@@ -1299,7 +1383,8 @@ struct Rt {
     app: AppHandle,
     bridge: Arc<Bridge>,
     player: Arc<syncwatch_player::mpv::MpvPlayer>,
-    sig: Option<SignalingConn>,
+    /// The handshake transport (ADR 0014): the dev signaling server or no network at all.
+    sig: Option<Box<dyn HandshakeTransport>>,
     mirror: Mirror,
     media: crate::roommedia::MediaCtx,
     /// Host: files (by blake3) the host chose not to send to relayed members (quota).
@@ -1330,10 +1415,11 @@ async fn drive(
     app: AppHandle,
     cfg: SessionConfig,
     mode: Mode,
-    sig: SignalingConn,
+    sig: Box<dyn HandshakeTransport>,
     ids: DriveIds,
     mut ch: Chans,
 ) -> Option<EndReason> {
+    let manual = cfg.handshake.is_manual();
     let DriveIds { url, session_id } = ids;
     let epoch = Instant::now();
     let rooms_cache = app.state::<RoomManager>().rooms_cache.clone();
@@ -1359,13 +1445,28 @@ async fn drive(
     rt.mirror.s.active = true;
     rt.mirror.s.session_id = session_id;
     rt.mirror.t0 = Some(epoch);
-    rt.mirror.s.diag.signaling_host = signaling_host(&url);
-    rt.mirror.s.diag.signaling_connected = true;
-    rt.mirror.event("signaling connected");
+    rt.mirror.s.handshake = if manual { "manual" } else { "signaling" };
+    if manual {
+        rt.mirror.event(format!(
+            "handshake: {}",
+            rt.sig.as_ref().map_or("none", |s| s.describe())
+        ));
+    } else {
+        rt.mirror.s.diag.signaling_host = signaling_host(&url);
+        rt.mirror.s.diag.signaling_connected = true;
+        rt.mirror.event("signaling connected");
+    }
     let (mut session, outs) = match mode {
-        Mode::Create { password } => {
+        Mode::Create {
+            password,
+            room_name,
+        } => {
             rt.mirror.s.has_password = password.is_some();
-            let (mut s, mut outs) = RoomSession::create(cfg, password, clock(epoch));
+            let (mut s, mut outs) = if manual {
+                RoomSession::create_manual(cfg, password, &room_name, clock(epoch))
+            } else {
+                RoomSession::create(cfg, password, clock(epoch))
+            };
             // Room defaults (Settings): who controls playback in a new room.
             let preset = rt.app.state::<crate::prefs::PrefsService>().get().preset;
             if preset == "onlyMe" {
@@ -1380,6 +1481,9 @@ async fn drive(
             (s, outs)
         }
         Mode::Join { room, password } => RoomSession::join(cfg, room, password, clock(epoch)),
+        Mode::JoinInvite { invite, password } => {
+            RoomSession::join_invite(cfg, *invite, password, clock(epoch))
+        }
     };
     let mut ended = exec(&mut rt, &session, outs).await;
     publish(&app, &mut rt, &session);
@@ -1472,9 +1576,10 @@ async fn drive(
                 ev.map(Input::Transport)
             }
         };
-        if rt.sig.is_none() && reconnect_at.is_some_and(|t| Instant::now() >= t) {
+        if !manual && rt.sig.is_none() && reconnect_at.is_some_and(|t| Instant::now() >= t) {
             match SignalingConn::connect(&url).await {
                 Ok(s) => {
+                    let s: Box<dyn HandshakeTransport> = Box::new(s);
                     tracing::info!("signaling reconnected");
                     rt.mirror.s.diag.signaling_connected = true;
                     rt.mirror.s.diag.signaling_reconnects += 1;
@@ -2137,12 +2242,127 @@ pub async fn room_create(
     app: AppHandle,
     name: String,
     password: Option<String>,
+    room_name: Option<String>,
 ) -> Result<EntryOutcome, String> {
     let password = password.filter(|p| !p.is_empty());
     if password.as_ref().is_some_and(|p| p.len() > 256) {
         return Err("That password is too long.".into());
     }
-    start(app, name, Mode::Create { password }).await
+    let room_name = room_name
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| format!("{}'s room", name.trim()));
+    start(
+        app,
+        name,
+        Mode::Create {
+            password,
+            room_name,
+        },
+    )
+    .await
+}
+
+/// What the Join dialog shows about a pasted invite before the member replies.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitePreview {
+    room_name: String,
+    /// A short form of the host's identity (the same on every invite from that host).
+    host_id: String,
+    password: bool,
+    expires_unix: u64,
+    reinvite: bool,
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// How rooms are joined in this build: "manual" (invites; always in release builds) or
+/// "signaling" (a dev signaling server is configured).
+#[tauri::command]
+pub fn room_handshake(app: AppHandle) -> &'static str {
+    match handshake_for(&app).0 {
+        HandshakeMode::ManualInvite { .. } => "manual",
+        HandshakeMode::Signaling => "signaling",
+    }
+}
+
+/// Checks a pasted invite (no network): a friendly error, or what the dialog shows.
+#[tauri::command]
+pub fn invite_preview(text: String) -> Result<InvitePreview, String> {
+    let inv = Invite::decode(&text, now_unix()).map_err(|e| e.to_string())?;
+    Ok(InvitePreview {
+        room_name: inv.room_name.clone(),
+        host_id: syncwatch_net::auth::short_id(&inv.host),
+        password: inv.password,
+        expires_unix: inv.expires_unix,
+        reinvite: inv.for_member.is_some(),
+    })
+}
+
+/// Member: joins with a pasted invite. The session prepares the reply (room state "reply").
+#[tauri::command]
+pub async fn room_join_invite(
+    app: AppHandle,
+    name: String,
+    invite: String,
+    password: Option<String>,
+) -> Result<EntryOutcome, String> {
+    let inv = Invite::decode(&invite, now_unix()).map_err(|e| e.to_string())?;
+    if let Some(me) = inv.for_member
+        && me != app.state::<RoomManager>().key.public()
+    {
+        return Err("This re-invite is for someone else. Ask the host for your own invite.".into());
+    }
+    start(
+        app,
+        name,
+        Mode::JoinInvite {
+            invite: Box::new(inv),
+            password: password.filter(|p| !p.is_empty()),
+        },
+    )
+    .await
+}
+
+/// Host: a new invite (`for_member`: a re-invite bound to that member's kept seat).
+#[tauri::command]
+pub fn room_invite_create(
+    m: State<'_, RoomManager>,
+    for_member: Option<u32>,
+) -> Result<(), String> {
+    m.send(Cmd::Action(Action::CreateInvite {
+        for_member: for_member.map(MemberId),
+    }))
+}
+
+/// Host: a pasted reply.
+#[tauri::command]
+pub fn room_invite_reply(m: State<'_, RoomManager>, text: String) -> Result<(), String> {
+    if text.len() > syncwatch_net::invite::MAX_TEXT {
+        return Err("This text is too long to be a SyncWatch reply.".into());
+    }
+    m.send(Cmd::Action(Action::SubmitReply(text)))
+}
+
+/// Host: admit, refuse or remove the invite with this id.
+#[tauri::command]
+pub fn room_invite_decide(
+    m: State<'_, RoomManager>,
+    id: String,
+    decision: String,
+) -> Result<(), String> {
+    let a = match decision.as_str() {
+        "admit" => Action::Admit(id),
+        "refuse" => Action::Refuse(id),
+        "remove" => Action::RemoveInvite(id),
+        _ => return Err("Unknown decision.".into()),
+    };
+    m.send(Cmd::Action(a))
 }
 
 #[tauri::command]
@@ -2716,8 +2936,17 @@ pub fn dev_autoroom(app: &AppHandle) {
         if role == "manual" {
             return;
         }
-        let res = if role == "host" {
-            let r = room_create(app.clone(), name, password).await;
+        let manual = std::env::var("SYNCWATCH_HANDSHAKE").as_deref() == Ok("manual");
+        let res = if role == "host" && manual {
+            let r = room_create(app.clone(), name, password, None).await;
+            let app2 = app.clone();
+            let file2 = file.clone();
+            tauri::async_runtime::spawn(dev_invite_host(app2, file2));
+            r
+        } else if manual {
+            dev_invite_join(&app, &file, name, password).await
+        } else if role == "host" {
+            let r = room_create(app.clone(), name, password, None).await;
             // Publish the code once it exists.
             for _ in 0..100 {
                 let code = app
@@ -2759,6 +2988,170 @@ pub fn dev_autoroom(app: &AppHandle) {
         }
         let _ = app.emit("room-dev-autoroom", ());
     });
+}
+
+/// Debug builds, manual invites: the host side of the dev auto-room. Each joiner asks for an
+/// invite by writing `<room file>.want-<who>`; the host answers with `.invite-<who>`, then
+/// submits the joiner's `.reply-<who>` and admits it (dev automation only, no input).
+async fn dev_invite_host(app: AppHandle, file: String) {
+    use std::collections::HashMap;
+    let path = std::path::PathBuf::from(&file);
+    let dir = path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    let base = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let state = |app: &AppHandle| {
+        app.state::<RoomManager>()
+            .state
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    };
+    // who -> (invite id, reply submitted)
+    let mut served: HashMap<String, (String, bool)> = HashMap::new();
+    let end = Instant::now() + Duration::from_secs(45 * 60);
+    while Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let s = state(&app);
+        if !s.active {
+            if s.ended.is_some() {
+                return;
+            }
+            continue;
+        }
+        let wants: Vec<String> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                n.strip_prefix(&format!("{base}.want-")).map(str::to_owned)
+            })
+            .collect();
+        for who in wants {
+            let _ = std::fs::remove_file(dir.join(format!("{base}.want-{who}")));
+            let known: Vec<String> = state(&app).invites.iter().map(|i| i.id.clone()).collect();
+            let for_member = std::fs::read_to_string(dir.join(format!("{base}.seat-{who}")))
+                .ok()
+                .and_then(|v| v.trim().parse::<u32>().ok());
+            if room_invite_create(app.state::<RoomManager>(), for_member).is_err() {
+                continue;
+            }
+            for _ in 0..100 {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let st = state(&app);
+                if let Some(inv) = st
+                    .invites
+                    .iter()
+                    .find(|i| !known.contains(&i.id) && i.text.is_some())
+                {
+                    let _ = std::fs::write(
+                        dir.join(format!("{base}.invite-{who}")),
+                        inv.text.clone().unwrap_or_default(),
+                    );
+                    served.insert(who.clone(), (inv.id.clone(), false));
+                    tracing::info!(%who, "dev: invite written");
+                    break;
+                }
+            }
+        }
+        for (who, (id, done)) in served.iter_mut() {
+            if *done {
+                continue;
+            }
+            let reply_path = dir.join(format!("{base}.reply-{who}"));
+            let Ok(text) = std::fs::read_to_string(&reply_path) else {
+                continue;
+            };
+            let _ = std::fs::remove_file(&reply_path);
+            let m = app.state::<RoomManager>();
+            let _ = room_invite_reply(m, text);
+            for _ in 0..50 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if state(&app)
+                    .invites
+                    .iter()
+                    .any(|i| &i.id == id && i.status == "replied")
+                {
+                    let _ =
+                        room_invite_decide(app.state::<RoomManager>(), id.clone(), "admit".into());
+                    tracing::info!(%who, "dev: reply admitted");
+                    break;
+                }
+            }
+            *done = true;
+        }
+    }
+}
+
+/// Debug builds: a dev scenario joins (or rejoins) the dev room with an invite from the dev host
+/// (manual invites), the way `room_join` does with a code.
+#[tauri::command]
+pub async fn dev_join_invite(app: AppHandle, name: String) -> Result<EntryOutcome, String> {
+    if !cfg!(debug_assertions) {
+        return Err("dev only".into());
+    }
+    let file =
+        std::env::var("SYNCWATCH_DEV_ROOM_FILE").map_err(|_| "no dev room file".to_owned())?;
+    let out = dev_invite_join(&app, &file, name, None).await?;
+    // Wait until the dev host admitted us.
+    for _ in 0..100 {
+        let s = app
+            .state::<RoomManager>()
+            .state
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        if s.phase == Some(Phase::InRoom) || s.ended.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Ok(out)
+}
+
+/// Debug builds, manual invites: the joiner side of the dev auto-room.
+async fn dev_invite_join(
+    app: &AppHandle,
+    file: &str,
+    name: String,
+    password: Option<String>,
+) -> Result<EntryOutcome, String> {
+    let who = std::env::var("SYNCWATCH_DEV_IDENTITY").unwrap_or_else(|_| "m".into());
+    let want = format!("{file}.want-{who}");
+    let invite_path = format!("{file}.invite-{who}");
+    let _ = std::fs::remove_file(&invite_path);
+    // Wait until the host's room exists, then ask for an invite.
+    let mut text = None;
+    for i in 0..600 {
+        if i % 25 == 0 && std::fs::metadata(&want).is_err() {
+            let _ = std::fs::write(&want, &who);
+        }
+        if let Ok(t) = std::fs::read_to_string(&invite_path) {
+            text = Some(t);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let Some(text) = text else {
+        return Err("no invite from the dev host".into());
+    };
+    let _ = std::fs::remove_file(&invite_path);
+    let out = room_join_invite(app.clone(), name, text, password).await?;
+    let reply = app
+        .state::<RoomManager>()
+        .state
+        .lock()
+        .ok()
+        .and_then(|g| g.reply.clone());
+    if let Some(r) = reply {
+        let _ = std::fs::write(format!("{file}.reply-{who}"), r.text);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -2935,6 +3328,7 @@ mod tests {
             ice: IceConfig::default(),
             max_members: 12,
             gate_timeout_us: None,
+            handshake: syncwatch_net::handshake::HandshakeMode::Signaling,
         };
         let clock = Clock {
             mono_us: 5_000_000,

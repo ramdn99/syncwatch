@@ -44,7 +44,8 @@ crates/net             PeerTransport trait, bridge IPC framing (binary, batched)
 crates/player          Player trait; libmpv implementation (libmpv2 crate) and a mock (M1)
 crates/torrent         pure PiecePolicy, stream juggler, loopback server, our "stopped" announce,
                        librqbit 9.0.1 adapter (all sub-crates pinned, ADRs 0009/0010) (M7)
-crates/signaling-server axum WebSocket server, :8787 /ws, /healthz (M4)
+crates/signaling-server axum WebSocket server, :8787 /ws, /healthz (M4); DEV AND TESTS ONLY since M9:
+                       release builds join with manual invites (crates/net/src/invite.rs, ADR 0014)
 crates/syncwatch-sim   CLI with N virtual peers (M2)
 apps/desktop           Tauri 2 app: src-tauri (Rust) + React/TS/Tailwind UI (M1)
 assets/branding        icon.svg (NEVER edit) + generated outputs
@@ -74,6 +75,7 @@ cargo run -p syncwatch-ice-config --example live_probe   (real Metered account; 
 cargo run -p syncwatch-signaling
 pwsh -NoProfile -File scripts/dev/net-lab.ps1 -Ice none -Seconds 25 -MB 64 -Release   (two instances, no input simulation)
 pwsh -NoProfile -File scripts/dev/two-windows.ps1 -AutoRoom   (host a + member b in one room; -Soak 900 = 15 min banner soak)
+pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario sync -Handshake manual   (any scenario over copy-paste invites, as in release builds; also torrent-lab -Handshake manual)
 pwsh -NoProfile -File scripts/dev/make-test-media.ps1   (M6 test media, outside the repo; never writes test.mkv)
 pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario sync   (also chattime, late, popup, succession, chat, rooms)
 docker compose -f deploy/compose.dev.yml up -d --build   (signaling + local coturn; always down afterwards)

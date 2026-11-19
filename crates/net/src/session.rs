@@ -15,6 +15,8 @@
 //!   (pinning its identity) once they have seen both the handover and the signaling change.
 
 use crate::auth::*;
+use crate::handshake::HandshakeMode;
+use crate::invite::{self, Candidate, Invite, InviteError, Reply};
 use crate::transport::*;
 use std::collections::BTreeMap;
 use syncwatch_protocol::auth::{AuthMsg, AuthReject, decode_auth, encode_auth};
@@ -39,6 +41,12 @@ const TRANSFER_WAIT_US: i64 = 8_000_000;
 /// Host succession: after the host vanished (signaling and our link both gone), the member
 /// ranked r among the connected members claims the room after (r + 1) times this.
 const SUCCESSION_WAIT_US: i64 = 8_000_000;
+/// Manual invites: candidate gathering that has not finished in this time is used as it is.
+const GATHER_WAIT_US: i64 = 12_000_000;
+/// Manual invites: a link silent this long (no ICE restart possible without signaling) ends.
+const LOST_WAIT_US: i64 = 30_000_000;
+/// Manual invites: at most this many open invites at a time.
+const MAX_OPEN_INVITES: usize = 12;
 
 #[derive(Clone)]
 pub struct SessionConfig {
@@ -48,6 +56,8 @@ pub struct SessionConfig {
     pub max_members: u8,
     /// Host: the ready gate's timeout (Settings, Room defaults); `None` = the default.
     pub gate_timeout_us: Option<i64>,
+    /// How the first offer and answer travel (ADR 0014).
+    pub handshake: HandshakeMode,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +77,17 @@ pub enum Action {
     Ui(UiAction),
     SubmitPassword(String),
     Leave,
+    /// Host, manual invites: a new invite (a re-invite when bound to a member's seat).
+    CreateInvite {
+        for_member: Option<MemberId>,
+    },
+    /// Host: a pasted reply text.
+    SubmitReply(String),
+    /// Host: admit or refuse the member who replied to this invite (id in hex).
+    Admit(String),
+    Refuse(String),
+    /// Host: forget an invite (closes its pending connection).
+    RemoveInvite(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,6 +156,12 @@ pub enum EndReason {
     RoomFull,
     /// The host could not prove its identity or the handshake was tampered with.
     HostNotVerified,
+    /// Manual invites: the link to the host is gone; a re-invite brings the member back.
+    ConnectionLost {
+        seat_keep_secs: u64,
+    },
+    /// Manual invites: the host did not admit this member before the invite expired.
+    NotAdmitted,
     Error {
         message: String,
     },
@@ -173,7 +200,81 @@ pub enum RoomUi {
         member: Option<MemberId>,
         what: String,
     },
+    /// Host, manual invites: the full list of invites (after every change).
+    Invites(Vec<InviteView>),
+    /// Member, manual invites: the reply to send back, and the words to compare.
+    Reply {
+        text: String,
+        words: VerificationWords,
+    },
+    /// A pasted invite or reply was refused (friendly text pointing at the right step).
+    InviteError(String),
     Core(UiEvent),
+}
+
+/// One invite as the host's UI shows it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InviteView {
+    /// Hex id (used by Admit, Refuse, Remove).
+    pub id: String,
+    /// preparing, waiting, replied, admitted, joined, refused, expired, failed.
+    pub status: &'static str,
+    /// The invite text (once ready).
+    pub text: Option<String>,
+    pub expires_unix: u64,
+    /// After a reply: the member's display name and the words to compare.
+    pub member_name: Option<String>,
+    pub words: Option<VerificationWords>,
+    /// A re-invite: the seat it is bound to.
+    pub for_member: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InvState {
+    Preparing,
+    Waiting,
+    Replied,
+    Admitted,
+    Joined,
+    Refused,
+    Expired,
+    Failed,
+}
+
+impl InvState {
+    fn text(self) -> &'static str {
+        match self {
+            Self::Preparing => "preparing",
+            Self::Waiting => "waiting",
+            Self::Replied => "replied",
+            Self::Admitted => "admitted",
+            Self::Joined => "joined",
+            Self::Refused => "refused",
+            Self::Expired => "expired",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Host side of one manual invite.
+struct PendingInvite {
+    link: PeerId,
+    expires_unix: u64,
+    for_member: Option<(MemberId, Identity)>,
+    state: InvState,
+    text: Option<String>,
+    local_fp: Option<String>,
+    reply: Option<Reply>,
+    words: Option<VerificationWords>,
+}
+
+/// Local offer or answer collected until candidate gathering ends (manual invites).
+struct Gather {
+    sdp: Option<String>,
+    cands: Vec<Candidate>,
+    deadline: i64,
+    done: bool,
 }
 
 enum LinkAuth {
@@ -198,6 +299,16 @@ struct Link {
     close_at: Option<i64>,
     /// Host: drop the link unless the member re-offers before this.
     reoffer_deadline: Option<i64>,
+    /// Manual invites: the local offer or answer being collected.
+    gather: Option<Gather>,
+    /// Manual invites: the remote DTLS fingerprint the invite or reply announced.
+    expect_fp: Option<String>,
+    /// Manual invites: the words compared before admission (shown instead of the auth words).
+    manual_words: Option<VerificationWords>,
+    /// Host, manual invites: the invite this link belongs to.
+    invite_id: Option<[u8; 16]>,
+    /// Manual invites: silent since (no ICE restart without signaling).
+    lost_since: Option<i64>,
     /// Host: this member runs another protocol version and was told so once.
     version_rejected: bool,
 }
@@ -217,6 +328,11 @@ impl Link {
             close_at: None,
             reoffer_deadline: None,
             version_rejected: false,
+            gather: None,
+            expect_fp: None,
+            manual_words: None,
+            invite_id: None,
+            lost_since: None,
         }
     }
 
@@ -269,6 +385,15 @@ pub struct RoomSession {
     /// Member: when signaling reported the host gone (host succession, ADR 0007).
     host_gone_at: Option<i64>,
     claimed: bool,
+    /// Manual invites: the room's random id and display name.
+    room_id: [u8; 16],
+    room_name: String,
+    /// Host, manual invites, by invite id.
+    invites: BTreeMap<[u8; 16], PendingInvite>,
+    /// Member, manual invites: the invite we answer.
+    my_invite: Option<Invite>,
+    /// Member, manual invites: end if the host has not admitted us by then.
+    admit_deadline: Option<i64>,
 }
 
 impl RoomSession {
@@ -317,6 +442,105 @@ impl RoomSession {
         )
     }
 
+    /// Creates a room as its host, with manual invites (no signaling server, ADR 0014).
+    pub fn create_manual(
+        cfg: SessionConfig,
+        password: Option<String>,
+        room_name: &str,
+        clock: Clock,
+    ) -> (Self, Vec<Output>) {
+        let mut hc = HostConfig::new(cfg.key.public(), &cfg.display_name);
+        hc.max_members = cfg.max_members as usize;
+        if let Some(t) = cfg.gate_timeout_us {
+            hc.gate_timeout_us = t;
+        }
+        if let HandshakeMode::ManualInvite { seat_keep_us, .. } = cfg.handshake {
+            hc.seat_keep_us = seat_keep_us;
+        }
+        hc.max_external_sub = None;
+        hc.max_external_audio = None;
+        let peer = Peer::host(hc, clock.mono_us);
+        let mut s = Self::new(cfg, peer, password, true);
+        s.room_id = invite::random16();
+        s.room = Some(invite::hex16(&s.room_id));
+        s.room_name = clean_name(room_name);
+        s.joined_once = true;
+        s.phase = Phase::InRoom;
+        let out = vec![
+            Output::Ui(RoomUi::Created {
+                room: s.room_name.clone(),
+            }),
+            Output::Ui(RoomUi::Phase(Phase::InRoom)),
+            Output::Ui(RoomUi::Invites(Vec::new())),
+        ];
+        (s, out)
+    }
+
+    /// Joins with a pasted invite (already decoded and checked by [`Invite::decode`]). The
+    /// session prepares the reply; the connection starts once the host admits us.
+    pub fn join_invite(
+        cfg: SessionConfig,
+        inv: Invite,
+        password: Option<String>,
+        clock: Clock,
+    ) -> (Self, Vec<Output>) {
+        let peer = Peer::member(cfg.key.public(), &cfg.display_name);
+        let mut s = Self::new(cfg, peer, password, false);
+        s.room_id = inv.room_id;
+        s.room = Some(invite::hex16(&inv.room_id));
+        s.room_name = clean_name(&inv.room_name);
+        // The host must prove the identity the invite names (pinned like a reconnect).
+        s.host_identity = Some(inv.host);
+        let now = clock.mono_us;
+        let mut out = vec![
+            Output::Ui(RoomUi::Phase(Phase::Connecting)),
+            Output::Ui(RoomUi::Joined {
+                room: s.room_name.clone(),
+            }),
+        ];
+        let id = s.alloc_link(None);
+        s.host_link = Some(id);
+        if let Some(l) = s.links.get_mut(&id) {
+            l.expect_fp = inv.fingerprint();
+            l.gather = Some(Gather {
+                sdp: None,
+                cands: Vec::new(),
+                deadline: now + GATHER_WAIT_US,
+                done: false,
+            });
+        }
+        out.push(Output::CreatePeer {
+            peer: id,
+            role: IceRole::Answerer,
+            ice: s.cfg.ice.clone(),
+        });
+        for data in inv.signals() {
+            out.push(Output::RemoteSignal { peer: id, data });
+        }
+        let left_secs = inv.expires_unix.saturating_sub(unix(clock));
+        s.admit_deadline = Some(now + (left_secs as i64 + 120) * 1_000_000);
+        out.push(Output::Ui(RoomUi::Link {
+            member: None,
+            state: LinkState::Connecting,
+        }));
+        s.my_invite = Some(inv);
+        (s, out)
+    }
+
+    /// The handshake is copy-paste invites (no signaling server).
+    pub fn is_manual(&self) -> bool {
+        self.cfg.handshake.is_manual()
+    }
+
+    /// The room's display name (manual invites) or its code (signaling).
+    pub fn room_label(&self) -> String {
+        if self.is_manual() {
+            self.room_name.clone()
+        } else {
+            self.room.clone().unwrap_or_default()
+        }
+    }
+
     fn new(cfg: SessionConfig, peer: Peer, password: Option<String>, host: bool) -> Self {
         Self {
             cfg,
@@ -341,6 +565,11 @@ impl RoomSession {
             transfer_target: None,
             host_gone_at: None,
             claimed: false,
+            room_id: [0; 16],
+            room_name: String::new(),
+            invites: BTreeMap::new(),
+            my_invite: None,
+            admit_deadline: None,
         }
     }
 
@@ -515,7 +744,9 @@ impl RoomSession {
         if self.ended {
             return;
         }
-        out.push(Output::Signaling(ClientMsg::Leave));
+        if !self.is_manual() {
+            out.push(Output::Signaling(ClientMsg::Leave));
+        }
         let ids: Vec<PeerId> = self.links.keys().copied().collect();
         for id in ids {
             out.push(Output::ClosePeer(id));
@@ -991,6 +1222,11 @@ impl RoomSession {
 
     /// Member: open (or reopen) the link to the host.
     fn connect_to_host(&mut self, now: i64, out: &mut Vec<Output>) {
+        if self.is_manual() {
+            // No signaling: a new connection needs a re-invite from the host.
+            self.lost_host(out);
+            return;
+        }
         if let Some(old) = self.host_link.take() {
             self.links.remove(&old);
             out.push(Output::ClosePeer(old));
@@ -1024,6 +1260,10 @@ impl RoomSession {
         let now = clock.mono_us;
         match e {
             TransportEvent::LocalSignal { peer, data } => {
+                if self.is_manual() {
+                    self.manual_local_signal(peer, data, out);
+                    return;
+                }
                 let Some(l) = self.links.get(&peer) else {
                     return;
                 };
@@ -1046,6 +1286,9 @@ impl RoomSession {
                     return;
                 }
                 l.interrupted = true;
+                if self.cfg.handshake.is_manual() {
+                    l.lost_since.get_or_insert(now);
+                }
                 tracing::warn!(
                     link = peer,
                     silence_ms = diag.silence_ms,
@@ -1068,6 +1311,7 @@ impl RoomSession {
                     return;
                 }
                 l.interrupted = false;
+                l.lost_since = None;
                 let st = l.steady_state();
                 let authed = l.authed();
                 self.link_ui(peer, st, out);
@@ -1076,6 +1320,18 @@ impl RoomSession {
                 }
             }
             TransportEvent::RestartNeeded { peer, diag } => {
+                if self.is_manual() {
+                    // No ICE restart without signaling: give the link time to come back.
+                    if let Some(l) = self.links.get_mut(&peer) {
+                        l.lost_since.get_or_insert(now);
+                    }
+                    tracing::warn!(
+                        link = peer,
+                        silence_ms = diag.silence_ms,
+                        "silent link (invites: no restart)"
+                    );
+                    return;
+                }
                 tracing::warn!(
                     link = peer,
                     silence_ms = diag.silence_ms,
@@ -1096,6 +1352,7 @@ impl RoomSession {
                     return;
                 }
                 tracing::info!(link = peer, %reason, "link closed");
+                self.invite_link_closed(peer, out);
                 let was_host_link = Some(peer) == self.host_link;
                 self.close_link_now(peer, out);
                 if was_host_link
@@ -1128,6 +1385,25 @@ impl RoomSession {
         let Some(l) = self.links.get_mut(&peer) else {
             return;
         };
+        // Manual invites: the connection must use the certificate the invite or reply named
+        // (the one the words were made from).
+        if let Some(want) = l.expect_fp.as_deref()
+            && !want.eq_ignore_ascii_case(&remote)
+        {
+            tracing::warn!(
+                link = peer,
+                "the connection does not match the invite; closing"
+            );
+            out.push(Output::Ui(RoomUi::Error(
+                "The connection did not match the invite. Ask for a new invite.".into(),
+            )));
+            self.close_link_now(peer, out);
+            if is_host_link {
+                self.end_now(EndReason::HostNotVerified, out);
+            }
+            return;
+        }
+        l.lost_since = None;
         l.open = true;
         l.info = Some(info);
         l.interrupted = false;
@@ -1351,8 +1627,16 @@ impl RoomSession {
                     },
                     out,
                 );
+                let manual_words = self.links.get(&peer).and_then(|l| l.manual_words);
+                self.invite_joined(peer, out);
                 if self.links.get(&peer).is_some_and(|l| l.close_at.is_none()) {
-                    if self.password.is_none() {
+                    // With invites the words were compared before admission: show the same ones.
+                    if let Some(w) = manual_words {
+                        out.push(Output::Ui(RoomUi::Verification {
+                            member: Some(seat),
+                            words: w,
+                        }));
+                    } else if self.password.is_none() {
                         out.push(Output::Ui(RoomUi::Verification {
                             member: Some(seat),
                             words,
@@ -1403,9 +1687,16 @@ impl RoomSession {
                 l.auth = LinkAuth::Done;
                 l.identity = Some(host);
                 let st = l.steady_state();
+                let manual_words = l.manual_words;
                 self.host_identity = Some(host);
+                self.admit_deadline = None;
                 tracing::info!(host = %short_id(&host), "host authenticated");
-                if !pw_room {
+                if let Some(w) = manual_words {
+                    out.push(Output::Ui(RoomUi::Verification {
+                        member: None,
+                        words: w,
+                    }));
+                } else if !pw_room {
                     out.push(Output::Ui(RoomUi::Verification {
                         member: None,
                         words,
@@ -1477,6 +1768,18 @@ impl RoomSession {
                     self.end_soon(now, EndReason::Left);
                 }
             }
+            Action::CreateInvite { for_member } => self.create_invite(clock, for_member, out),
+            Action::SubmitReply(text) => self.submit_reply(clock, &text, out),
+            Action::Admit(id) => self.admit(&id, out),
+            Action::Refuse(id) => self.refuse_or_remove(&id, false, out),
+            Action::RemoveInvite(id) => self.refuse_or_remove(&id, true, out),
+            Action::Ui(UiAction::MakeHost(_)) if self.is_manual() => {
+                // Moving the host role needs every member to reach the new host: not possible
+                // without a signaling server yet (ADR 0014).
+                out.push(Output::Ui(RoomUi::Error(
+                    "Make host is not available in rooms joined with invites.".into(),
+                )));
+            }
             Action::Ui(UiAction::MakeHost(m)) if self.peer.is_host() => {
                 let target = self
                     .link_of_member(m)
@@ -1538,6 +1841,7 @@ impl RoomSession {
                 );
             }
         }
+        self.manual_tick(clock, out);
         self.flush_pending_left(clock, out);
         self.maybe_reconnect_after_transfer(now, out);
         self.maybe_claim_host(now, out);
@@ -1545,6 +1849,480 @@ impl RoomSession {
             && now >= t
         {
             self.end_now(reason, out);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------- manual invites ----
+
+/// Unix seconds from the session clock.
+fn unix(clock: Clock) -> u64 {
+    (clock.wall_ms.max(0) / 1000) as u64
+}
+
+/// A display name: no control characters, at most 40 characters, never empty.
+fn clean_name(s: &str) -> String {
+    let n: String = s
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(invite::MAX_NAME_CHARS)
+        .collect();
+    if n.is_empty() {
+        "SyncWatch room".into()
+    } else {
+        n
+    }
+}
+
+fn parse_hex16(s: &str) -> Option<[u8; 16]> {
+    if s.len() != 32 {
+        return None;
+    }
+    let mut b = [0u8; 16];
+    for (i, out) in b.iter_mut().enumerate() {
+        *out = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(b)
+}
+
+impl RoomSession {
+    /// Manual invites: collects the local offer or answer and its candidates. Returns true if
+    /// the signal was taken (nothing goes to a signaling server in this mode).
+    fn manual_local_signal(
+        &mut self,
+        peer: PeerId,
+        data: SignalData,
+        out: &mut Vec<Output>,
+    ) -> bool {
+        if !self.is_manual() {
+            return false;
+        }
+        let Some(g) = self.links.get_mut(&peer).and_then(|l| l.gather.as_mut()) else {
+            return true;
+        };
+        if g.done {
+            return true;
+        }
+        let end = match data {
+            SignalData::Offer { sdp } | SignalData::Answer { sdp } => {
+                g.sdp = Some(sdp);
+                false
+            }
+            SignalData::Candidate {
+                candidate,
+                sdp_mid,
+                sdp_m_line_index,
+            } => {
+                if g.cands.len() < invite::MAX_CANDIDATES
+                    && candidate.len() <= invite::MAX_CANDIDATE_LEN
+                    && !candidate.is_empty()
+                {
+                    g.cands.push(Candidate {
+                        candidate,
+                        mid: sdp_mid,
+                        mline: sdp_m_line_index,
+                    });
+                }
+                false
+            }
+            SignalData::EndOfCandidates => true,
+        };
+        if end {
+            self.finish_gather(peer, out);
+        }
+        true
+    }
+
+    /// Candidate gathering ended (or timed out): the invite or reply text is ready.
+    fn finish_gather(&mut self, peer: PeerId, out: &mut Vec<Output>) {
+        let Some(l) = self.links.get_mut(&peer) else {
+            return;
+        };
+        let Some(g) = l.gather.as_mut() else {
+            return;
+        };
+        if g.done {
+            return;
+        }
+        g.done = true;
+        let Some(sdp) = g.sdp.clone() else {
+            tracing::warn!(link = peer, "no local description gathered");
+            out.push(Output::Ui(RoomUi::InviteError(
+                "The connection could not be prepared. Check Settings > Connection and try again."
+                    .into(),
+            )));
+            if let Some(id) = l.invite_id
+                && let Some(inv) = self.invites.get_mut(&id)
+            {
+                inv.state = InvState::Failed;
+            }
+            self.publish_invites(out);
+            return;
+        };
+        let cands = g.cands.clone();
+        if Some(peer) == self.host_link {
+            // Member: the reply.
+            let Some(inv) = self.my_invite.clone() else {
+                return;
+            };
+            let my_fp = crate::sdp::dtls_fingerprint(&sdp).unwrap_or_default();
+            let host_fp = inv.fingerprint().unwrap_or_default();
+            let me = self.cfg.key.public();
+            let words = invite::invite_words(
+                &inv.room_id,
+                &inv.invite_id,
+                &host_fp,
+                &my_fp,
+                &inv.host,
+                &me,
+            );
+            l.manual_words = Some(words);
+            let reply = Reply {
+                protocol: syncwatch_protocol::PROTOCOL_VERSION,
+                invite_id: inv.invite_id,
+                member: me,
+                display_name: self.cfg.display_name.clone(),
+                sdp,
+                candidates: cands,
+            };
+            let text = reply.encode(&self.cfg.key);
+            tracing::info!(chars = text.len(), "reply ready");
+            out.push(Output::Ui(RoomUi::Reply { text, words }));
+            out.push(Output::Ui(RoomUi::Verification {
+                member: None,
+                words,
+            }));
+        } else if let Some(id) = l.invite_id {
+            // Host: the invite.
+            let Some(p) = self.invites.get_mut(&id) else {
+                return;
+            };
+            let inv = Invite {
+                protocol: syncwatch_protocol::PROTOCOL_VERSION,
+                room_id: self.room_id,
+                invite_id: id,
+                host: self.cfg.key.public(),
+                room_name: self.room_name.clone(),
+                password: self.password.is_some(),
+                expires_unix: p.expires_unix,
+                for_member: p.for_member.map(|(_, i)| i),
+                sdp,
+                candidates: cands,
+            };
+            p.local_fp = crate::sdp::dtls_fingerprint(&inv.sdp);
+            let text = inv.encode(&self.cfg.key);
+            tracing::info!(
+                chars = text.len(),
+                candidates = inv.candidates.len(),
+                "invite ready"
+            );
+            p.text = Some(text);
+            if p.state == InvState::Preparing {
+                p.state = InvState::Waiting;
+            }
+            self.publish_invites(out);
+        }
+    }
+
+    fn publish_invites(&self, out: &mut Vec<Output>) {
+        if !self.peer.is_host() || !self.is_manual() {
+            return;
+        }
+        let v = self
+            .invites
+            .iter()
+            .map(|(id, p)| InviteView {
+                id: invite::hex16(id),
+                status: p.state.text(),
+                text: p
+                    .text
+                    .clone()
+                    .filter(|_| matches!(p.state, InvState::Waiting | InvState::Replied)),
+                expires_unix: p.expires_unix,
+                member_name: p.reply.as_ref().map(|r| r.display_name.clone()),
+                words: p.words,
+                for_member: p.for_member.map(|(m, _)| m.0),
+            })
+            .collect();
+        out.push(Output::Ui(RoomUi::Invites(v)));
+    }
+
+    fn create_invite(&mut self, clock: Clock, for_member: Option<MemberId>, out: &mut Vec<Output>) {
+        let HandshakeMode::ManualInvite {
+            invite_ttl_secs, ..
+        } = self.cfg.handshake
+        else {
+            return;
+        };
+        if !self.peer.is_host() {
+            return;
+        }
+        let open = self
+            .invites
+            .values()
+            .filter(|p| {
+                matches!(
+                    p.state,
+                    InvState::Preparing | InvState::Waiting | InvState::Replied
+                )
+            })
+            .count();
+        if open >= MAX_OPEN_INVITES {
+            out.push(Output::Ui(RoomUi::InviteError(
+                "There are already 12 open invites. Remove some first.".into(),
+            )));
+            return;
+        }
+        let bound = match (for_member, &self.peer) {
+            (Some(m), Peer::Host(h)) => match h.identity_of(m) {
+                Some(i) => Some((m, i)),
+                None => {
+                    out.push(Output::Ui(RoomUi::InviteError(
+                        "That member's seat is no longer kept. Send a normal invite.".into(),
+                    )));
+                    return;
+                }
+            },
+            _ => None,
+        };
+        let id = invite::random16();
+        let link = self.alloc_link(None);
+        if let Some(l) = self.links.get_mut(&link) {
+            l.invite_id = Some(id);
+            l.gather = Some(Gather {
+                sdp: None,
+                cands: Vec::new(),
+                deadline: clock.mono_us + GATHER_WAIT_US,
+                done: false,
+            });
+        }
+        let ttl = invite_ttl_secs.clamp(invite::MIN_TTL_SECS, invite::MAX_TTL_SECS);
+        self.invites.insert(
+            id,
+            PendingInvite {
+                link,
+                expires_unix: unix(clock) + ttl,
+                for_member: bound,
+                state: InvState::Preparing,
+                text: None,
+                local_fp: None,
+                reply: None,
+                words: None,
+            },
+        );
+        out.push(Output::CreatePeer {
+            peer: link,
+            role: IceRole::Offerer,
+            ice: self.cfg.ice.clone(),
+        });
+        self.publish_invites(out);
+    }
+
+    fn submit_reply(&mut self, clock: Clock, text: &str, out: &mut Vec<Output>) {
+        match self.check_reply(clock, text) {
+            Ok(()) => self.publish_invites(out),
+            Err(e) => {
+                tracing::info!(error = ?e, "reply refused");
+                out.push(Output::Ui(RoomUi::InviteError(e.to_string())));
+                self.publish_invites(out);
+            }
+        }
+    }
+
+    fn check_reply(&mut self, clock: Clock, text: &str) -> Result<(), InviteError> {
+        let r = Reply::decode(text)?;
+        let me = self.cfg.key.public();
+        let room_id = self.room_id;
+        let Some(p) = self.invites.get_mut(&r.invite_id) else {
+            return Err(InviteError::UnknownInvite);
+        };
+        match p.state {
+            InvState::Waiting => {}
+            InvState::Expired => return Err(InviteError::Expired),
+            InvState::Preparing | InvState::Failed => return Err(InviteError::UnknownInvite),
+            InvState::Replied | InvState::Admitted | InvState::Joined | InvState::Refused => {
+                return Err(InviteError::Used);
+            }
+        }
+        if unix(clock) > p.expires_unix {
+            p.state = InvState::Expired;
+            return Err(InviteError::Expired);
+        }
+        if let Some((_, want)) = p.for_member
+            && want != r.member
+        {
+            return Err(InviteError::WrongMember);
+        }
+        let (Some(host_fp), Some(member_fp)) = (p.local_fp.clone(), r.fingerprint()) else {
+            return Err(InviteError::BadConnection);
+        };
+        p.words = Some(invite::invite_words(
+            &room_id,
+            &r.invite_id,
+            &host_fp,
+            &member_fp,
+            &me,
+            &r.member,
+        ));
+        p.state = InvState::Replied;
+        p.reply = Some(r);
+        Ok(())
+    }
+
+    fn admit(&mut self, id: &str, out: &mut Vec<Output>) {
+        let Some(id) = parse_hex16(id) else {
+            return;
+        };
+        let Some(p) = self.invites.get_mut(&id) else {
+            return;
+        };
+        if p.state != InvState::Replied {
+            return;
+        }
+        let Some(r) = p.reply.clone() else {
+            return;
+        };
+        p.state = InvState::Admitted;
+        let link = p.link;
+        let words = p.words;
+        if let Some(l) = self.links.get_mut(&link) {
+            l.expect_fp = r.fingerprint();
+            l.manual_words = words;
+        }
+        tracing::info!(id = %short_id(&r.member), "member admitted");
+        for data in r.signals() {
+            out.push(Output::RemoteSignal { peer: link, data });
+        }
+        self.publish_invites(out);
+    }
+
+    fn refuse_or_remove(&mut self, id: &str, remove: bool, out: &mut Vec<Output>) {
+        let Some(id) = parse_hex16(id) else {
+            return;
+        };
+        let Some(p) = self.invites.get_mut(&id) else {
+            return;
+        };
+        let link = p.link;
+        let joined = p.state == InvState::Joined;
+        if remove {
+            self.invites.remove(&id);
+        } else if p.state == InvState::Replied {
+            p.state = InvState::Refused;
+        } else {
+            return;
+        }
+        // A joined member stays connected when its old invite is removed from the list.
+        if !joined && self.links.contains_key(&link) {
+            self.close_link_now(link, out);
+        }
+        self.publish_invites(out);
+    }
+
+    /// Host: the member admitted through `peer` finished authentication.
+    fn invite_joined(&mut self, peer: PeerId, out: &mut Vec<Output>) {
+        let Some(id) = self.links.get(&peer).and_then(|l| l.invite_id) else {
+            return;
+        };
+        if let Some(p) = self.invites.get_mut(&id) {
+            p.state = InvState::Joined;
+            self.publish_invites(out);
+        }
+    }
+
+    /// Host: a link closed; its invite failed if the member never got in.
+    fn invite_link_closed(&mut self, peer: PeerId, out: &mut Vec<Output>) {
+        let Some(id) = self.links.get(&peer).and_then(|l| l.invite_id) else {
+            return;
+        };
+        if let Some(p) = self.invites.get_mut(&id)
+            && matches!(
+                p.state,
+                InvState::Admitted | InvState::Waiting | InvState::Preparing
+            )
+        {
+            p.state = InvState::Failed;
+            self.publish_invites(out);
+        }
+    }
+
+    /// Manual invites: gather timeouts, invite expiry, silent links, the admission deadline.
+    fn manual_tick(&mut self, clock: Clock, out: &mut Vec<Output>) {
+        if !self.is_manual() {
+            return;
+        }
+        let now = clock.mono_us;
+        let late: Vec<PeerId> = self
+            .links
+            .iter()
+            .filter(|(_, l)| {
+                l.gather
+                    .as_ref()
+                    .is_some_and(|g| !g.done && now >= g.deadline)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in late {
+            self.finish_gather(id, out);
+        }
+        let t = unix(clock);
+        let expired: Vec<[u8; 16]> = self
+            .invites
+            .iter()
+            .filter(|(_, p)| {
+                matches!(
+                    p.state,
+                    InvState::Preparing | InvState::Waiting | InvState::Replied
+                ) && t > p.expires_unix
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &expired {
+            if let Some(p) = self.invites.get_mut(id) {
+                p.state = InvState::Expired;
+                let link = p.link;
+                if self.links.contains_key(&link) {
+                    self.close_link_now(link, out);
+                }
+            }
+        }
+        if !expired.is_empty() {
+            self.publish_invites(out);
+        }
+        // Silent links: without signaling there is no ICE restart.
+        let lost: Vec<PeerId> = self
+            .links
+            .iter()
+            .filter(|(_, l)| l.lost_since.is_some_and(|s| now - s >= LOST_WAIT_US))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in lost {
+            if Some(id) == self.host_link {
+                self.lost_host(out);
+            } else {
+                self.close_link_now(id, out);
+            }
+        }
+        if let Some(d) = self.admit_deadline
+            && now >= d
+            && !self.joined_once
+            && self.ending.is_none()
+        {
+            self.end_now(EndReason::NotAdmitted, out);
+        }
+    }
+
+    /// Member, manual invites: the link to the host is gone for good.
+    fn lost_host(&mut self, out: &mut Vec<Output>) {
+        let seat_keep_secs = match self.cfg.handshake {
+            HandshakeMode::ManualInvite { seat_keep_us, .. } => (seat_keep_us / 1_000_000) as u64,
+            HandshakeMode::Signaling => 0,
+        };
+        if self.joined_once {
+            self.end_now(EndReason::ConnectionLost { seat_keep_secs }, out);
+        } else {
+            self.end_now(EndReason::NotAdmitted, out);
         }
     }
 }
