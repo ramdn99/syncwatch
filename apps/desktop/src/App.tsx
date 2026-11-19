@@ -6,7 +6,9 @@ import { RoomEntryDialog } from './components/RoomDialogs';
 import { onRoomState, room } from './lib/room';
 import { ConnectionSetup } from './screens/ConnectionSetup';
 import { Home } from './screens/Home';
-import { Settings, type Section } from './screens/Settings';
+import { prefs, Settings, type Section } from './screens/Settings';
+import { UpdateNotice } from './components/UpdateNotice';
+import { updates } from './lib/updates';
 
 type View = 'home' | 'setup' | 'settings' | 'room';
 
@@ -67,6 +69,32 @@ export function App() {
     requestAnimationFrame(() => requestAnimationFrame(() => void app.ready()));
   }, [loaded, view]);
 
+  // Updates (ADR 0016): one check after the first paint, never blocking. The offer shows on the
+  // home screen only, never inside a room.
+  const [skipVersion, setSkipVersion] = useState('');
+  const checked = useRef(false);
+  useEffect(() => {
+    if (!loaded || checked.current || !inTauri()) return;
+    checked.current = true;
+    const t = window.setTimeout(() => {
+      void prefs
+        .get()
+        .then((p) => {
+          setSkipVersion(p.skipVersion);
+          if (p.checkUpdates) void updates.check().catch(() => {});
+        })
+        .catch(() => {});
+    }, 1500);
+    return () => window.clearTimeout(t);
+  }, [loaded]);
+  const skip = (v: string) => {
+    setSkipVersion(v);
+    void prefs
+      .get()
+      .then((p) => prefs.set({ ...p, skipVersion: v }))
+      .catch(() => {});
+  };
+
   const refresh = () => void connection.status().then((s) => s && setStatus(s));
 
   if (!loaded) return <div className="h-full bg-bg" />;
@@ -104,6 +132,7 @@ export function App() {
             onCreate={() => status.canConnect && setEntry('create')}
             onJoin={() => status.canConnect && setEntry('join')}
           />
+          <UpdateNotice skipVersion={skipVersion} onSkip={skip} />
           {entry && (
             <RoomEntryDialog
               mode={entry}

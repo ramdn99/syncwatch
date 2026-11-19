@@ -16,6 +16,7 @@ mod roommedia;
 #[cfg(test)]
 mod secrets_for_tests;
 mod torrent;
+mod updater;
 mod window_state;
 
 use paths::AppPaths;

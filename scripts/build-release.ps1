@@ -26,12 +26,21 @@
 
 .EXAMPLE
   pwsh -NoProfile -File scripts/build-release.ps1
+  -TestBuild (tests only, never for a release): compiles in SYNCWATCH_TEST_BUILD, which lets
+  the app accept a local update server and a test key; writes to dist\test\<version> with a
+  TEST-BUILD.txt marker (scripts/release.ps1 refuses such folders). -Version overrides the
+  version for such test builds (for example 0.0.1 and 0.0.2 for the update test).
+
 .EXAMPLE
   pwsh -NoProfile -File scripts/build-release.ps1 -UpdaterKey D:\keys\syncwatch-updater.key
+.EXAMPLE
+  pwsh -NoProfile -File scripts/build-release.ps1 -TestBuild -Version 0.0.1 -UpdaterKey <test key>
 #>
 param(
     [string]$UpdaterKey = '',
     [string]$OutRoot = '',
+    [string]$Version = '',
+    [switch]$TestBuild,
     [switch]$SkipVerify
 )
 $ErrorActionPreference = 'Stop'
@@ -44,8 +53,12 @@ $env:PATH = "$env:CARGO_HOME\bin;$env:PATH"
 $pnpm = if (Get-Command pnpm.cmd -ErrorAction SilentlyContinue) { 'pnpm.cmd' } else { 'pnpm' }
 
 $conf = Get-Content apps\desktop\src-tauri\tauri.conf.json -Raw | ConvertFrom-Json
-$version = $conf.version
-if (-not $OutRoot) { $OutRoot = Join-Path $repo 'dist\release' }
+$version = if ($Version) { $Version } else { $conf.version }
+if ($Version -and -not $TestBuild -and $Version -ne $conf.version) {
+    Write-Host "A release uses the version in tauri.conf.json ($($conf.version)); -Version is for -TestBuild only." -ForegroundColor Red
+    exit 1
+}
+if (-not $OutRoot) { $OutRoot = Join-Path $repo $(if ($TestBuild) { 'dist\test' } else { 'dist\release' }) }
 $out = Join-Path $OutRoot $version
 $logs = Join-Path $out 'logs'
 if (Test-Path $out) { Remove-Item -Recurse -Force $out }
@@ -91,23 +104,16 @@ Get-ChildItem $stage -Recurse -File | ForEach-Object {
     $rel = [IO.Path]::GetRelativePath($stage, $_.FullName).Replace('\', '/')
     $resources[$_.FullName.Replace('\', '/')] = $rel
 }
-$overlay = [ordered]@{ bundle = [ordered]@{ active = $true; resources = $resources } }
+$overlay = [ordered]@{ version = $version; bundle = [ordered]@{ active = $true; resources = $resources } }
 $signing = $UpdaterKey -ne ''
-if ($signing) {
-    if (-not (Test-Path $UpdaterKey)) { Write-Host "Updater key not found: $UpdaterKey" -ForegroundColor Red; exit 1 }
-    $overlay.bundle.createUpdaterArtifacts = $true
-    $env:TAURI_SIGNING_PRIVATE_KEY = $UpdaterKey
-    if (-not $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
-        $sec = Read-Host -AsSecureString 'Updater key password'
-        $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = [Net.NetworkCredential]::new('', $sec).Password
-    }
-}
+if ($signing -and -not (Test-Path $UpdaterKey)) { Write-Host "Updater key not found: $UpdaterKey" -ForegroundColor Red; exit 1 }
 $overlayPath = Join-Path $stage 'tauri.release.json'
 $overlay | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 $overlayPath
+if ($TestBuild) { $env:SYNCWATCH_TEST_BUILD = '1' } else { Remove-Item Env:SYNCWATCH_TEST_BUILD -ErrorAction SilentlyContinue }
 try {
     Step 'tauri-build' { & $pnpm --dir apps/desktop tauri build --bundles msi --config $overlayPath }
 } finally {
-    if ($signing) { Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY, Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue }
+    Remove-Item Env:SYNCWATCH_TEST_BUILD -ErrorAction SilentlyContinue
 }
 
 $msiDir = Join-Path $repo 'target\release\bundle\msi'
@@ -115,10 +121,21 @@ $built = Get-ChildItem $msiDir -Filter "*_${version}_x64_*.msi" | Sort-Object La
 if (-not $built) { Write-Host "FAIL  no MSI for $version in $msiDir" -ForegroundColor Red; exit 1 }
 $msiName = "SyncWatch-$version-x64.msi"
 Copy-Item $built.FullName (Join-Path $out $msiName)
+if ($TestBuild) { "Test build $version (SYNCWATCH_TEST_BUILD): never publish." | Set-Content (Join-Path $out 'TEST-BUILD.txt') }
 if ($signing) {
-    $sig = "$($built.FullName).sig"
-    if (-not (Test-Path $sig)) { Write-Host 'FAIL  the updater signature was not created' -ForegroundColor Red; exit 1 }
-    Copy-Item $sig (Join-Path $out "$msiName.sig")
+    # The updater signature (minisign, Tauri's format). The password comes from
+    # TAURI_SIGNING_PRIVATE_KEY_PASSWORD or a prompt; it is never put on a command line.
+    $askedHere = -not $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+    if ($askedHere) {
+        $sec = Read-Host -AsSecureString 'Updater key password'
+        $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = [Net.NetworkCredential]::new('', $sec).Password
+    }
+    try {
+        Step 'sign-msi' { & $pnpm --dir apps/desktop tauri signer sign -f $UpdaterKey --app-version $version (Join-Path $out $msiName) }
+    } finally {
+        if ($askedHere) { Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue }
+    }
+    if (-not (Test-Path (Join-Path $out "$msiName.sig"))) { Write-Host 'FAIL  the updater signature was not created' -ForegroundColor Red; exit 1 }
 }
 
 # ---- portable zip ------------------------------------------------------------------------------
@@ -138,7 +155,7 @@ $sums | Set-Content -Encoding ascii (Join-Path $out 'SHA256SUMS')
 
 Get-ChildItem $out -File | ForEach-Object { '{0,-44} {1,8:N1} MB' -f $_.Name, ($_.Length / 1MB) }
 if (-not $SkipVerify) {
-    pwsh -NoProfile -File scripts/verify-package.ps1 -Dir $out
+    pwsh -NoProfile -File scripts/verify-package.ps1 -Dir $out -Version $version $(if ($signing) { '-RequireSignature' })
     if ($LASTEXITCODE) { exit 1 }
 }
 Write-Host "Release files: $out"

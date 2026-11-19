@@ -30,6 +30,8 @@ pub struct AppPrefs {
     pub seat_keep_mins: u32,
     /// Check GitHub for a newer release when SyncWatch starts (Milestone 9, Settings, About).
     pub check_updates: bool,
+    /// "Skip this version": no prompt for exactly this version (a newer one prompts again).
+    pub skip_version: String,
 }
 
 impl Default for AppPrefs {
@@ -43,6 +45,7 @@ impl Default for AppPrefs {
             invite_ttl_mins: 10,
             seat_keep_mins: 5,
             check_updates: true,
+            skip_version: String::new(),
         }
     }
 }
@@ -77,6 +80,14 @@ impl AppPrefs {
             SEAT_KEEP_MINS,
             "How long a seat is kept (minutes)",
         )?;
+        if self.skip_version.len() > 32
+            || !self
+                .skip_version
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        {
+            return Err("Unknown version.".into());
+        }
         if !matches!(self.preset.as_str(), "everyone" | "onlyMe") {
             return Err("Unknown permission preset.".into());
         }

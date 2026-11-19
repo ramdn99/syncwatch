@@ -36,6 +36,8 @@ const THIRD_PARTY: &[(&str, &str)] = &[
 
 fn main() {
     println!("cargo:rerun-if-env-changed=LIBMPV_DIR");
+    // Test MSIs (build-release.ps1 -TestBuild) accept a local update server (updater.rs).
+    println!("cargo:rerun-if-env-changed=SYNCWATCH_TEST_BUILD");
 
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         // libmpv-2.dll is loaded explicitly by absolute path at startup (ADR 0002); the import

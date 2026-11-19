@@ -1,0 +1,12 @@
+{
+  "version": "0.2.0",
+  "notes": "Test release 0.2.0.",
+  "pub_date": "2026-11-19T12:00:00Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSRHFpZ216SEZkOGczWVlrOVB6Q1NXUkhxTmhCQU81R2VZd1p3c0dvUEpRVlNkdGpORksvVGZ6MGcxQnVnZldFbFAwZGhVS3I0elQ1OEt4WGVlMmVVVXRjMndzL1krRVEwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1MDk0MjQ5CWZpbGU6U3luY1dhdGNoLTAuMi4wLXg2NC5tc2kKZEw0cEYwckRkSkEzbWt3aHA0STE4SVlndTlhNHFsUzhKSitnQm9ZZ3pjYUpYNDliczRSSGF2Sks5ZG5rUnhZai9nVVd0b0FGTTZuNFB5RmNVa2tvQWc9PQo=",
+      "url": "http://127.0.0.1:18093/SyncWatch-0.2.0-x64.msi",
+      "sha256": "6561093c92417bd1c194b8c7c3569d80622345e1a6e02b47ec30bd2628aafac2"
+    }
+  }
+}

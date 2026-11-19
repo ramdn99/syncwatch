@@ -22,7 +22,7 @@
 .EXAMPLE
   pwsh -NoProfile -File scripts/verify-package.ps1 -Dir dist\release\0.1.0
 #>
-param([Parameter(Mandatory)][string]$Dir, [switch]$RequireSignature)
+param([Parameter(Mandatory)][string]$Dir, [string]$Version = '', [switch]$RequireSignature)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 if (-not $env:LIBMPV_DIR) { $env:LIBMPV_DIR = 'D:\libs\mpv' }
@@ -31,7 +31,7 @@ $fail = 0
 function Result($ok, $text) { if ($ok) { Write-Host "PASS  $text" } else { Write-Host "FAIL  $text" -ForegroundColor Red; $script:fail++ } }
 
 $conf = Get-Content (Join-Path $repo 'apps\desktop\src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json
-$version = $conf.version
+$version = if ($Version) { $Version } else { $conf.version }
 $msi = Join-Path $Dir "SyncWatch-$version-x64.msi"
 $zip = Join-Path $Dir "SyncWatch-Portable-$version-x64.zip"
 Result (Test-Path $msi) "MSI present: $(Split-Path $msi -Leaf)"

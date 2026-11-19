@@ -33,6 +33,13 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 directories.workspace = true
 
+# In-app updates (ADR 0016): rustls HTTP (same features as ice-config), minisign signatures.
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider"] }
+minisign-verify = "=0.3.0"
+semver = "1.0.28"
+sha2 = "0.10.9"
+base64 = { version = "=0.22.1", default-features = false, features = ["alloc"] }
+
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
   "Win32_Foundation",
@@ -47,3 +54,6 @@ windows = { workspace = true, features = [
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.53.3", features = ["rt", "macros", "net", "time"] }

@@ -5,6 +5,7 @@ import { connection, type ConnectionStatus } from '../lib/connection';
 import { inTauri } from '../lib/player';
 import { redact } from '../lib/redact';
 import { call, room, torrents } from '../lib/room';
+import { IDLE_UPDATE, onUpdateState, updates, type UpdateState } from '../lib/updates';
 import { settingsText } from '../strings/connection-help';
 import { Icon } from '../ui/icons';
 import { SettingsConnection } from './SettingsConnection';
@@ -21,8 +22,10 @@ export interface AppPrefs {
   seatKeepMins: number;
   /** Check GitHub for a newer release at start (Milestone 9). */
   checkUpdates: boolean;
+  /** "Skip this version". */
+  skipVersion: string;
 }
-export const PREFS_DEFAULTS: AppPrefs = { hwdec: true, subScalePct: 100, preset: 'everyone', gateTimeoutSecs: 15, noLimitDefault: false, inviteTtlMins: 10, seatKeepMins: 5, checkUpdates: true };
+export const PREFS_DEFAULTS: AppPrefs = { hwdec: true, subScalePct: 100, preset: 'everyone', gateTimeoutSecs: 15, noLimitDefault: false, inviteTtlMins: 10, seatKeepMins: 5, checkUpdates: true, skipVersion: '' };
 export const prefs = {
   get: () => (inTauri() ? call<AppPrefs>('prefs_get') : Promise.resolve(PREFS_DEFAULTS)),
   set: (p: AppPrefs) => call<void>('prefs_set', { prefs: p }),
@@ -291,6 +294,61 @@ export const THIRD_PARTY = [
 export const REMOVE_DATA_TEXT =
   'Uninstalling SyncWatch keeps your settings and relay setup in case you install it again. To remove them, use this button before uninstalling (or uninstall with REMOVEUSERDATA=1).';
 
+/** Settings, About: updates from GitHub (ADR 0016). */
+function UpdateSettings({ prefsNow }: { prefsNow: AppPrefs | null }) {
+  const [p, setP] = useState<AppPrefs | null>(prefsNow);
+  const [s, setS] = useState<UpdateState>(IDLE_UPDATE);
+  useEffect(() => setP(prefsNow), [prefsNow]);
+  useEffect(() => {
+    void updates.state().then(setS).catch(() => {});
+    return onUpdateState(setS);
+  }, []);
+  const text: Record<UpdateState['phase'], string> = {
+    idle: '',
+    checking: 'Checking...',
+    upToDate: 'SyncWatch is up to date.',
+    available: `Version ${s.version} is available (see the home screen).`,
+    downloading: 'Downloading the update...',
+    ready: `Version ${s.version} is ready: restart from the home screen.`,
+    failed: s.error ?? 'The check failed.',
+  };
+  return (
+    <div className="space-y-2">
+      <h3 className="pt-2 font-medium">Updates</h3>
+      <label className="flex items-start gap-3">
+        <input
+          type="checkbox"
+          className="mt-1"
+          checked={p?.checkUpdates ?? true}
+          disabled={!p}
+          data-testid="setting-check-updates"
+          onChange={(e) => {
+            if (!p) return;
+            const next = { ...p, checkUpdates: e.target.checked };
+            setP(next);
+            void prefs.set(next).catch(() => {});
+          }}
+        />
+        <span>
+          <span className="font-medium">Check for updates when SyncWatch starts</span>
+          <span className="block text-xs text-muted">
+            SyncWatch asks GitHub (github.com/ramdn99/syncwatch) for the latest release. Only that standard HTTPS request is sent; no account, no data about
+            you.
+          </span>
+        </span>
+      </label>
+      <div className="flex items-center gap-3">
+        <button type="button" className={btn} disabled={s.phase === 'checking' || s.phase === 'downloading'} onClick={() => void updates.check().catch(() => {})}>
+          Check now
+        </button>
+        <span className="text-xs text-muted" aria-live="polite" data-testid="update-status">
+          {text[s.phase]}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function AboutSection({ status, prefsNow }: { status: ConnectionStatus; prefsNow: AppPrefs | null }) {
   const [version, setVersion] = useState<string>('');
   const [copied, setCopied] = useState<string | null>(null);
@@ -341,6 +399,7 @@ function AboutSection({ status, prefsNow }: { status: ConnectionStatus; prefsNow
           {copied}
         </p>
       )}
+      <UpdateSettings prefsNow={prefsNow} />
       <h3 className="pt-2 font-medium">Your data</h3>
       <p className="text-xs text-muted">{REMOVE_DATA_TEXT}</p>
       {!confirmRemove ? (

@@ -212,6 +212,10 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             syncwatch_ice_config::install_crypto_provider();
             app.manage(crate::connection::ConnectionManager::new(&conn_paths));
             app.manage(crate::prefs::PrefsService::load(&conn_paths));
+            app.manage(crate::updater::UpdateService::new(
+                conn_paths.cache.join("update"),
+            ));
+            crate::updater::test_auto_update(app.handle());
             crate::connection::spawn_background_retest(app.handle().clone());
             let manual = !cfg!(debug_assertions)
                 || std::env::var("SYNCWATCH_HANDSHAKE").as_deref() == Ok("manual");
@@ -311,6 +315,11 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             crate::room::invite_preview,
             crate::room::room_handshake,
             crate::cleanup::remove_all_user_data,
+            crate::updater::update_state,
+            crate::updater::update_check,
+            crate::updater::update_download,
+            crate::updater::update_cancel,
+            crate::updater::update_install,
             crate::room::dev_join_invite,
             crate::room::room_invite_create,
             crate::room::room_invite_reply,

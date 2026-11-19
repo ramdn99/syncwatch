@@ -62,6 +62,12 @@ fn exactly_one_install_site_in_the_sources() {
     let mut calls = Vec::new();
     for f in &files {
         let text = std::fs::read_to_string(f).unwrap_or_default();
+        // Test modules (no app startup there) may install the provider for their own client.
+        let text = text
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default()
+            .to_owned();
         if text.contains(&pat_install) {
             installs.push(f.display().to_string());
         }
