@@ -46,11 +46,8 @@ fn main() {
         unsafe { std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", paths.root.join("webview2")) };
     }
     logging::init(&paths.logs);
-    tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
-        portable = paths.portable,
-        "SyncWatch starting"
-    );
+    // The app version (Tauri config, as the MSI and the updater see it) is logged in setup.
+    tracing::info!(portable = paths.portable, "SyncWatch starting");
     // No full paths in logs (spec section 11): only whether the profile is in the data folder.
     tracing::info!(
         in_data_folder = std::env::var_os("WEBVIEW2_USER_DATA_FOLDER")

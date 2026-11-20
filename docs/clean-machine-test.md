@@ -19,9 +19,12 @@ so your own SyncWatch data (`%LOCALAPPDATA%\SyncWatch`, your relay setup) is nev
   WebView2 runtime. The MSI's embedded offline installer only runs where WebView2 is
   missing, which needs a Windows 10 machine without it. That was ruled out of scope (no
   Windows 10, ISO or Hyper-V).
-- **With vGPU disabled, the sandbox has no GPU driver and no system `vulkan-1.dll`.** That is
-  exactly the case the bundled Vulkan loader and mpv's D3D11 fallback are for. The video then
-  renders in software (WARP): slow, but it must work.
+- **The sandbox has a system `vulkan-1.dll`, even with vGPU disabled.** The first automated
+  run logged `vulkan=System`. So the bundled loader is proven by forcing it
+  (`SYNCWATCH_FORCE_BUNDLED_VULKAN=1`, which the automated test does), not by a machine
+  without Vulkan. A PC with no Vulkan at all is still unproven. With vGPU disabled there is no
+  GPU driver, so video renders in software (WARP, through mpv's D3D11 path): slow, but it must
+  work.
 
 ## One-time setup
 
@@ -70,8 +73,19 @@ does not accept relative ones). Edit them if your repository is elsewhere.
    4. The app checks for the update, downloads it, verifies the signature and hash, and
       installs it like **Update now** and **Restart to update**.
    5. Waits for 0.0.2 to be registered and running.
-   6. Uninstalls with `REMOVEUSERDATA=1`.
-   7. Checks that the program, the data folder and the Credential Manager entries are gone.
+   6. Uninstalls **without** `REMOVEUSERDATA`: the program goes; the data folder and the
+      Credential Manager entries stay.
+   7. Reinstalls 0.0.2 and starts it with the bundled Vulkan loader forced. The kept identity is
+      used again.
+   8. Uninstalls **with** `REMOVEUSERDATA=1`. Checks that the program, the data folder and the
+      Credential Manager entries are gone, and that the cleanup ran as the signed-in user (it
+      writes `SyncWatch-cleanup.log` in the user's temp folder).
+
+   "Installed" is read from the Windows Installer API, not from one registry key. A per-user
+   MSI's Add/Remove Programs entry is under **HKLM** (`...\Uninstall\{ProductCode}`). Its
+   product data is under the user's SID in `Installer\UserData` and published in HKCU's
+   `Installer\Products`. The test writes all of these to `evidence.txt` before and after each
+   step, and keeps a verbose `msiexec` log of every install, upgrade and uninstall.
 3. Notepad opens `result.txt`. The last line says `RESULT: ALL PASSED` or how many checks
    failed. The same file, the MSI logs and the app logs are on your PC in
    `dist\sandbox-results\auto-<time>\`.
@@ -79,6 +93,56 @@ does not accept relative ones). Edit them if your repository is elsewhere.
 
 The real GitHub path (a published release updating to the next one) is step (e) of the
 release guide, after the first two real releases.
+
+### Results (2026-11-20)
+
+**First run: 6 failures, all in the test script.** Evidence in
+`dist\sandbox-results\auto-20261120-150103`, plus probes run in that same sandbox.
+- **Failures 1 and 3** (empty version; "exactly one entry"): the script looked for the entry
+  only under HKCU `...\Uninstall`. The per-user MSI's entry is under **HKLM**
+  `...\Uninstall\{ProductCode}`. The product itself is per-user (Installer UserData under the
+  user's SID, published in HKCU `Installer\Products`). The Windows Installer API showed
+  exactly one product, 0.0.2: the major upgrade had replaced 0.0.1.
+- **Failure 2** (370 s): the same lookup never saw 0.0.2, so the test waited until its
+  deadline. The app had in fact relaunched: the app log shows a new start 126 s after it quit
+  for the update.
+- **Failures 4–6:** with no entry found, the script ran `msiexec /x` with an empty product
+  code. That removed nothing, still returned 0, and wrote no log. Run by hand in the same
+  sandbox with `REMOVEUSERDATA=1`, the uninstall removed the program, the data folder and the
+  credential. The `CleanupUserData` action ran deferred and impersonated (type 1106), before
+  `RemoveFiles`.
+
+**Fixes:**
+- **Test:**
+  - "installed" now comes from the Windows Installer API, with the registry dumped as
+    evidence;
+  - every `msiexec` call keeps a verbose log, and there is no uninstall without a product code;
+  - both uninstall cases are tested, the relaunch is timed, and the bundled Vulkan loader is
+    forced.
+- **Second run, 1 failure, also in the test:** the per-user probe read the install context
+  through `ProductsEx`, which does not enumerate in Windows PowerShell 5.1, so it always got 0.
+  It now uses `ProductInfo AssignmentType` (0 = per-user) and also checks that the product is
+  registered under this user's SID only. That is no weaker: a per-machine install fails both.
+- **App:**
+  - the startup log line showed the crate version instead of the app version;
+  - the cleanup now writes `%TEMP%\SyncWatch-cleanup.log` (user, results, errors), because the
+    MSI ignores the helper's exit code;
+  - test builds can log the update's `msiexec` (`SYNCWATCH_TEST_MSI_LOG`).
+
+**Third run: ALL PASSED** (`auto-20261120-154153`). Results:
+- **Relaunch after the update:** confirmed. The new process is started by `msiexec.exe` as the
+  signed-in user, and the upgrade log shows `LaunchApplication`.
+- **Data cleanup:** confirmed. The cleanup ran as the signed-in user: it removed the folder and
+  both credential entries, with no errors.
+- **Without `REMOVEUSERDATA`:** the data and the credential stay, and a reinstall reuses the
+  same identity.
+
+**Why an update takes about 2 minutes here.** Every install of the unsigned 337 MB MSI spends
+about 123 s in Windows Installer's "software restriction policy" check before the package even
+opens. That includes the fresh install, the reinstall and the in-app upgrade. The upgrade
+itself then takes about 1 s. The time on a normal PC is not measured. Code signing or a
+smaller MSI (the WebView2 bootstrapper instead of the offline installer, ADR 0015) are the
+ways to shorten it. What the user sees on screen during that wait has not been checked.
 
 ## Part 2: hands-on checklist (about 45 minutes)
 
@@ -94,7 +158,7 @@ your PC and pasting it into the sandbox's Downloads folder. The original stays u
 | 1 | Install | Run `release\SyncWatch-<v>-x64.msi` | SmartScreen may warn: More info, Run anyway. No UAC prompt. Installs to `%LOCALAPPDATA%\Programs\SyncWatch`; Start menu entry |
 | 2 | First launch | Start SyncWatch | Dark window, no white flash, the connection setup screen |
 | 3 | Metered setup | Paste your ICE servers or API key (your own account) | Test passes. Uses a little quota: keep it to one test |
-| 4 | Video, bundled Vulkan, D3D11 fallback | Open `test.mkv` | Plays (slowly, software rendering). In `%LOCALAPPDATA%\SyncWatch\logs`, the latest log has `native libraries loaded` with `vulkan=Bundled`; no `vulkan-1.dll` exists in `C:\Windows\System32` |
+| 4 | Video without a GPU, bundled Vulkan | Close SyncWatch. In the sandbox's PowerShell: `$env:SYNCWATCH_FORCE_BUNDLED_VULKAN='1'; & "$env:LOCALAPPDATA\Programs\SyncWatch\syncwatch.exe"`. Open `test.mkv` | Plays (slowly, software rendering). The latest log in `%LOCALAPPDATA%\SyncWatch\logs` has `native libraries loaded vulkan=Bundled` |
 | 5 | Non-Latin subtitles | Pick an Arabic, Japanese or Russian subtitle track of `test.mkv` | Readable text, no boxes |
 | 6 | Invite: sandbox hosts | Create a room in the sandbox; join from your PC's dev build with the invite; paste the reply back; compare the four words; Admit | Both in the room; play, pause and seek follow |
 | 7 | Invite: PC hosts | The other direction | Same |

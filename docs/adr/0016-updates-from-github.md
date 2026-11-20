@@ -92,6 +92,19 @@ The signature format is Tauri's: keys from `tauri signer generate`, signatures f
   inside Windows Sandbox (`docs/clean-machine-test.md`). This keeps the developer's own
   SyncWatch data untouched.
 
+## Sandbox proof (2026-11-20)
+
+0.0.1 updated itself to 0.0.2 through this path:
+1. It checked a local server, downloaded the update, and verified the signature and hash.
+2. It started `msiexec` and quit 9 s after starting.
+3. The MSI replaced 0.0.1 (one product left).
+4. `LaunchApplication` started 0.0.2 as the signed-in user, 126 s after 0.0.1 quit. Almost
+   all of that time is Windows' software restriction policy check of the unsigned package.
+
+`docs/clean-machine-test.md` has the results; the evidence is in `dist\sandbox-results`. The
+relaunched app does not inherit the old process's environment, since it is started by the
+MSI. This is irrelevant for users.
+
 ## Consequences
 
 - An update is only as trustworthy as the maintainer's private key. If it leaks, rotate it:

@@ -112,6 +112,19 @@ An MSI cannot easily ask a question during uninstall. So:
   - the MSI built on Windows 11 with the default optional features;
   - cargo-about 0.9.3 was already present for the license report.
 
+## Sandbox findings (2026-11-20)
+
+- A per-user install's Add/Remove Programs entry is under **HKLM** `...\Uninstall\{ProductCode}`.
+  The product data is under the user's SID in `Installer\UserData`, and it is published in
+  HKCU `Installer\Products`. Check "installed" through the Windows Installer API, not one
+  registry key.
+- The major upgrade leaves exactly one product. `CleanupUserData` runs deferred and
+  impersonated, as the signed-in user, before `RemoveFiles`. It removes the data folder and
+  the Credential Manager entries, and writes `%TEMP%\SyncWatch-cleanup.log`. Without
+  `REMOVEUSERDATA`, everything is kept.
+- Each install spends about 2 minutes in Windows Installer's software restriction policy check
+  of the unsigned 337 MB package (in the sandbox). Details: `docs/clean-machine-test.md`.
+
 ## Consequences
 
 - No UAC prompt on install, upgrade (including the in-app updater) or uninstall.

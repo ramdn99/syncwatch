@@ -564,11 +564,15 @@ pub fn update_install(app: AppHandle) -> Result<(), String> {
     check_download(&pk, &offer, &data).map_err(|e| e.to_string())?;
     let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
     let msiexec = Path::new(&sysroot).join("System32").join("msiexec.exe");
-    std::process::Command::new(msiexec)
-        .arg("/i")
+    let mut cmd = std::process::Command::new(msiexec);
+    cmd.arg("/i")
         .arg(&path)
-        .args(["/passive", "AUTOLAUNCHAPP=True"])
-        .spawn()
+        .args(["/passive", "AUTOLAUNCHAPP=True"]);
+    // Test builds only (Windows Sandbox test): a verbose log of the upgrade.
+    if TEST_BUILD && let Some(log) = std::env::var_os("SYNCWATCH_TEST_MSI_LOG") {
+        cmd.arg("/l*v").arg(log);
+    }
+    cmd.spawn()
         .map_err(|e| format!("Could not start the installer: {e}"))?;
     tracing::info!(version = %offer.version, "starting the update installer; quitting");
     app.exit(0);

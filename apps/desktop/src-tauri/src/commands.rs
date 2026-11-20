@@ -209,6 +209,7 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
+            tracing::info!(version = %app.package_info().version, "app version");
             syncwatch_ice_config::install_crypto_provider();
             app.manage(crate::connection::ConnectionManager::new(&conn_paths));
             app.manage(crate::prefs::PrefsService::load(&conn_paths));
