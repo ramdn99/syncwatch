@@ -72,7 +72,7 @@ async function watchHandoff(report: Report, who: string, timeoutMs: number) {
   if (unloaded > 0 || back > 0) throw new Error(`handoff reloaded or jumped (unloaded ${unloaded}, back ${back} ms)`);
 }
 
-export async function torrentHost(report: Report, magnet: string, fileName: string) {
+export async function torrentHost(report: Report, magnet: string, fileName: string, idleMs = 15_000) {
   await waitFor('member joined', (s) => s.phase === 'inRoom' && s.members.length === 2, 60_000);
   let chosen: { index: number; path: string; size: number } | null = null;
   await check(report, 'host gets the multi-file torrent file list (metadata)', async () => {
@@ -141,7 +141,8 @@ export async function torrentHost(report: Report, magnet: string, fileName: stri
   await check(report, 'member completed too', () => waitFor('member complete', said('member-complete'), 600_000));
   report(`TS idle_start ${Date.now()}`);
   await say('idle-start');
-  await sleep(15_000);
+  // SYNCWATCH_DEV_IDLE_SECS (idle-measure.ps1) lengthens this idle phase for CPU/memory samples.
+  await sleep(idleMs);
   report(`TS idle_end ${Date.now()}`);
   await say('idle-end');
   await check(report, 'member rejoined and plays the finished file', () => waitFor('member rejoined', said('rejoined'), 120_000));
@@ -188,7 +189,7 @@ export async function torrentMember(report: Report, fileName: string) {
   });
   await check(report, 'member: 100% verified, handoff keeps the position (no reload)', () => watchHandoff(report, 'member', 600_000));
   await say('member-complete');
-  await waitFor('idle over', said('idle-end'), 120_000);
+  await waitFor('idle over', said('idle-end'), 3_700_000); // the host's idle phase may be long (idle-measure.ps1)
   await check(report, 'rejoin plays the finished file without re-joining the swarm', async () => {
     const code = (await current()).roomCode;
     if (!code) throw new Error('no room code');

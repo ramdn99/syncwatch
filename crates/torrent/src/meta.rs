@@ -618,6 +618,70 @@ mod tests {
         );
     }
 
+    /// Fuzz-style helper (Milestone 9 security review): xorshift64* and 1-4 random edits.
+    fn fuzz_mutate(state: &mut u64, src: &[u8]) -> Vec<u8> {
+        let mut next = || {
+            *state ^= *state >> 12;
+            *state ^= *state << 25;
+            *state ^= *state >> 27;
+            state.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        };
+        let mut v = src.to_vec();
+        for _ in 0..=next() % 4 {
+            let at = (next() % (v.len() as u64 + 1)) as usize;
+            match next() % 5 {
+                0 if at < v.len() => v[at] ^= 1 << (next() % 8),
+                1 => v.insert(at, next() as u8),
+                2 if at < v.len() => {
+                    v.remove(at);
+                }
+                3 => v.truncate(at),
+                4 if at < v.len() => {
+                    v[at] = [0, b'e', b':', b'0', b'9', 0xff][(next() % 6) as usize]
+                }
+                _ => {}
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn mutated_torrents_never_panic_and_stay_within_limits() {
+        let n: usize = std::env::var("SYNCWATCH_FUZZ_ITERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4000);
+        let single = torrent(
+            &info_single("movie.mkv", 1_000_000, 262_144),
+            &["http://t.example/announce", "udp://u.example:80"],
+        );
+        let multi = torrent(
+            &info_multi(
+                "Show",
+                &[(&["S1", "e01.mkv"], 700_000), (&["S1", "e01.srt"], 9_000)],
+                262_144,
+            ),
+            &[],
+        );
+        let mut state = 0x6d65_7461_0001_u64;
+        let mut ok = 0;
+        for i in 0..n {
+            let m = fuzz_mutate(&mut state, if i % 2 == 0 { &single } else { &multi });
+            if let Ok(meta) = inspect(&m, DEFAULT_META_CAP, None) {
+                ok += 1;
+                assert!(meta.files.len() <= MAX_FILES && meta.trackers.len() <= MAX_TRACKERS);
+                for f in &meta.files {
+                    let parts: Vec<&str> = f.path.split('/').collect();
+                    assert!(crate::validate::check_path(&parts).is_ok(), "{:?}", f.path);
+                }
+                // The sanitized copy parses again with the same infohash.
+                let again = inspect(&meta.sanitized(), DEFAULT_META_CAP, Some(meta.infohash));
+                assert_eq!(again.map(|x| x.infohash), Ok(meta.infohash));
+            }
+        }
+        assert!(ok > 0, "no mutation stayed valid: the seeds are wrong");
+    }
+
     #[test]
     fn hostile_and_malformed_inputs_are_refused() {
         let ok = info_single("m.mkv", 300_000, 262_144);

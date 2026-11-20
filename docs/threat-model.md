@@ -1,7 +1,7 @@
 # SyncWatch threat model
 
-Status: complete for Milestone 8 (spec section 11). Milestone 9 adds the installer and the
-updater, and a security review of this document.
+Status: complete for Milestone 9 (spec section 11): the manual invites, the installer, the
+updater, and the whole-codebase security review (`docs/security-review.md`).
 
 ## What we protect, and from whom
 
@@ -94,8 +94,35 @@ test signaling server.
 | "Copy diagnostics" | The report removes credentials, keys, tokens, the Metered app name, IP addresses (except loopback) and full paths before it reaches the clipboard (`src/lib/redact.ts`, tests). | Room codes and file names are included (they help support). |
 | Stored data | Only the user's own preferences, layout, window position, display name and the relay setup are stored (`config`). Nothing from a room is kept (test `persistence.test.ts`). Portable mode keeps everything in `<exe>\data`, including the WebView2 profile (`scripts/dev/portable-check.ps1`). The relay credentials are encrypted with Windows DPAPI for the current user (`credentials.dpapi`, `ice-last-good.dpapi`). | Malware running as the same user can decrypt the credentials. A portable copy moved to another PC or Windows user cannot decrypt them (DPAPI is per user). |
 | Other local programs and the torrent stream server | See Torrents (127.0.0.1 only, random port, 128-bit token). | Same-user processes can read the same files anyway. |
-| Telemetry | None. The app talks only to the signaling server, the TURN/STUN servers, Metered's credentials API (when set up), room peers, and the BitTorrent network in torrent rooms. | None. |
+| Telemetry | None. The app talks only to the TURN/STUN servers, Metered's credentials API (when set up), room peers, GitHub for updates (can be turned off), and the BitTorrent network in torrent rooms. Release builds have no signaling server (ADR 0014). | None. |
 | Remote content in the UI | All fonts, icons and scripts are bundled; a strict CSP; a test fails on any remote resource. | None known. |
+
+## App windows and commands
+
+| Threat | What we do | Residual risk |
+|---|---|---|
+| The hidden bridge webview (which handles remote SDP) calls app commands | Every app command is answered only for the main window; the bridge may call only `bridge_attach` and `bridge_in`, which check its label again (`only_from_main` in `commands.rs`, test `only_the_main_window_reaches_app_commands`). The bridge page never evaluates remote data: SDP and candidates go to the WebRTC API as strings, data-channel bytes to Rust. | A WebView2 or WebRTC engine bug. |
+| Script injection in the main UI | Strict CSP (`script-src 'self'`, no inline scripts, `object-src 'none'`, `connect-src` IPC only), frozen prototypes, React escaping; chat, names and file names are rendered as text only. Capabilities: events and the file open/save dialogs only. | A React or WebView2 bug. |
+
+## Installer and uninstall (ADR 0015)
+
+| Threat | What we do | Residual risk |
+|---|---|---|
+| A tampered installer download | SHA-256 of every file in the release's `SHA256SUMS`; in-app updates are signed (below). | No Authenticode signature (no certificate): a first manual download is protected only by HTTPS from GitHub and the published hash. SmartScreen warns. |
+| Elevation | Per-user MSI: no UAC prompt, no admin rights, nothing outside the user's profile. | None. |
+| DLL planting next to the app | libmpv and the Vulkan loader load by absolute path with safe DLL search flags; the install folder is in the user's own profile. | Same-user malware can replace files there (it can do worse anyway). |
+| "Remove my data" deleting the wrong folder | The folder is fixed: `%LOCALAPPDATA%\SyncWatch` (or `<exe>\data` in portable mode); Rust's `remove_dir_all` does not follow junctions or symlinks. User-chosen download folders are never touched. It runs only on an explicit click or `REMOVEUSERDATA=1`, never on upgrades. | None known. |
+
+## Updates (ADR 0016)
+
+| Threat | What we do | Residual risk |
+|---|---|---|
+| A fake or modified update (network, mirror, compromised release asset) | `latest.json` and the MSI are each signed with the maintainer's minisign key; only the public key is in the app. The MSI must also match the SHA-256 in the signed manifest and the size limit. Unsigned, wrongly signed or changed files are refused and deleted. Tests: unit, mutation (3,000 changed manifests/signatures), and a local server serving unsigned, tampered, wrong-key and redirecting releases. | A stolen private key (and its password). Rotation is documented in `docs/release-guide.md`. |
+| Downgrade or replay of an old, vulnerable release | Only a strictly newer version is offered; the version is inside the signed manifest; the MSI's own version check refuses downgrades. | A replayed older manifest can hold back an update (no newer offer), not install anything. |
+| Redirects to other hosts, slow or huge responses | HTTPS only; github.com and the two GitHub asset hosts; every redirect checked, at most 5; timeouts; 64 KiB manifest, 4 KiB signature, 600 MiB MSI. | GitHub itself. |
+| The downloaded file is swapped before it runs | It lives in the user's own cache folder and is checked again right before `msiexec` starts; `msiexec` is started by absolute path from System32. | Same-user malware could swap it between the check and the start (it could also replace the installed app directly). |
+| The local test server in a shipped build | Only debug builds and test MSIs (`SYNCWATCH_TEST_BUILD`, `build-release.ps1 -TestBuild`, marked and refused by `release.ps1`) accept a loopback update URL or another key. | None. |
+| An update interrupts a room | The check runs only on the home screen after the first paint; the offer is a card, never a modal; nothing installs without "Restart to update". | None. |
 
 ## Torrents (ADRs 0009, 0010)
 

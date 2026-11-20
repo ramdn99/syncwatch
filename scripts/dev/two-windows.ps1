@@ -50,7 +50,10 @@ param(
     # Generated test media (scripts/dev/make-test-media.ps1).
     [string]$MediaDir = (Join-Path ([IO.Path]::GetTempPath()) 'syncwatch-media'),
     # App log level for the windows (scenarios default to debug so the log grep sees the most).
-    [string]$LogLevel = ''
+    [string]$LogLevel = '',
+    # debug (default) or measure: optimized like release but with the dev automation
+    # (Cargo profile "measure"); used by scripts/dev/idle-measure.ps1.
+    [ValidateSet('debug', 'measure')][string]$BuildProfile = 'debug'
 )
 
 if ($PSVersionTable.PSVersion.Major -lt 7) { Write-Host 'Run with PowerShell 7: pwsh -NoProfile -File scripts/dev/two-windows.ps1'; exit 2 }
@@ -108,7 +111,7 @@ foreach ($n in $(if ($Scenario -in 'torrent', 'torrentfile', 'torrentgate', 'tor
 }
 
 Write-Host 'Building...'
-cargo build -q -p syncwatch-desktop $(if (-not $Docker) { '-p'; 'syncwatch-signaling' })
+cargo build -q -p syncwatch-desktop $(if (-not $Docker) { '-p'; 'syncwatch-signaling' }) $(if ($BuildProfile -ne 'debug') { '--profile'; $BuildProfile })
 if ($LASTEXITCODE) { exit 1 }
 
 $work = Join-Path ([IO.Path]::GetTempPath()) "syncwatch-two-windows-$PID"
@@ -127,7 +130,7 @@ try {
         $compose += 'signaling'
     } else {
         $env:SYNCWATCH_SIGNALING_BIND = '127.0.0.1:8787'
-        $started += Start-Process target\debug\syncwatch-signaling.exe -PassThru -WindowStyle Hidden -RedirectStandardOutput "$work\signaling.log" -RedirectStandardError "$work\signaling.err"
+        $started += Start-Process target\$BuildProfile\syncwatch-signaling.exe -PassThru -WindowStyle Hidden -RedirectStandardOutput "$work\signaling.log" -RedirectStandardError "$work\signaling.err"
     }
     if ($Ice -eq 'coturn') {
         docker compose -f deploy/compose.dev.yml up -d coturn | Out-Null
@@ -170,7 +173,7 @@ try {
         $env:SYNCWATCH_DEV_SOAK_FILE = $(if ($Soak -gt 0) { Join-Path $work "soak-$who.json" } else { '' })
         $env:SYNCWATCH_DEV_MINIMIZE = $(if ($Soak -gt 0 -and $who -eq 'b') { '1' } else { '' })
         $env:SYNCWATCH_DEV_SCENARIO_FILE = $(if ($Scenario) { Join-Path $work "scenario-$who.txt" } else { '' })
-        $p = Start-Process target\debug\syncwatch.exe -PassThru
+        $p = Start-Process target\$BuildProfile\syncwatch.exe -PassThru
         $started += $p
         $apps += $p
         Write-Host "Window $who started (PID $($p.Id), data folder %LOCALAPPDATA%\SyncWatch-dev-$who)."

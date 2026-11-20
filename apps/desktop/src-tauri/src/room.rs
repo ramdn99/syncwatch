@@ -2800,6 +2800,8 @@ pub struct DevScenario {
     media: Option<String>,
     /// Extra files (SYNCWATCH_DEV_SCENARIO_EXTRA, ';'-separated; only read).
     extra: Vec<String>,
+    /// Length of the torrent scenario's idle phase (SYNCWATCH_DEV_IDLE_SECS; idle-measure.ps1).
+    idle_secs: Option<u64>,
 }
 
 fn dev_shared_file() -> Option<PathBuf> {
@@ -2855,11 +2857,16 @@ pub fn dev_scenario() -> Option<DevScenario> {
                 .collect()
         })
         .unwrap_or_default();
+    let idle_secs = std::env::var("SYNCWATCH_DEV_IDLE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|s| s.clamp(5, 3600));
     Some(DevScenario {
         name,
         role,
         media,
         extra,
+        idle_secs,
     })
 }
 

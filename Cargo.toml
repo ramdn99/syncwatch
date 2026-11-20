@@ -56,3 +56,12 @@ print_stdout = "warn"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# Optimized like release but keeps the dev automation (debug_assertions) for measurements:
+# scripts/dev/idle-measure.ps1. Never used for shipped builds.
+[profile.measure]
+inherits = "release"
+debug-assertions = true
+overflow-checks = false
+lto = false
+codegen-units = 16

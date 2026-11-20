@@ -302,7 +302,7 @@ export async function maybeRunScenario() {
   // React StrictMode runs effects twice in development: run the scenario only once.
   if (started) return;
   started = true;
-  const cfg = await invoke<{ name: string; role: string; media: string | null; extra: string[] } | null>('dev_scenario').catch(() => null);
+  const cfg = await invoke<{ name: string; role: string; media: string | null; extra: string[]; idle_secs: number | null } | null>('dev_scenario').catch(() => null);
   if (!cfg || !['chat', 'rooms', 'sync', 'chattime', 'late', 'popup', 'succession', 'torrent', 'skiprelay', 'torrentfile', 'torrentgate', 'torrentplay', 'torrentsucc'].includes(cfg.name)) return;
   const report: Report = (line) => void invoke('dev_scenario_report', { line });
   onRoomState((s) => (latest = s));
@@ -330,7 +330,7 @@ export async function maybeRunScenario() {
       else await m7.torrentFileMember(report);
     } else if (cfg.name === 'torrent') {
       const m7 = await import('./scenario7');
-      if (cfg.role === 'host') await m7.torrentHost(report, media, cfg.extra[0] ?? '');
+      if (cfg.role === 'host') await m7.torrentHost(report, media, cfg.extra[0] ?? '', (cfg.idle_secs ?? 15) * 1000);
       else await m7.torrentMember(report, cfg.extra[0] ?? '');
     } else if (cfg.name === 'skiprelay') {
       if (cfg.role === 'host') await m6.skipRelayedHost(report, media, cfg.extra);

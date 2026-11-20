@@ -276,7 +276,7 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(only_from_main(tauri::generate_handler![
             app_ready,
             set_layout,
             set_fullscreen,
@@ -340,7 +340,7 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             crate::room::dev_scenario_shared,
             crate::bridge::bridge_attach,
             crate::bridge::bridge_in,
-        ])
+        ]))
         .on_window_event(move |w, ev| {
             use tauri::WindowEvent as W;
             if w.label() != "main" {
@@ -367,5 +367,43 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
     if let Err(e) = result {
         tracing::error!(error = %e, "tauri runtime error");
         crate::native::loader::error_dialog(&format!("SyncWatch could not start: {e}"));
+    }
+}
+
+/// App commands answer only the main window; the hidden bridge webview may call only its two
+/// bridge commands (which check its label again). Defence in depth (security review, M9): the
+/// bridge page handles remote SDP and must not reach room, file, update or data-removal
+/// commands even if it were ever compromised. Plugin commands have their own capabilities.
+fn only_from_main<R: tauri::Runtime>(
+    inner: impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static,
+) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
+    move |invoke| {
+        if !command_allowed(invoke.message.webview().label(), invoke.message.command()) {
+            tracing::warn!("command refused: not allowed from this webview");
+            invoke.resolver.reject("not allowed from this window");
+            return true;
+        }
+        inner(invoke)
+    }
+}
+
+fn command_allowed(label: &str, command: &str) -> bool {
+    label == "main" || matches!(command, "bridge_attach" | "bridge_in")
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::command_allowed;
+
+    #[test]
+    fn only_the_main_window_reaches_app_commands() {
+        assert!(command_allowed("main", "remove_all_user_data"));
+        assert!(command_allowed("main", "update_install"));
+        assert!(command_allowed("bridge-1", "bridge_in"));
+        assert!(command_allowed("bridge-1", "bridge_attach"));
+        assert!(!command_allowed("bridge-1", "remove_all_user_data"));
+        assert!(!command_allowed("bridge-1", "update_install"));
+        assert!(!command_allowed("bridge-1", "room_join_invite"));
+        assert!(!command_allowed("", "snapshot"));
     }
 }

@@ -46,7 +46,8 @@ param(
     [switch]$Manual,
     # signaling (dev server) or manual (copy-paste invites as in release builds, ADR 0014).
     [ValidateSet('signaling', 'manual')][string]$Handshake = 'signaling',
-    [int]$ManualMinutes = 60
+    [int]$ManualMinutes = 60,
+    [ValidateSet('debug', 'measure')][string]$BuildProfile = 'debug'
 )
 # -SameIpDefault: qBittorrent keeps libtorrent's ONE connection per IP and sits on 127.0.0.2, so the
 # first window (127.0.0.1) gets in and a second one from the same address is refused, as behind one
@@ -233,7 +234,7 @@ $env:SYNCWATCH_LAB_FILE = 'long.mkv'
 $env:SYNCWATCH_DEV_TORRENT_BIND = '127.0.0.1'
 $env:SYNCWATCH_DEV_TORRENT_DHT = '0'
 $env:SYNCWATCH_LAB_TORRENT_FILE = $filmTorrent
-$out = pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario $Scenario -Handshake $Handshake 2>&1
+$out = pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario $Scenario -Handshake $Handshake -BuildProfile $BuildProfile 2>&1
 $out | Where-Object { $_ -notmatch '^(Building|.*started \(PID)' } | ForEach-Object { Write-Host $_ }
 $raw = ($out | Select-String 'Raw results: (.*)$').Matches | Select-Object -Last 1 | ForEach-Object { $_.Groups[1].Value.Trim() }
 Stop-Job $mon; Remove-Job $mon -Force

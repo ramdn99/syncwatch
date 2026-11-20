@@ -602,6 +602,43 @@ mod tests {
     }
 
     #[test]
+    fn mutated_manifests_and_signatures_are_refused_without_panics() {
+        // Fuzz-style (Milestone 9 security review): any change to the signed manifest or its
+        // signature must be refused; nothing may panic.
+        let json = fixture("latest.json");
+        let sig = String::from_utf8(fixture("latest.json.sig")).unwrap();
+        let mut s = 0x7570_6461_7465_u64;
+        let mut next = || {
+            s ^= s >> 12;
+            s ^= s << 25;
+            s ^= s >> 27;
+            s.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        };
+        for i in 0..3000 {
+            let (mut j, mut g) = (json.clone(), sig.clone().into_bytes());
+            let target = if i % 2 == 0 { &mut j } else { &mut g };
+            let at = (next() % target.len() as u64) as usize;
+            match next() % 3 {
+                0 => target[at] ^= 1 << (next() % 8),
+                1 => target.insert(at, next() as u8),
+                _ => {
+                    target.remove(at);
+                }
+            }
+            let g = String::from_utf8_lossy(&g).into_owned();
+            // A flip inside base64 padding or trailing whitespace can leave the signature
+            // bytes unchanged; then the manifest is the original and may be offered.
+            if j == json && g.trim() == sig.trim() {
+                continue;
+            }
+            let r = check_manifest(&pk(), &j, &g, &v("0.1.0"), None);
+            if j != json {
+                assert!(r.is_err(), "changed manifest accepted (round {i})");
+            }
+        }
+    }
+
+    #[test]
     fn a_signed_newer_manifest_is_offered() {
         let json = fixture("latest.json");
         let sig = String::from_utf8(fixture("latest.json.sig")).unwrap();

@@ -1,6 +1,55 @@
 # SyncWatch user guide
 
-Status: rooms with invites (Milestone 9), torrents, settings, privacy and known limits.
+Status: Milestone 9: install and updates, rooms with invites, torrents, settings, privacy
+and known limits.
+
+## Install, update and remove
+
+### Install
+
+1. Download `SyncWatch-<version>-x64.msi` from the latest release on
+   https://github.com/ramdn99/syncwatch/releases.
+2. Run it. It installs for your Windows user only, into
+   `%LOCALAPPDATA%\Programs\SyncWatch`, and asks for no administrator rights. Everything
+   SyncWatch needs is inside, including the player and, if Windows lacks it, the WebView2
+   runtime.
+3. **Windows SmartScreen** may say "Windows protected your PC", because the installer is not
+   code-signed. Click **More info**, check that the app is SyncWatch, then **Run anyway**.
+   To check the download first, compare its SHA-256 with the release's `SHA256SUMS`:
+
+```
+Get-FileHash $HOME\Downloads\SyncWatch-0.1.0-x64.msi -Algorithm SHA256
+```
+
+### Updates
+
+- When SyncWatch starts (never during a room), it asks GitHub whether a newer version exists.
+  If one does, a card on the home screen says **Version X is available**, with what changed:
+  - **Update now** downloads it (with progress and **Cancel**), then **Restart to update**
+    closes SyncWatch, installs the new version (a short progress bar, no questions) and opens
+    SyncWatch again. Your settings and relay setup stay.
+  - **Later** asks again at the next start.
+  - **Skip this version** stops asking about that version; a newer one is offered again.
+- Every update is checked before it runs: it must be signed by the SyncWatch maintainer's key,
+  match its published SHA-256, and be newer than what you have. Anything else is refused
+  (no downgrades).
+- Settings, About: **Check for updates when SyncWatch starts** (on by default) and **Check
+  now**. With the switch off, SyncWatch never contacts GitHub.
+
+### Remove
+
+- **Windows Settings, Apps, Installed apps, SyncWatch, Uninstall** removes the program. Your
+  settings, relay setup and torrent cache stay, so a later install picks them up.
+- **To remove your data as well:** first use Settings, About, **Remove all my SyncWatch
+  data...** in SyncWatch. It deletes the data folder (`%LOCALAPPDATA%\SyncWatch`: settings,
+  the relay setup, logs, the torrent cache) and the two SyncWatch entries in Windows
+  Credential Manager, then closes. Then uninstall. Downloads you saved to a folder of your own
+  choice are not touched.
+- From a command line, one step does both:
+
+```
+msiexec /x SyncWatch-0.1.0-x64.msi REMOVEUSERDATA=1
+```
 
 ## Rooms: create, invite, join
 
@@ -222,8 +271,9 @@ Open **Settings** on the home screen. The sections are:
     limit** as the default for new rooms;
   - the torrent cache, the largest torrent file list, and the buffering window.
 - **Network:** **Always use relay**, the incoming torrent port, the bind address, and DHT.
-- **About:** the version, the GPL notice, the third-party licenses, and **Copy diagnostics**,
-  which copies a report with credentials, keys, tokens and IP addresses removed.
+- **About:** the version, the GPL notice, the third-party licenses, **Copy diagnostics**
+  (a report with credentials, keys, tokens and IP addresses removed), the update switch and
+  **Check now**, and **Remove all my SyncWatch data...** (see "Install, update and remove").
 
 ## Privacy
 
@@ -250,7 +300,9 @@ Open **Settings** on the home screen. The sections are:
 - **No telemetry.** SyncWatch connects only to:
   - the relay (STUN/TURN) servers;
   - Metered's API, when you set it up;
-  - GitHub, to check for updates (Settings, About; it can be turned off);
+  - GitHub, to check for and download updates (one small request when SyncWatch starts, sent
+    as a plain download: no account, no identifier beyond what any download shows, your IP
+    address and the SyncWatch version; Settings, About, it can be turned off);
   - the people in your room;
   - in torrent rooms, the torrent's swarm.
 - **Diagnostics:** **Copy diagnostics** removes credentials, keys, tokens, IP addresses and
