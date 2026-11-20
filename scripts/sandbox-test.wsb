@@ -1,0 +1,24 @@
+<!-- SyncWatch hands-on clean-machine test (docs/clean-machine-test.md).
+     Prepare first: pwsh -NoProfile -File scripts/sandbox-prepare.ps1 -IncludeRelease
+     Host paths are absolute (Windows Sandbox does not support relative paths): edit them if
+     the repository is not in D:\dev\syncwatch. Setting names checked against Microsoft Learn,
+     "Use and configure Windows Sandbox" (2026-03-29). -->
+<Configuration>
+  <vGPU>Disable</vGPU>
+  <Networking>Enable</Networking>
+  <MemoryInMB>4096</MemoryInMB>
+  <AudioInput>Disable</AudioInput>
+  <VideoInput>Disable</VideoInput>
+  <PrinterRedirection>Disable</PrinterRedirection>
+  <ClipboardRedirection>Enable</ClipboardRedirection>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>D:\dev\syncwatch\dist\sandbox</HostFolder>
+      <SandboxFolder>C:\SyncWatchTest</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>explorer.exe C:\SyncWatchTest</Command>
+  </LogonCommand>
+</Configuration>

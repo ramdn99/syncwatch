@@ -116,7 +116,11 @@ An MSI cannot easily ask a question during uninstall. So:
 
 - No UAC prompt on install, upgrade (including the in-app updater) or uninstall.
 - One install per Windows user. A second user installs it again.
-- The MSI is 262 MB because of the offline WebView2 installer.
+- The MSI is large because of the offline WebView2 installer: 262 MB with the 205 MB
+  installer of 2026-11-19, 337 MB with the 280 MB one Tauri downloaded on 2026-11-20. Tauri
+  fetches Microsoft's current installer at each build, so it is not pinned by hash.
+  `verify-package.ps1` checks instead that the embedded file carries a valid Microsoft
+  signature.
 - Unsigned: Windows SmartScreen warns on first download ("More info", then "Run anyway").
   The README and the user guide explain it.
 - The template is a copy. When Tauri's template changes, diff it against

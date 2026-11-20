@@ -11,6 +11,9 @@ keyboard input.
 | of which the WebView2 offline installer | 205 MB (used only when Windows lacks WebView2) |
 | `SyncWatch-Portable-0.1.0-x64.zip` (not attached to releases) | 57.8 MB |
 
+The WebView2 installer is Microsoft's current one at build time (not pinned). Test builds made
+a day later embedded a 280 MB version, giving a 337.5 MB MSI (ADR 0015).
+
 The source is the dry run of `scripts/release.ps1` (`dist\release\0.1.0`), whose output was
 checked by `verify-package.ps1`.
 

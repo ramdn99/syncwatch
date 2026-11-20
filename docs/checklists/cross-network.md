@@ -4,6 +4,12 @@ Two PCs on **different networks** (for example home broadband and a phone hotspo
 what the in-process tests, `net-lab.ps1` and the two-window labs cannot: real NAT, real
 latency, and a relay used for real. Plan about 45 minutes. Keep the relay-only part short.
 
+**Milestone 9 update:**
+- Release builds join with copy-and-paste invites (ADR 0014), so the signaling and tunnel
+  setup below is no longer needed. Install the release MSI on both PCs, and send the invite
+  and reply through any chat app.
+- The short relay-only version is Part 3 of `docs/clean-machine-test.md`.
+
 ## Before you start
 
 **A signaling server both PCs can reach.** The app accepts `ws://` only for localhost; any

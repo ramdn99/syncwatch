@@ -1,0 +1,28 @@
+<!-- SyncWatch automated install, update and uninstall test (docs/clean-machine-test.md).
+     Prepare first: pwsh -NoProfile -File scripts/sandbox-prepare.ps1
+     Runs scripts/sandbox/auto-test.ps1 at logon; results land in dist\sandbox-results on the
+     host (the only writable mapping). Edit the host paths if the repository is elsewhere. -->
+<Configuration>
+  <vGPU>Disable</vGPU>
+  <Networking>Enable</Networking>
+  <MemoryInMB>4096</MemoryInMB>
+  <AudioInput>Disable</AudioInput>
+  <VideoInput>Disable</VideoInput>
+  <PrinterRedirection>Disable</PrinterRedirection>
+  <ClipboardRedirection>Disable</ClipboardRedirection>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>D:\dev\syncwatch\dist\sandbox</HostFolder>
+      <SandboxFolder>C:\SyncWatchTest</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>D:\dev\syncwatch\dist\sandbox-results</HostFolder>
+      <SandboxFolder>C:\SyncWatchResults</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SyncWatchTest\auto-test.ps1</Command>
+  </LogonCommand>
+</Configuration>
