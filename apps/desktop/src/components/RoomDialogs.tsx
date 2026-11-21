@@ -27,6 +27,10 @@ export function RoomEntryDialog(props: { mode: 'create' | 'join'; onClose: () =>
   const [replyStep, setReplyStep] = useState(false);
 
   const submit = async () => {
+    // Joining with an invite happens inside InviteJoin ("Create my reply"). Enter in the name
+    // field must not submit this form: it used to call the old room-code join and show the
+    // room-code rules (Milestone 9 sandbox finding).
+    if (!create && manual) return;
     setError(null);
     setBusy(true);
     try {

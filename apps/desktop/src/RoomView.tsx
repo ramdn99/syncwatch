@@ -59,6 +59,7 @@ export function RoomView({ onLeave, onOpenSettings }: { onLeave: () => void; onO
   const [diagOpen, setDiagOpen] = useState(false);
   const [uiErrors, setUiErrors] = useState<UiErrorEntry[]>([]);
   const [ignoredDismissed, setIgnoredDismissed] = useState(false);
+  const [relayWarningDismissed, setRelayWarningDismissed] = useState(false);
   const [noLimit, setNoLimit] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [dismissed, setDismissed] = useState<ReadonlySet<ErrorId>>(new Set());
@@ -547,6 +548,14 @@ export function RoomView({ onLeave, onOpenSettings }: { onLeave: () => void; onO
         <div role="status" className="flex items-center gap-3 bg-info/15 px-3 py-1.5 text-sm text-info">
           <span className="flex-1">{PASSWORD_IGNORED_TEXT}</span>
           <button type="button" className="text-text underline" onClick={() => setIgnoredDismissed(true)}>
+            OK
+          </button>
+        </div>
+      )}
+      {rs.active && rs.relayWarning && !relayWarningDismissed && (
+        <div role="alert" data-testid="relay-warning" className="flex flex-wrap items-center gap-3 bg-warning/15 px-3 py-1.5 text-sm text-warning">
+          <span className="flex-1">{rs.relayWarning}</span>
+          <button type="button" className="text-text underline" onClick={() => setRelayWarningDismissed(true)}>
             OK
           </button>
         </div>

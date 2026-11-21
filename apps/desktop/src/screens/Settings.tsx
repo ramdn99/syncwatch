@@ -356,8 +356,8 @@ function AboutSection({ status, prefsNow }: { status: ConnectionStatus; prefsNow
   const [removeError, setRemoveError] = useState<string | null>(null);
   useEffect(() => {
     if (!inTauri()) return;
-    void import('@tauri-apps/api/app')
-      .then(({ getVersion }) => getVersion())
+    void import('@tauri-apps/api/core')
+      .then(({ invoke }) => invoke<string>('app_version'))
       .then(setVersion)
       .catch(() => {});
   }, []);
@@ -368,7 +368,8 @@ function AboutSection({ status, prefsNow }: { status: ConnectionStatus; prefsNow
       connection: { configured: status.configured, verified: status.verified, mode: status.mode, relayOnly: status.relayOnly, warning: status.warning ?? null },
       prefs: prefsNow,
       torrent: ts,
-      room: rs ? { active: rs.active, phase: rs.phase, isHost: rs.isHost, members: rs.members.length, diag: rs.diag } : null,
+      // Kept after a room ends: why it ended and its connection diagnostics (no chat, no media).
+      room: rs ? { active: rs.active, phase: rs.phase, isHost: rs.isHost, members: rs.members.length, handshake: rs.handshake, ended: rs.ended, relayWarning: rs.relayWarning, diag: rs.diag } : null,
     };
     const text = redact(JSON.stringify(report, null, 2));
     await navigator.clipboard?.writeText(text);

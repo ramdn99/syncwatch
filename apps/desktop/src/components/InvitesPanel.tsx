@@ -117,6 +117,11 @@ export function InvitesPanel({ rs }: { rs: Pick<RoomState, 'invites' | 'inviteEr
                 </div>
               </>
             )}
+            {inv.status === 'failed' && inv.reason && (
+              <p role="alert" className="text-sm text-danger" data-testid="invite-fail-reason">
+                Could not connect{inv.memberName ? ` to ${inv.memberName}` : ''}: {inv.reason}
+              </p>
+            )}
             {(inv.status === 'expired' || inv.status === 'failed') && (
               <button
                 type="button"

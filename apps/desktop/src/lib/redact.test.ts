@@ -33,3 +33,12 @@ describe('diagnostics redaction', () => {
     for (const [input, want] of cases) expect(redact(input), input).toBe(want);
   });
 });
+
+describe('redact: versions are not addresses', () => {
+  it('keeps browser and app version numbers in a user agent, still removes real IPs', () => {
+    const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36 Edg/157.0.4341.60';
+    expect(redact(ua)).toBe(ua);
+    expect(redact('peer 203.0.113.9 at http://198.51.100.7/x')).toBe('peer <ip> at http://<ip>/x');
+    expect(redact('candidate 192.0.2.44 54400 typ srflx')).toContain('<ip>');
+  });
+});

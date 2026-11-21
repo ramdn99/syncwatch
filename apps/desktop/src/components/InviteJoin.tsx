@@ -69,6 +69,12 @@ export function InviteJoin(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rs, setRs] = useState<RoomState | null>(null);
+  // The reply and its words, kept once made: a later room state without them (the attempt
+  // ended) must not drop the dialog back to the paste step.
+  const [reply, setReply] = useState<NonNullable<RoomState['reply']> | null>(null);
+  useEffect(() => {
+    if (rs?.reply) setReply(rs.reply);
+  }, [rs?.reply]);
 
   // Check the pasted invite as soon as it changes (no network).
   useEffect(() => {
@@ -88,7 +94,7 @@ export function InviteJoin(props: {
   }, [text]);
 
   // After the reply is ready: follow the room until we are admitted or it ends.
-  const waiting = rs?.reply != null;
+  const waiting = reply != null;
   const { onReplyStep } = props;
   useEffect(() => {
     if (waiting) onReplyStep?.();
@@ -123,18 +129,18 @@ export function InviteJoin(props: {
     }
   };
 
-  if (rs?.reply) {
-    const ended = rs.ended ? endText(rs.ended) : null;
+  if (reply) {
+    const ended = rs?.ended ? (endText(rs.ended) ?? INVITE_TEXT.joinFailed) : rs && !rs.active && !rs.reply ? INVITE_TEXT.joinFailed : null;
     return (
       <div className="space-y-3" data-testid="invite-reply-step">
         <p className="text-sm">{INVITE_TEXT.sendReply}</p>
-        <CopyBox label="Your reply" text={rs.reply.text} testId="reply-text" />
-        <Words words={rs.reply.words} label={INVITE_TEXT.compareMember} />
+        <CopyBox label="Your reply" text={reply.text} testId="reply-text" />
+        <Words words={reply.words} label={INVITE_TEXT.compareMember} />
         {ended ? (
           <p role="alert" className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
             {ended}
           </p>
-        ) : rs.needPassword ? (
+        ) : rs?.needPassword ? (
           <form
             className="space-y-2"
             onSubmit={(e) => {
@@ -204,7 +210,7 @@ export function InviteJoin(props: {
             <span className="text-muted">Room:</span> <span className="font-medium">{preview.roomName}</span>
           </p>
           <p className="text-xs text-muted">
-            Host key {preview.hostId} · valid for {minutesLeft(preview.expiresUnix)} more minutes
+            Host key {preview.hostId} · SyncWatch {preview.hostVersion} · the host keeps it open for {preview.ttlMins} minutes{preview.relayOnly ? ' · relay only' : ''}
             {preview.reinvite ? ' · a re-invite to your kept seat' : ''}
           </p>
         </div>

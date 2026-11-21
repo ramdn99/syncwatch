@@ -17,8 +17,9 @@ const RULES: [RegExp, string][] = [
   // Absolute Windows paths (C:\..., C:/..., \\server\...): everything up to the last separator
   // before a quote, line break, tab, | < > or backtick. Paths may contain spaces.
   [/(?<![\w\\])(?:[A-Za-z]:[\\/]|\\\\(?=[^\s\\]))[^"'\n\r\t|<>`]*[\\/]/g, '...\\'],
-  // IPv4 except loopback and 0.0.0.0 (IPv6 below).
-  [/\b(?!127\.0\.0\.1\b)(?!0\.0\.0\.0\b)(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/g, '<ip>'],
+  // IPv4 except loopback and 0.0.0.0 (IPv6 below). Not a product version such as
+  // "Chrome/157.0.0.0" in a user agent (a letter, then "/", right before it).
+  [/(?<![A-Za-z]\/)\b(?!127\.0\.0\.1\b)(?!0\.0\.0\.0\b)(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/g, '<ip>'],
 ];
 
 /** IPv6: a "::" or at least five groups (clock times like 10:51:45 have three). */

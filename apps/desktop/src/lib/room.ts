@@ -100,6 +100,7 @@ export type EndReason =
   | { kind: 'hostNotVerified' }
   | { kind: 'connectionLost'; seatKeepSecs: number }
   | { kind: 'notAdmitted' }
+  | { kind: 'connectFailed'; reason: string }
   | { kind: 'error'; message: string };
 
 /** Host, manual invites (ADR 0014): one invite as the Invites list shows it. */
@@ -112,6 +113,8 @@ export interface InviteView {
   words: [string, string, string, string] | null;
   /** A re-invite: the seat it is bound to. */
   forMember: number | null;
+  /** Failed: why, in plain words. */
+  reason: string | null;
 }
 
 /** What the Join dialog shows about a pasted invite. */
@@ -119,7 +122,10 @@ export interface InvitePreview {
   roomName: string;
   hostId: string;
   password: boolean;
-  expiresUnix: number;
+  /** How long the host keeps the invite open (from when it was made). */
+  ttlMins: number;
+  hostVersion: string;
+  relayOnly: boolean;
   reinvite: boolean;
 }
 
@@ -147,6 +153,8 @@ export interface RoomState {
   toasts: string[];
   ended: EndReason | null;
   passwordIgnored: boolean;
+  /** Fresh relay servers could not be fetched; the saved ones are tried. */
+  relayWarning: string | null;
   diag: RoomDiag;
   mediaEpoch: number;
   mediaDurationMs: number | null;
@@ -186,6 +194,9 @@ export interface AddExternalOutcome {
 }
 
 export interface RoomDiag {
+  /** "Always use relay" in this room. */
+  relayOnly: boolean;
+  iceServers: number;
   signalingHost: string;
   signalingConnected: boolean;
   signalingReconnects: number;
@@ -225,7 +236,8 @@ export const EMPTY_ROOM: RoomState = {
   toasts: [],
   ended: null,
   passwordIgnored: false,
-  diag: { signalingHost: '', signalingConnected: false, signalingReconnects: 0, events: [], rejected: [] },
+  relayWarning: null,
+  diag: { relayOnly: false, iceServers: 0, signalingHost: '', signalingConnected: false, signalingReconnects: 0, events: [], rejected: [] },
   mediaEpoch: 0,
   mediaDurationMs: null,
   gate: { active: false, waiting: [] },
@@ -495,7 +507,7 @@ export function endText(r: EndReason | null): string | null {
           : r.reason === 'banned'
             ? 'You are banned from this room for this session.'
             : r.reason === 'version'
-              ? 'The host runs a different version of SyncWatch. Both of you need the same version to watch together.'
+              ? 'The other side runs a different version of SyncWatch (the host). Both of you need the same version to watch together.'
               : 'The room did not accept you.';
     case 'noSuchRoom':
       return 'There is no room with that code. Check the code with the host.';
@@ -505,6 +517,8 @@ export function endText(r: EndReason | null): string | null {
       return 'The host could not be verified, so the connection was closed for your safety.';
     case 'connectionLost':
       return `The connection to the host was lost. Ask the host to re-invite you: your seat is kept for ${Math.max(1, Math.round(r.seatKeepSecs / 60))} minutes.`;
+    case 'connectFailed':
+      return `The host could not connect: ${r.reason}`;
     case 'notAdmitted':
       return 'The host did not let you in before the invite expired. Ask for a new invite.';
     case 'error':
