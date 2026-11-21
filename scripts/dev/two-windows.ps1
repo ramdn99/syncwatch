@@ -60,7 +60,11 @@ param(
     [string]$ReleasePair = '',
     # With -ReleasePair: no ICE servers and no connection setup (test builds only; for the
     # Windows Sandbox, which has no relay setup). Without it the real Metered setup is used.
-    [switch]$NoRelayServers
+    [switch]$NoRelayServers,
+    # Password retries (test builds): the member joins with the first, then tries the next ones
+    # on the same connection after each refusal, pausing -RetryPauses seconds (e.g. '40,3').
+    [string]$MemberPasswords = '',
+    [string]$RetryPauses = ''
 )
 
 if ($PSVersionTable.PSVersion.Major -lt 7) { Write-Host 'Run with PowerShell 7: pwsh -NoProfile -File scripts/dev/two-windows.ps1'; exit 2 }
@@ -180,6 +184,8 @@ try {
     $env:SYNCWATCH_DEV_FORCE_RELAY = $(if ($Ice -eq 'metered') { '1' } else { '' })
     $env:SYNCWATCH_DEV_ROOM_FILE = Join-Path $work 'room.txt'
     $env:SYNCWATCH_DEV_ROOM_PASSWORD = $Password
+    $env:SYNCWATCH_DEV_MEMBER_PASSWORDS = $MemberPasswords
+    $env:SYNCWATCH_DEV_RETRY_PAUSES = $RetryPauses
     $env:SYNCWATCH_LOG = $(if ($LogLevel) { $LogLevel } elseif ($Scenario) { 'debug' } else { '' })
     # Startup media applies only to the first launch of a window (never to rooms; entering a
     # room unloads the player). Scenarios use their own variable instead.
