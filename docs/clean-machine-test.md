@@ -185,7 +185,7 @@ pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario sync -ReleasePair $e
 pwsh -NoProfile -File scripts/dev/release-pair.ps1 -Stop
 ```
 
-Automated Sandbox run with these fixes (2026-11-21, `distsandbox-resultsauto-20261121-114752`):
+Automated Sandbox run with these fixes (2026-11-21, `dist\sandbox-results\auto-20261121-114752`):
 **ALL PASSED**. This includes the room step, with 35/35 scenario checks between two installed
 copies, and the relaunch after the update (127 s, mostly the Sandbox's package check).
 
