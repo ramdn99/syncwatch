@@ -111,6 +111,29 @@ The member joins within a few seconds. Both of you keep seeing the same words in
 ![The host after admitting](images/invites/06-joined-host.png)
 ![The member in the room](images/invites/07-joined-member.png)
 
+### A wrong room password
+
+The password is checked after **Admit**, over the connection that is then open. The four words
+were already compared, so a right password takes the member straight into the room.
+
+- **Member:** "Wrong password. Try again in N seconds", with a countdown, and "Wrong attempts:
+  n of 6".
+  - The field stays ready.
+  - The button shows the countdown, then turns into **Enter** by itself, and the Enter key works
+    again.
+  - You can take your time: the connection waits up to 3 minutes per try.
+  - The waits grow with each wrong try: 1, 2, 4, 8 and 8 seconds.
+  - After 6 wrong passwords, the host blocks new tries from you for 10 minutes. After that, ask
+    the host for a fresh invite.
+  - **Cancel** ends the attempt at any time.
+- **Host:** the invite shows "Waiting for the password" and "<name>: wrong password (attempt 2
+  of 6) at <time>".
+  - After 6 wrong tries: "Blocked after too many wrong passwords", with **Re-issue** and
+    **Remove**. A new invite does not reset the block: it belongs to that person for 10 minutes.
+  - A member who stops trying is dropped after 3 minutes, with that reason.
+  - Removing the invite (the X) cancels it; the member is told why.
+- The host only ever says "wrong", never how close a guess was.
+
 ### If something goes wrong
 
 SyncWatch tells you what to fix when a pasted text cannot be used:

@@ -207,3 +207,48 @@ Milestone 2 the sync-core machine (ADR 0003).
   relayed-transfer warning, using the link state that already exists.
 - Host succession when the host disappears (Milestone 6, last item) can reuse the transfer path:
   members already know how to reconnect to a new host with a pinned identity.
+
+## Revision: wrong passwords with invites (Milestone 9, 2026-11-21)
+
+**The manual-test finding.** A member who typed a wrong password could not get in:
+- the host kept showing "Connecting";
+- the member's retry did nothing.
+
+**Root causes.** The auth state machines were already right:
+- a wrong password does not close the link;
+- the member's retry starts a fresh SPAKE2 exchange with a new nonce (unit test
+  `a_retry_on_the_same_connection_restarts_spake_cleanly`).
+
+The session around them was not:
+1. **The host closed the link after 30 s.** Its link kept the 30 s auth timeout after a wrong
+   password (the 180 s password time was applied only on the member's side). A member who took
+   longer than 30 s lost the connection, and its next submit went nowhere.
+2. **The member's retry cut off its own link.** Its submit cleared "waiting for a password"
+   without restarting the auth clock, so a retry more than 30 s after the open was closed by
+   the member's own next tick. Over a relay that tick comes before the host's answer.
+3. **The host never showed the attempts.** The invite never reflected wrong passwords (still
+   "Connecting"). Bans, timeouts and members who left had no reason.
+4. **The Join dialog's password form had no countdown or attempt count.**
+
+**Fixes:**
+- Every attempt gets the password time again (180 s), on both sides.
+- The host's invite counts wrong attempts, with the time of the last one. A ban fails the
+  invite with a reason, and so do a timeout and a member who leaves.
+- Prompts carry the attempt count and "too early" versus "wrong", with a shared retry
+  component (countdown, self-enabling button, Enter).
+- The throttle is unchanged. It is kept per member identity on the host, so neither a
+  reconnect nor a new invite resets it (test). No password or proof is logged.
+- **Order kept:** the password is checked after Admit (the words come first), because
+  nothing connects before Admit (ADR 0014). A right password goes straight into the room.
+
+**Tests:**
+- Session tests:
+  - a retry a minute later on the same link;
+  - a retry while throttled;
+  - a ban after 6 that survives a new invite;
+  - the host timeout with a reason;
+  - cancel on both sides;
+  - a late retry with the member's tick before the host's answer.
+- UI tests for the exact flow.
+- Release-mode end-to-end runs: wrong, wrong 41 s later, then right: 36/36 direct and 36/36
+  relay-only.
