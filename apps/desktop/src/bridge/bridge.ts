@@ -185,7 +185,11 @@ function createPeer(id: number, offerer: boolean, ice: IceConfig) {
   pc.oniceconnectionstatechange = state;
   pc.onconnectionstatechange = () => {
     state();
-    if (pc.connectionState === 'failed' && peers.get(id) === p) closePeer(id, 'connection failed');
+    // A link that never opened stays alive on 'failed': with manual invites the member's ICE
+    // starts checking as soon as it has the invite, but the host only answers after Admit,
+    // minutes later. WebRTC recovers once the host starts its own checks; Rust ends the attempt
+    // (invite expiry, Cancel, the host's timeout) instead of the first ICE timeout.
+    if (pc.connectionState === 'failed' && peers.get(id) === p && p.opened) closePeer(id, 'connection failed');
   };
   if (offerer) {
     void (async () => {

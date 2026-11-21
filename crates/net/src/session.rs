@@ -45,6 +45,8 @@ const SUCCESSION_WAIT_US: i64 = 8_000_000;
 const GATHER_WAIT_US: i64 = 12_000_000;
 /// Manual invites: a link silent this long (no ICE restart possible without signaling) ends.
 const LOST_WAIT_US: i64 = 30_000_000;
+/// Manual invites: once the host starts connecting (Admit), the link must open within this.
+const CONNECT_WAIT_US: i64 = 45_000_000;
 /// Manual invites: at most this many open invites at a time.
 const MAX_OPEN_INVITES: usize = 12;
 
@@ -162,6 +164,11 @@ pub enum EndReason {
     },
     /// Manual invites: the host did not admit this member before the invite expired.
     NotAdmitted,
+    /// Manual invites: the host admitted us and tried to connect, but no connection could be
+    /// made. `reason` says why, in plain words.
+    ConnectFailed {
+        reason: String,
+    },
     Error {
         message: String,
     },
@@ -228,6 +235,8 @@ pub struct InviteView {
     pub words: Option<VerificationWords>,
     /// A re-invite: the seat it is bound to.
     pub for_member: Option<u32>,
+    /// Failed: why, in plain words.
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,6 +276,12 @@ struct PendingInvite {
     local_fp: Option<String>,
     reply: Option<Reply>,
     words: Option<VerificationWords>,
+    /// Failed: why (shown next to the invite).
+    reason: Option<String>,
+    /// The offer and candidates this invite carried (for the "could not connect" reason).
+    sent: Option<(String, Vec<Candidate>)>,
+    /// The lifetime written into the invite (the host enforces `expires_unix` on its clock).
+    ttl_secs: u32,
 }
 
 /// Local offer or answer collected until candidate gathering ends (manual invites).
@@ -311,6 +326,15 @@ struct Link {
     lost_since: Option<i64>,
     /// Host: this member runs another protocol version and was told so once.
     version_rejected: bool,
+    /// Manual invites: the connection must open before this (set when the host starts
+    /// connecting: at Admit on the host, when the host's checks arrive on the member).
+    connect_deadline: Option<i64>,
+    /// The last ICE connection state the bridge reported.
+    ice: String,
+    /// Auth messages that arrived before this side saw the link open (the bridge reports
+    /// "open" only after all channels are open and its stats call returned, so the other
+    /// side's first message can come first, which is likely over a relay). Replayed at open.
+    early_auth: Vec<AuthMsg>,
 }
 
 impl Link {
@@ -333,6 +357,9 @@ impl Link {
             manual_words: None,
             invite_id: None,
             lost_since: None,
+            connect_deadline: None,
+            ice: String::new(),
+            early_auth: Vec::new(),
         }
     }
 
@@ -392,6 +419,8 @@ pub struct RoomSession {
     invites: BTreeMap<[u8; 16], PendingInvite>,
     /// Member, manual invites: the invite we answer.
     my_invite: Option<Invite>,
+    /// Member, manual invites: the reply we made (for the "could not connect" reason).
+    my_reply: Option<Reply>,
     /// Member, manual invites: end if the host has not admitted us by then.
     admit_deadline: Option<i64>,
 }
@@ -517,8 +546,8 @@ impl RoomSession {
         for data in inv.signals() {
             out.push(Output::RemoteSignal { peer: id, data });
         }
-        let left_secs = inv.expires_unix.saturating_sub(unix(clock));
-        s.admit_deadline = Some(now + (left_secs as i64 + 120) * 1_000_000);
+        // Relative to when we got the invite: the host's clock is never compared with ours.
+        s.admit_deadline = Some(now + (i64::from(inv.ttl_secs) + 120) * 1_000_000);
         out.push(Output::Ui(RoomUi::Link {
             member: None,
             state: LinkState::Connecting,
@@ -570,6 +599,7 @@ impl RoomSession {
             invites: BTreeMap::new(),
             my_invite: None,
             admit_deadline: None,
+            my_reply: None,
         }
     }
 
@@ -1276,7 +1306,7 @@ impl RoomSession {
                     }));
                 }
             }
-            TransportEvent::Open { peer, info } => self.on_open(now, peer, info, out),
+            TransportEvent::Open { peer, info } => self.on_open(clock, peer, info, out),
             TransportEvent::Frame { peer, data, .. } => self.on_frame(clock, peer, data, out),
             TransportEvent::Interrupted { peer, diag } => {
                 let Some(l) = self.links.get_mut(&peer) else {
@@ -1347,6 +1377,7 @@ impl RoomSession {
                     }
                 }
             }
+            TransportEvent::IceState { peer, ice } => self.on_ice_state(now, peer, ice, out),
             TransportEvent::Closed { peer, reason } => {
                 if !self.links.contains_key(&peer) {
                     return;
@@ -1371,7 +1402,11 @@ impl RoomSession {
         }
     }
 
-    fn on_open(&mut self, now: i64, peer: PeerId, info: PeerInfo, out: &mut Vec<Output>) {
+    fn on_open(&mut self, clock: Clock, peer: PeerId, info: PeerInfo, out: &mut Vec<Output>) {
+        let now = clock.mono_us;
+        if let Some(l) = self.links.get_mut(&peer) {
+            l.connect_deadline = None;
+        }
         let is_host_link = Some(peer) == self.host_link;
         let (Some(local), Some(remote)) = (
             info.local_fingerprint.clone(),
@@ -1439,6 +1474,23 @@ impl RoomSession {
         } else {
             // Not our host link and we are not the host: a stale link.
             self.close_link_now(peer, out);
+            return;
+        }
+        // Auth messages that arrived before the open (see Link::early_auth).
+        let early = self
+            .links
+            .get_mut(&peer)
+            .map(|l| std::mem::take(&mut l.early_auth))
+            .unwrap_or_default();
+        if !early.is_empty() {
+            tracing::info!(
+                link = peer,
+                n = early.len(),
+                "replaying auth messages that came before the open"
+            );
+        }
+        for m in early {
+            self.on_auth(clock, peer, m, out);
         }
     }
 
@@ -1493,6 +1545,9 @@ impl RoomSession {
                                 reason: RejectReason::Version,
                             };
                             self.send_room(peer, &reject, out);
+                            out.push(Output::Ui(RoomUi::Error(
+                                "The other side runs a different version of SyncWatch: someone could not join. Both of you need the same version.".into(),
+                            )));
                         }
                         return;
                     }
@@ -1558,6 +1613,15 @@ impl RoomSession {
             LinkAuth::Member(m) => {
                 let step = m.on_msg(msg);
                 self.on_member_step(now, peer, step, out);
+            }
+            LinkAuth::Pending if !l.open => {
+                if l.early_auth.len() < 8 {
+                    tracing::info!(
+                        link = peer,
+                        "auth message before the link opened here: kept for the open"
+                    );
+                    l.early_auth.push(msg);
+                }
             }
             LinkAuth::Pending | LinkAuth::Done => {}
         }
@@ -1770,7 +1834,7 @@ impl RoomSession {
             }
             Action::CreateInvite { for_member } => self.create_invite(clock, for_member, out),
             Action::SubmitReply(text) => self.submit_reply(clock, &text, out),
-            Action::Admit(id) => self.admit(&id, out),
+            Action::Admit(id) => self.admit(clock.mono_us, &id, out),
             Action::Refuse(id) => self.refuse_or_remove(&id, false, out),
             Action::RemoveInvite(id) => self.refuse_or_remove(&id, true, out),
             Action::Ui(UiAction::MakeHost(_)) if self.is_manual() => {
@@ -1979,15 +2043,27 @@ impl RoomSession {
             );
             l.manual_words = Some(words);
             let reply = Reply {
+                app_version: invite::app_version(),
                 protocol: syncwatch_protocol::PROTOCOL_VERSION,
                 invite_id: inv.invite_id,
                 member: me,
                 display_name: self.cfg.display_name.clone(),
+                relay_only: self.cfg.ice.relay_only,
                 sdp,
                 candidates: cands,
             };
             let text = reply.encode(&self.cfg.key);
-            tracing::info!(chars = text.len(), "reply ready");
+            let (host_c, srflx, relay, _) = reply_types(&reply.sdp, &reply.candidates);
+            tracing::info!(
+                chars = text.len(),
+                host = host_c,
+                srflx,
+                relay,
+                relay_only = reply.relay_only,
+                host_version = %inv.app_version,
+                "reply ready"
+            );
+            self.my_reply = Some(reply);
             out.push(Output::Ui(RoomUi::Reply { text, words }));
             out.push(Output::Ui(RoomUi::Verification {
                 member: None,
@@ -1999,22 +2075,30 @@ impl RoomSession {
                 return;
             };
             let inv = Invite {
+                app_version: invite::app_version(),
                 protocol: syncwatch_protocol::PROTOCOL_VERSION,
                 room_id: self.room_id,
                 invite_id: id,
                 host: self.cfg.key.public(),
                 room_name: self.room_name.clone(),
                 password: self.password.is_some(),
-                expires_unix: p.expires_unix,
+                ttl_secs: p.ttl_secs,
+                relay_only: self.cfg.ice.relay_only,
                 for_member: p.for_member.map(|(_, i)| i),
                 sdp,
                 candidates: cands,
             };
+            p.sent = Some((inv.sdp.clone(), inv.candidates.clone()));
             p.local_fp = crate::sdp::dtls_fingerprint(&inv.sdp);
             let text = inv.encode(&self.cfg.key);
+            let (host_c, srflx, relay, _) = reply_types(&inv.sdp, &inv.candidates);
             tracing::info!(
                 chars = text.len(),
                 candidates = inv.candidates.len(),
+                host = host_c,
+                srflx,
+                relay,
+                relay_only = inv.relay_only,
                 "invite ready"
             );
             p.text = Some(text);
@@ -2033,6 +2117,7 @@ impl RoomSession {
             .invites
             .iter()
             .map(|(id, p)| InviteView {
+                reason: p.reason.clone(),
                 id: invite::hex16(id),
                 status: p.state.text(),
                 text: p
@@ -2109,6 +2194,9 @@ impl RoomSession {
                 local_fp: None,
                 reply: None,
                 words: None,
+                reason: None,
+                sent: None,
+                ttl_secs: u32::try_from(ttl).unwrap_or(u32::MAX),
             },
         );
         out.push(Output::CreatePeer {
@@ -2170,7 +2258,7 @@ impl RoomSession {
         Ok(())
     }
 
-    fn admit(&mut self, id: &str, out: &mut Vec<Output>) {
+    fn admit(&mut self, now: i64, id: &str, out: &mut Vec<Output>) {
         let Some(id) = parse_hex16(id) else {
             return;
         };
@@ -2189,8 +2277,9 @@ impl RoomSession {
         if let Some(l) = self.links.get_mut(&link) {
             l.expect_fp = r.fingerprint();
             l.manual_words = words;
+            l.connect_deadline = Some(now + CONNECT_WAIT_US);
         }
-        tracing::info!(id = %short_id(&r.member), "member admitted");
+        tracing::info!(id = %short_id(&r.member), relay_only = r.relay_only, member_version = %r.app_version, "member admitted");
         for data in r.signals() {
             out.push(Output::RemoteSignal { peer: link, data });
         }
@@ -2304,6 +2393,15 @@ impl RoomSession {
                 self.close_link_now(id, out);
             }
         }
+        let timed_out: Vec<PeerId> = self
+            .links
+            .iter()
+            .filter(|(_, l)| !l.open && l.connect_deadline.is_some_and(|d| now >= d))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in timed_out {
+            self.connect_failed(id, false, out);
+        }
         if let Some(d) = self.admit_deadline
             && now >= d
             && !self.joined_once
@@ -2311,6 +2409,75 @@ impl RoomSession {
         {
             self.end_now(EndReason::NotAdmitted, out);
         }
+    }
+
+    /// Manual invites: ICE state changes. The member's own checks fail while it waits for the
+    /// host (the host answers them only after Admit), so a member link that never opened is
+    /// kept; when the host's checks arrive (failed/disconnected -> checking) the connect
+    /// deadline starts. A fresh "failed" after that, or on the host after Admit, ends the
+    /// attempt with a reason.
+    fn on_ice_state(&mut self, now: i64, peer: PeerId, ice: String, out: &mut Vec<Output>) {
+        let manual = self.is_manual();
+        let is_host_link = Some(peer) == self.host_link;
+        let Some(l) = self.links.get_mut(&peer) else {
+            return;
+        };
+        let prev = std::mem::replace(&mut l.ice, ice.clone());
+        if !manual || l.open {
+            return;
+        }
+        if is_host_link {
+            let host_started =
+                matches!(prev.as_str(), "failed" | "disconnected") && ice == "checking";
+            if host_started && l.connect_deadline.is_none() && !self.joined_once {
+                tracing::info!(link = peer, "the host started connecting");
+                l.connect_deadline = Some(now + CONNECT_WAIT_US);
+            } else if ice == "failed" && l.connect_deadline.is_some() {
+                self.connect_failed(peer, true, out);
+            }
+        } else if ice == "failed" && l.connect_deadline.is_some() {
+            self.connect_failed(peer, true, out);
+        }
+    }
+
+    /// Manual invites: the connection could not be made. Host: the invite fails with a reason.
+    /// Member: the attempt ends with the reason.
+    fn connect_failed(&mut self, peer: PeerId, ice_failed: bool, out: &mut Vec<Output>) {
+        let is_host_link = Some(peer) == self.host_link;
+        if is_host_link {
+            let (Some(inv), Some(reply)) = (self.my_invite.as_ref(), self.my_reply.as_ref()) else {
+                return;
+            };
+            let reason = connect_reason(
+                (&reply.sdp, &reply.candidates, reply.relay_only),
+                (&inv.sdp, &inv.candidates, inv.relay_only),
+                ice_failed,
+            );
+            tracing::warn!(link = peer, %reason, "could not connect to the host");
+            if self.ending.is_none() && !self.joined_once {
+                self.end_now(EndReason::ConnectFailed { reason }, out);
+            }
+            return;
+        }
+        let Some(id) = self.links.get(&peer).and_then(|l| l.invite_id) else {
+            return;
+        };
+        let Some(p) = self.invites.get_mut(&id) else {
+            return;
+        };
+        let (Some((sdp, cands)), Some(reply)) = (p.sent.as_ref(), p.reply.as_ref()) else {
+            return;
+        };
+        let reason = connect_reason(
+            (sdp, cands, self.cfg.ice.relay_only),
+            (&reply.sdp, &reply.candidates, reply.relay_only),
+            ice_failed,
+        );
+        tracing::warn!(link = peer, %reason, "could not connect to the member");
+        p.state = InvState::Failed;
+        p.reason = Some(reason);
+        self.close_link_now(peer, out);
+        self.publish_invites(out);
     }
 
     /// Member, manual invites: the link to the host is gone for good.
@@ -2324,5 +2491,100 @@ impl RoomSession {
         } else {
             self.end_now(EndReason::NotAdmitted, out);
         }
+    }
+}
+
+/// Candidate types of an offer/answer plus its separate candidates: (host, srflx, relay, prflx).
+fn reply_types(sdp: &str, cands: &[Candidate]) -> (usize, usize, usize, usize) {
+    let mut sum = crate::sdp::candidate_types(sdp);
+    for c in cands {
+        let (h, s, r, p) = crate::sdp::candidate_types(&c.candidate);
+        sum = (sum.0 + h, sum.1 + s, sum.2 + r, sum.3 + p);
+    }
+    sum
+}
+
+/// Why a manual-invite connection could not be made, in plain words, from what each side's
+/// text carried. `mine` and `theirs` are (sdp, candidates, relay_only). No addresses.
+pub(crate) fn connect_reason(
+    mine: (&str, &[Candidate], bool),
+    theirs: (&str, &[Candidate], bool),
+    ice_failed: bool,
+) -> String {
+    let (_, my_srflx, my_relay, _) = reply_types(mine.0, mine.1);
+    let (_, their_srflx, their_relay, _) = reply_types(theirs.0, theirs.1);
+    let how = if ice_failed {
+        "every network check between you failed"
+    } else {
+        "the connection did not open within 45 seconds"
+    };
+    if their_relay == 0 && their_srflx == 0 {
+        return format!(
+            "{how}. The other side's text has no public or relay address (only local network \
+             addresses), so it can only work on the same network: their relay (Metered) setup \
+             may not be working. Ask them to test it in Settings > Connection, then make a new invite."
+        );
+    }
+    if my_relay == 0 && my_srflx == 0 {
+        return format!(
+            "{how}. Your text has no public or relay address: test your relay setup in \
+             Settings > Connection, then make a new invite."
+        );
+    }
+    if my_relay == 0 || their_relay == 0 {
+        return format!(
+            "{how}. {} has no relay address, and a direct connection was not possible (a \
+             firewall or a strict router). Check the relay setup in Settings > Connection, then \
+             make a new invite.",
+            if my_relay == 0 {
+                "Your text"
+            } else {
+                "The other side's text"
+            }
+        );
+    }
+    let relay_note = if mine.2 || theirs.2 {
+        " (Always use relay is on)"
+    } else {
+        ""
+    };
+    format!(
+        "{how}{relay_note}, even through the relay. A firewall may block the relay ports, or the \
+         relay credentials expired. Make a new invite; if it keeps failing, test the connection \
+         in Settings > Connection on both computers."
+    )
+}
+
+#[cfg(test)]
+mod connect_reason_tests {
+    use super::*;
+
+    fn c(typ: &str) -> Candidate {
+        Candidate {
+            candidate: format!("candidate:1 1 udp 1 192.0.2.1 5000 typ {typ}"),
+            mid: Some("0".into()),
+            mline: Some(0),
+        }
+    }
+
+    #[test]
+    fn reasons_name_the_side_that_lacks_addresses() {
+        let all = [c("host"), c("srflx"), c("relay")];
+        let host_only = [c("host")];
+        let r = connect_reason(("v=0", &all, false), ("v=0", &host_only, false), true);
+        assert!(
+            r.contains("other side's text has no public or relay address"),
+            "{r}"
+        );
+        assert!(r.starts_with("every network check between you failed"));
+        let r = connect_reason(("v=0", &host_only, false), ("v=0", &all, false), false);
+        assert!(
+            r.contains("Your text has no public or relay address"),
+            "{r}"
+        );
+        assert!(r.starts_with("the connection did not open within 45 seconds"));
+        let r = connect_reason(("v=0", &all, true), ("v=0", &all, true), true);
+        assert!(r.contains("Always use relay is on"), "{r}");
+        assert!(!r.contains("192.0.2.1"), "no addresses in reasons");
     }
 }

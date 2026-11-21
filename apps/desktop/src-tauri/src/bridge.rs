@@ -374,6 +374,7 @@ impl Bridge {
             BridgeEvent::Ready => tracing::info!("bridge ready"),
             BridgeEvent::Pong { .. } => self.lock().bridge_watch.on_pong(now),
             BridgeEvent::LocalSignal { peer, data } => {
+                log_local_signal(peer, &data);
                 self.emit(TransportEvent::LocalSignal { peer, data })
             }
             BridgeEvent::Open {
@@ -404,9 +405,23 @@ impl Bridge {
                 ice,
                 connection,
             } => {
-                if let Some(p) = self.lock().peers.get_mut(&peer) {
-                    p.ice = ice;
-                    p.connection = connection;
+                let changed = {
+                    let mut g = self.lock();
+                    match g.peers.get_mut(&peer) {
+                        Some(p) => {
+                            let ice_changed = p.ice != ice;
+                            if ice_changed || p.connection != connection {
+                                tracing::info!(peer, ice = %ice, connection = %connection, "peer state");
+                            }
+                            p.ice = ice.clone();
+                            p.connection = connection;
+                            ice_changed
+                        }
+                        None => false,
+                    }
+                };
+                if changed {
+                    self.emit(TransportEvent::IceState { peer, ice });
                 }
             }
             BridgeEvent::Buffered { peer, rx, buffered } => {
@@ -513,6 +528,23 @@ pub fn bridge_in(
         bridge.on_frame(bytes);
     }
     Ok(())
+}
+
+fn log_local_signal(peer: PeerId, data: &syncwatch_protocol::signaling::SignalData) {
+    use syncwatch_protocol::signaling::SignalData as S;
+    let (kind, text) = match data {
+        S::Offer { sdp } => ("offer", sdp.as_str()),
+        S::Answer { sdp } => ("answer", sdp.as_str()),
+        S::Candidate { candidate, .. } => ("candidate", candidate.as_str()),
+        S::EndOfCandidates => {
+            tracing::info!(peer, "local candidates complete");
+            return;
+        }
+    };
+    let (host, srflx, relay, prflx) = syncwatch_net::sdp::candidate_types(text);
+    if kind != "candidate" || host + srflx + relay + prflx > 0 {
+        tracing::info!(peer, kind, host, srflx, relay, prflx, "local signal");
+    }
 }
 
 #[cfg(test)]

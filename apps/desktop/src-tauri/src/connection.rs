@@ -206,7 +206,7 @@ impl ConnectionManager {
     }
 
     pub fn dev_bypass() -> bool {
-        cfg!(debug_assertions)
+        crate::updater::TEST_BUILD
             && std::env::var("SYNCWATCH_DEV_BYPASS_CONNECTION").as_deref() == Ok("1")
     }
 
@@ -410,7 +410,9 @@ impl ConnectionManager {
                         self.remember_good(&s);
                         Some((s, None))
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        // FetchError holds only a class and an HTTP status: no URL, no key.
+                        tracing::warn!(error = ?e, reason = %e, "room relay servers: Metered fetch failed");
                         let lg: LastGood =
                             serde_json::from_slice(&self.last_good.load().ok()??).ok()?;
                         Some((lg.servers, Some(Warning::UsingCachedServers)))

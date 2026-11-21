@@ -286,6 +286,10 @@ pub struct RejectRow {
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagDto {
+    /// "Always use relay" for this room (what the invite or reply carries).
+    relay_only: bool,
+    /// How many ICE servers this room uses (no addresses).
+    ice_servers: usize,
     signaling_host: String,
     signaling_connected: bool,
     signaling_reconnects: u32,
@@ -357,6 +361,8 @@ pub struct RoomStateDto {
     ended: Option<EndReason>,
     /// The member typed a password but the room has none (it was ignored).
     password_ignored: bool,
+    /// The relay servers could not be refreshed from Metered; the saved ones are tried.
+    relay_warning: Option<String>,
     diag: DiagDto,
     /// The room's current media epoch (chat chips of older epochs are not seekable).
     media_epoch: u64,
@@ -1049,11 +1055,24 @@ fn reset_room_scope(player: &dyn Player, m: &RoomManager, ended: Option<EndReaso
         *g = None;
     }
     if let Ok(mut g) = m.state.lock() {
+        // Nothing from the room survives except why it ended and the connection diagnostics
+        // (link and ICE states, events: no chat, no media, no addresses) for Copy diagnostics.
+        let diag = std::mem::take(&mut g.diag);
+        let relay_warning = g.relay_warning.take();
         *g = RoomStateDto {
             ended,
+            diag,
+            relay_warning,
             ..RoomStateDto::default()
         };
     }
+}
+
+/// The app version (Tauri config) for the About section and Copy diagnostics. A command
+/// instead of Tauri's app plugin: the main window has no `core:app` permission.
+#[tauri::command]
+pub fn app_version(app: AppHandle) -> String {
+    app.package_info().version.to_string()
 }
 
 impl RoomManager {
@@ -1124,11 +1143,18 @@ fn clock(epoch: Instant) -> Clock {
 
 /// ICE servers for a room: fresh credentials on every create/join (spec section 5).
 /// Debug builds: SYNCWATCH_DEV_ICE=none|coturn skips Metered (no quota) for local tests.
-pub async fn session_ice(app: &AppHandle) -> Result<IceConfig, String> {
-    if cfg!(debug_assertions) {
+/// The text shown in the room when fresh relay servers could not be fetched for it.
+pub const CACHED_RELAY_WARNING: &str = "Could not refresh the relay servers from Metered; the saved ones may have expired. SyncWatch tries them anyway: if nobody can connect, check Settings > Connection and try again.";
+
+/// ICE servers for a room, plus a warning when the saved (possibly expired) servers are used.
+pub async fn session_ice_with_warning(
+    app: &AppHandle,
+) -> Result<(IceConfig, Option<String>), String> {
+    // Debug and test builds (the Sandbox room test has no relay setup): no ICE servers.
+    if crate::updater::TEST_BUILD {
         match std::env::var("SYNCWATCH_DEV_ICE").as_deref() {
-            Ok("none") => return Ok(IceConfig::default()),
-            Ok("coturn") => return Ok(crate::netlab::coturn_ice()),
+            Ok("none") => return Ok((IceConfig::default(), None)),
+            Ok("coturn") => return Ok((crate::netlab::coturn_ice(), None)),
             _ => {}
         }
     }
@@ -1140,25 +1166,31 @@ pub async fn session_ice(app: &AppHandle) -> Result<IceConfig, String> {
     let Some((servers, warning)) = m.servers_for_session().await else {
         return Err("Your connection is not set up. Open Settings > Connection.".into());
     };
-    if warning.is_some() {
-        tracing::warn!("using the last good relay servers (Metered unreachable)");
-    }
+    let warning = warning.map(|_| {
+        // Metered's credentials can have a hard expiry (expiryInSeconds), so a saved copy may
+        // no longer work: say so, try anyway, and log the outcome when the room connects.
+        tracing::warn!("using the saved relay servers: fresh ones could not be fetched");
+        CACHED_RELAY_WARNING.to_owned()
+    });
     for s in &servers {
         for v in [&s.username, &s.credential].into_iter().flatten() {
             crate::logging::register_secret(v);
         }
     }
-    Ok(IceConfig {
-        ice_servers: servers
-            .iter()
-            .map(|s| IceServerJs {
-                urls: s.urls.iter().map(|u| u.to_string()).collect(),
-                username: s.username.clone(),
-                credential: s.credential.clone(),
-            })
-            .collect(),
-        relay_only,
-    })
+    Ok((
+        IceConfig {
+            ice_servers: servers
+                .iter()
+                .map(|s| IceServerJs {
+                    urls: s.urls.iter().map(|u| u.to_string()).collect(),
+                    username: s.username.clone(),
+                    credential: s.credential.clone(),
+                })
+                .collect(),
+            relay_only,
+        },
+        warning,
+    ))
 }
 
 enum Mode {
@@ -1261,7 +1293,7 @@ async fn start(app: AppHandle, name: String, mode: Mode) -> Result<EntryOutcome,
     if name.is_empty() {
         return Err("Enter a display name.".into());
     }
-    let ice = session_ice(&app).await?;
+    let (ice, relay_warning) = session_ice_with_warning(&app).await?;
     let (handshake, url) = handshake_for(&app);
     if matches!(mode, Mode::Join { .. }) && url.is_none() {
         return Err("Rooms are joined with an invite: paste the invite the host sent you.".into());
@@ -1321,6 +1353,7 @@ async fn start(app: AppHandle, name: String, mode: Mode) -> Result<EntryOutcome,
             DriveIds {
                 url: url.unwrap_or_default(),
                 session_id,
+                relay_warning,
             },
             chans,
         )
@@ -1365,6 +1398,7 @@ async fn recv_sig(
 struct DriveIds {
     url: String,
     session_id: u32,
+    relay_warning: Option<String>,
 }
 
 /// The driver's receivers.
@@ -1420,7 +1454,11 @@ async fn drive(
     mut ch: Chans,
 ) -> Option<EndReason> {
     let manual = cfg.handshake.is_manual();
-    let DriveIds { url, session_id } = ids;
+    let DriveIds {
+        url,
+        session_id,
+        relay_warning,
+    } = ids;
     let epoch = Instant::now();
     let rooms_cache = app.state::<RoomManager>().rooms_cache.clone();
     let mut rt = Rt {
@@ -1446,6 +1484,22 @@ async fn drive(
     rt.mirror.s.session_id = session_id;
     rt.mirror.t0 = Some(epoch);
     rt.mirror.s.handshake = if manual { "manual" } else { "signaling" };
+    rt.mirror.s.diag.relay_only = cfg.ice.relay_only;
+    rt.mirror.s.diag.ice_servers = cfg.ice.ice_servers.len();
+    rt.mirror.event(format!(
+        "relay servers: {} ({}), always use relay: {}",
+        cfg.ice.ice_servers.len(),
+        if relay_warning.is_some() {
+            "saved copy"
+        } else {
+            "fresh"
+        },
+        cfg.ice.relay_only
+    ));
+    if let Some(w) = relay_warning {
+        rt.mirror.toast(w.clone());
+        rt.mirror.s.relay_warning = Some(w);
+    }
     if manual {
         rt.mirror.event(format!(
             "handshake: {}",
@@ -1974,7 +2028,7 @@ fn pump_uploads(rt: &mut Rt, session: &RoomSession) {
 }
 /// Debug builds: SYNCWATCH_DEV_SOAK_FILE receives banner counters (scripts/dev/two-windows.ps1).
 fn write_soak(mirror: &Mirror, epoch: Instant, done: bool) {
-    if !cfg!(debug_assertions) {
+    if !crate::updater::TEST_BUILD {
         return;
     }
     // An empty value (the dev script sets it for every window) means "no soak file".
@@ -2270,15 +2324,13 @@ pub struct InvitePreview {
     /// A short form of the host's identity (the same on every invite from that host).
     host_id: String,
     password: bool,
-    expires_unix: u64,
+    /// How long the host keeps the invite open (from when it was made; no clocks compared).
+    ttl_mins: u32,
+    /// The host's SyncWatch version.
+    host_version: String,
+    /// The host has Always use relay on.
+    relay_only: bool,
     reinvite: bool,
-}
-
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// How rooms are joined in this build: "manual" (invites; always in release builds) or
@@ -2294,12 +2346,14 @@ pub fn room_handshake(app: AppHandle) -> &'static str {
 /// Checks a pasted invite (no network): a friendly error, or what the dialog shows.
 #[tauri::command]
 pub fn invite_preview(text: String) -> Result<InvitePreview, String> {
-    let inv = Invite::decode(&text, now_unix()).map_err(|e| e.to_string())?;
+    let inv = Invite::decode(&text).map_err(|e| e.to_string())?;
     Ok(InvitePreview {
         room_name: inv.room_name.clone(),
         host_id: syncwatch_net::auth::short_id(&inv.host),
         password: inv.password,
-        expires_unix: inv.expires_unix,
+        ttl_mins: inv.ttl_secs.div_ceil(60),
+        host_version: inv.app_version.clone(),
+        relay_only: inv.relay_only,
         reinvite: inv.for_member.is_some(),
     })
 }
@@ -2312,7 +2366,7 @@ pub async fn room_join_invite(
     invite: String,
     password: Option<String>,
 ) -> Result<EntryOutcome, String> {
-    let inv = Invite::decode(&invite, now_unix()).map_err(|e| e.to_string())?;
+    let inv = Invite::decode(&invite).map_err(|e| e.to_string())?;
     if let Some(me) = inv.for_member
         && me != app.state::<RoomManager>().key.public()
     {
@@ -2372,6 +2426,10 @@ pub async fn room_join(
     code: String,
     password: Option<String>,
 ) -> Result<EntryOutcome, String> {
+    // Builds without a signaling server (all release builds) only join with invites.
+    if handshake_for(&app).1.is_none() {
+        return Err("Rooms are joined with an invite: paste the invite the host sent you.".into());
+    }
     let Some(room) = normalize_room_code(&code) else {
         return Err(
             "Room codes have 8 characters (letters and digits, no 0, 1, I, L or O).".into(),
@@ -2812,7 +2870,7 @@ fn dev_shared_file() -> Option<PathBuf> {
 /// Debug builds: the host publishes a second room code for the scenario.
 #[tauri::command]
 pub fn dev_scenario_share(code: String) {
-    if cfg!(debug_assertions)
+    if crate::updater::TEST_BUILD
         && normalize_room_code(&code).is_some()
         && let Some(p) = dev_shared_file()
     {
@@ -2823,7 +2881,7 @@ pub fn dev_scenario_share(code: String) {
 /// Debug builds: the second room code, once the host published it.
 #[tauri::command]
 pub fn dev_scenario_shared() -> Option<String> {
-    if !cfg!(debug_assertions) {
+    if !crate::updater::TEST_BUILD {
         return None;
     }
     std::fs::read_to_string(dev_shared_file()?)
@@ -2833,7 +2891,7 @@ pub fn dev_scenario_shared() -> Option<String> {
 
 #[tauri::command]
 pub fn dev_scenario() -> Option<DevScenario> {
-    if !cfg!(debug_assertions) {
+    if !crate::updater::TEST_BUILD {
         return None;
     }
     let name = std::env::var("SYNCWATCH_DEV_SCENARIO")
@@ -2873,7 +2931,7 @@ pub fn dev_scenario() -> Option<DevScenario> {
 /// Debug builds: drop this member's link to the host to force a reconnect (scenario hook).
 #[tauri::command]
 pub fn dev_reconnect(m: State<'_, RoomManager>) -> Result<(), String> {
-    if !cfg!(debug_assertions) {
+    if !crate::updater::TEST_BUILD {
         return Err("debug builds only".into());
     }
     m.send(Cmd::DevReconnect)
@@ -2884,7 +2942,7 @@ pub fn dev_reconnect(m: State<'_, RoomManager>) -> Result<(), String> {
 /// main window is minimized and whether the video window is visible.
 #[tauri::command]
 pub fn dev_window(app: AppHandle, op: String) -> Result<(bool, bool), String> {
-    if !cfg!(debug_assertions) {
+    if !crate::updater::TEST_BUILD {
         return Err("debug builds only".into());
     }
     let w = app.get_webview_window("main").ok_or("no main window")?;
@@ -2901,7 +2959,7 @@ pub fn dev_window(app: AppHandle, op: String) -> Result<(bool, bool), String> {
 /// Debug builds: appends one result line of the scenario to SYNCWATCH_DEV_SCENARIO_FILE.
 #[tauri::command]
 pub fn dev_scenario_report(line: String) {
-    if !cfg!(debug_assertions) {
+    if !crate::updater::TEST_BUILD {
         return;
     }
     let Ok(path) = std::env::var("SYNCWATCH_DEV_SCENARIO_FILE") else {
@@ -2923,7 +2981,7 @@ pub fn dev_scenario_report(line: String) {
 /// code goes through `$SYNCWATCH_DEV_ROOM_FILE`). Used by scripts/dev/two-windows.ps1 and the
 /// soak test; no mouse or keyboard input involved.
 pub fn dev_autoroom(app: &AppHandle) {
-    if !cfg!(debug_assertions) {
+    if !crate::updater::TEST_BUILD {
         return;
     }
     let Ok(role) = std::env::var("SYNCWATCH_DEV_AUTOROOM") else {
@@ -3077,16 +3135,19 @@ async fn dev_invite_host(app: AppHandle, file: String) {
             let _ = std::fs::remove_file(&reply_path);
             let m = app.state::<RoomManager>();
             let _ = room_invite_reply(m, text);
+            // Admit the invite this reply matched (with a real relay, gathering is slow and a
+            // second request may have produced a newer invite than the one answered).
             for _ in 0..50 {
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                if state(&app)
+                let replied = state(&app)
                     .invites
                     .iter()
-                    .any(|i| &i.id == id && i.status == "replied")
-                {
+                    .find(|i| i.status == "replied")
+                    .map(|i| i.id.clone());
+                if let Some(rid) = replied {
                     let _ =
-                        room_invite_decide(app.state::<RoomManager>(), id.clone(), "admit".into());
-                    tracing::info!(%who, "dev: reply admitted");
+                        room_invite_decide(app.state::<RoomManager>(), rid.clone(), "admit".into());
+                    tracing::info!(%who, same_invite = (&rid == id), "dev: reply admitted");
                     break;
                 }
             }
@@ -3099,7 +3160,7 @@ async fn dev_invite_host(app: AppHandle, file: String) {
 /// (manual invites), the way `room_join` does with a code.
 #[tauri::command]
 pub async fn dev_join_invite(app: AppHandle, name: String) -> Result<EntryOutcome, String> {
-    if !cfg!(debug_assertions) {
+    if !crate::updater::TEST_BUILD {
         return Err("dev only".into());
     }
     let file =
@@ -3135,7 +3196,8 @@ async fn dev_invite_join(
     // Wait until the host's room exists, then ask for an invite.
     let mut text = None;
     for i in 0..600 {
-        if i % 25 == 0 && std::fs::metadata(&want).is_err() {
+        // Ask again only after a minute: a relay invite takes up to ~20 s to gather.
+        if i % 300 == 0 && std::fs::metadata(&want).is_err() {
             let _ = std::fs::write(&want, &who);
         }
         if let Ok(t) = std::fs::read_to_string(&invite_path) {
@@ -3320,13 +3382,16 @@ mod tests {
         let after = m.state.lock().unwrap().clone();
         let empty = RoomStateDto {
             ended: Some(EndReason::RoomClosed),
+            diag: mirror.s.diag.clone(),
             ..RoomStateDto::default()
         };
         assert_eq!(
             serde_json::to_value(&after).unwrap(),
             serde_json::to_value(&empty).unwrap(),
-            "only the end reason is kept"
+            "only the end reason and the connection diagnostics are kept"
         );
+        let text = serde_json::to_string(&after).unwrap();
+        assert!(!text.contains("old.mkv"), "no media name survives");
         // --- room 2 is created in the same process: start() resets again, then a new session.
         reset_room_scope(&player, &m, None);
         let cfg = SessionConfig {

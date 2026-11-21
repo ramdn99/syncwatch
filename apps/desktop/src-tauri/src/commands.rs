@@ -210,6 +210,7 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             tracing::info!(version = %app.package_info().version, "app version");
+            syncwatch_net::invite::set_app_version(&app.package_info().version.to_string());
             syncwatch_ice_config::install_crypto_provider();
             app.manage(crate::connection::ConnectionManager::new(&conn_paths));
             app.manage(crate::prefs::PrefsService::load(&conn_paths));
@@ -339,6 +340,7 @@ pub fn run(paths: AppPaths, libs: NativeLibs) {
             crate::room::dev_reconnect,
             crate::room::dev_scenario_share,
             crate::room::dev_scenario_shared,
+            crate::room::app_version,
             crate::bridge::bridge_attach,
             crate::bridge::bridge_in,
         ]))

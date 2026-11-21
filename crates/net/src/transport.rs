@@ -109,6 +109,11 @@ pub enum TransportEvent {
     Recovered {
         peer: PeerId,
     },
+    /// The ICE connection state changed ("new", "checking", "connected", "failed", ...).
+    IceState {
+        peer: PeerId,
+        ice: String,
+    },
     /// The watchdog gave up on the link; the session layer must renegotiate this peer.
     RestartNeeded {
         peer: PeerId,

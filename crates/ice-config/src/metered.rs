@@ -13,8 +13,11 @@ use std::time::Duration;
 /// The ONLY places a Metered API key may be sent.
 pub const ALLOWED_APEX: &[&str] = &["metered.live", "metered.ca"];
 pub const CREDENTIALS_PATH: &str = "/api/v1/turn/credentials";
-pub const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
-pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Metered's credentials API answered in 5.1 s during the Milestone 9 two-instance test, and
+/// the old 8 s limit made room creation fall back to cached servers on the testers' PCs. One
+/// attempt may take this long; a timeout or network error is retried once (fetch_ice_servers).
+pub const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 const MAX_REDIRECTS: usize = 3;
 
@@ -229,7 +232,32 @@ pub fn interpret_response(status: u16, body: &[u8]) -> Result<Vec<IceServer>, Fe
 }
 
 /// Fetches fresh ICE servers from Metered.
+/// Fetches fresh ICE servers; a timeout or network error is retried once. Logs the duration
+/// and the error class (never the URL, app name or key).
 pub async fn fetch_ice_servers(c: &ApiCredentials) -> Result<Vec<IceServer>, FetchError> {
+    let t0 = std::time::Instant::now();
+    let mut r = fetch_once(c).await;
+    if matches!(
+        r,
+        Err(FetchError::Timeout | FetchError::Refused | FetchError::Offline | FetchError::Dns)
+    ) {
+        tracing::warn!(error = ?r.as_ref().err(), ms = t0.elapsed().as_millis() as u64, "Metered credentials fetch failed; retrying once");
+        r = fetch_once(c).await;
+    }
+    match &r {
+        Ok(s) => tracing::info!(
+            servers = s.len(),
+            ms = t0.elapsed().as_millis() as u64,
+            "Metered credentials fetched"
+        ),
+        Err(e) => {
+            tracing::warn!(error = ?e, ms = t0.elapsed().as_millis() as u64, "Metered credentials fetch failed")
+        }
+    }
+    r
+}
+
+async fn fetch_once(c: &ApiCredentials) -> Result<Vec<IceServer>, FetchError> {
     let url = credentials_url(c).map_err(|error| FetchError::Input { error })?;
     let app = validate_app_name(&c.app).map_err(|error| FetchError::Input { error })?;
     let policy = reqwest::redirect::Policy::custom(move |attempt| {

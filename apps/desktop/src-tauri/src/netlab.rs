@@ -312,6 +312,7 @@ impl Lab {
                 ev = events.recv() => {
                     let Some(ev) = ev else { return Err("transport closed".into()) };
                     match ev {
+                        TransportEvent::IceState { .. } => {}
                         TransportEvent::LocalSignal { data, .. } => {
                             let to = if self.host { Some(peer) } else { None };
                             sig.send(&ClientMsg::Signal { to, data }).await.map_err(|e| e.to_string())?;

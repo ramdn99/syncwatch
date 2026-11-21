@@ -28,7 +28,24 @@ use syncwatch_protocol::signaling::SignalData;
 pub const INVITE_PREFIX: &str = "SWINV1-";
 pub const REPLY_PREFIX: &str = "SWREP1-";
 /// Format version of the invite and reply texts (the room protocol version is inside).
-pub const FORMAT_VERSION: u8 = 1;
+/// 2 (Milestone 9 fixes): app version first in the body, a relative lifetime instead of a
+/// deadline on the host's clock, and the "Always use relay" flag.
+pub const FORMAT_VERSION: u8 = 2;
+
+static APP_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The app sets its real version once at startup (Tauri's package version); it goes into every
+/// invite and reply and into version-mismatch messages.
+pub fn set_app_version(v: &str) {
+    let _ = APP_VERSION.set(v.to_owned());
+}
+
+pub fn app_version() -> String {
+    APP_VERSION
+        .get()
+        .cloned()
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned())
+}
 /// Longest text accepted from the clipboard (before anything else is done with it).
 pub const MAX_TEXT: usize = 16 * 1024;
 /// Longest decompressed body (protects against decompression bombs).
@@ -54,6 +71,9 @@ pub struct Candidate {
 /// The host's invite.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Invite {
+    /// The host's SyncWatch version. FIRST field: a newer or older text format can still be
+    /// read this far to name the other side's version.
+    pub app_version: String,
     /// Room protocol version (`syncwatch_protocol::PROTOCOL_VERSION`).
     pub protocol: u16,
     pub room_id: [u8; 16],
@@ -63,8 +83,12 @@ pub struct Invite {
     pub room_name: String,
     /// The room asks for a password (typed by the member before replying).
     pub password: bool,
-    /// Unix seconds.
-    pub expires_unix: u64,
+    /// How long the host keeps this invite open, in seconds from when it was made. Relative on
+    /// purpose: the member never compares the host's clock with its own; the host enforces the
+    /// expiry on its own clock when the reply arrives.
+    pub ttl_secs: u32,
+    /// The host has "Always use relay" on (its candidates are relay-only).
+    pub relay_only: bool,
     /// A re-invite for a member whose seat is kept: only this identity may reply.
     pub for_member: Option<Identity>,
     pub sdp: String,
@@ -74,10 +98,14 @@ pub struct Invite {
 /// The member's reply to one invite.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reply {
+    /// The member's SyncWatch version (FIRST field, see Invite).
+    pub app_version: String,
     pub protocol: u16,
     pub invite_id: [u8; 16],
     pub member: Identity,
     pub display_name: String,
+    /// The member has "Always use relay" on.
+    pub relay_only: bool,
     pub sdp: String,
     pub candidates: Vec<Candidate>,
 }
@@ -111,11 +139,12 @@ pub enum InviteError {
     #[error("Part of the text is missing or was changed while copying. Copy it again in full.")]
     Damaged,
     #[error(
-        "This was made by a different version of SyncWatch ({0}). Both of you need the same version."
+        "The other side runs a different version of SyncWatch ({0}). Both of you need the same version."
     )]
     Version(String),
     #[error("This text was changed after it was made. Ask for a new one.")]
     Tampered,
+    /// Host only (its own clock): the reply came after the invite's lifetime.
     #[error("This invite has expired. Ask the host for a new invite.")]
     Expired,
     #[error("This invite was already used. Ask the host for a new invite.")]
@@ -136,7 +165,9 @@ impl Invite {
 
     /// Decodes and checks a pasted invite: format, checksum, version, structure, signature and
     /// expiry (`now_unix`).
-    pub fn decode(text: &str, now_unix: u64) -> Result<Self, InviteError> {
+    /// Decodes and checks a pasted invite. No clock is involved: the host alone decides when
+    /// its invite expires (it refuses a late reply).
+    pub fn decode(text: &str) -> Result<Self, InviteError> {
         let t = clean(text)?;
         if t.starts_with(REPLY_PREFIX) {
             return Err(InviteError::ReplyNotInvite);
@@ -144,15 +175,12 @@ impl Invite {
         let s = unwrap(t, INVITE_PREFIX, InviteError::NotAnInvite, KIND_INVITE)?;
         let inv: Invite = postcard::from_bytes(&s.body).map_err(|_| InviteError::Damaged)?;
         if inv.protocol != syncwatch_protocol::PROTOCOL_VERSION {
-            return Err(InviteError::Version(format!("protocol {}", inv.protocol)));
+            return Err(version_error(Some(&inv.app_version)));
         }
         if !verify(&inv.host, &signed_hash(KIND_INVITE, &s.body), &s.sig) {
             return Err(InviteError::Tampered);
         }
         inv.check_structure()?;
-        if now_unix > inv.expires_unix {
-            return Err(InviteError::Expired);
-        }
         Ok(inv)
     }
 
@@ -195,7 +223,7 @@ impl Reply {
         let s = unwrap(t, REPLY_PREFIX, InviteError::NotAReply, KIND_REPLY)?;
         let r: Reply = postcard::from_bytes(&s.body).map_err(|_| InviteError::Damaged)?;
         if r.protocol != syncwatch_protocol::PROTOCOL_VERSION {
-            return Err(InviteError::Version(format!("protocol {}", r.protocol)));
+            return Err(version_error(Some(&r.app_version)));
         }
         if !verify(&r.member, &signed_hash(KIND_REPLY, &s.body), &s.sig) {
             return Err(InviteError::Tampered);
@@ -319,7 +347,7 @@ fn unwrap(t: &str, prefix: &str, wrong: InviteError, kind: u8) -> Result<Signed,
     let Some(rest) = t.strip_prefix(prefix) else {
         // An older or newer text format of ours.
         if t.starts_with("SWINV") || t.starts_with("SWREP") {
-            return Err(InviteError::Version("text format".into()));
+            return Err(version_error(None));
         }
         return Err(wrong);
     };
@@ -339,12 +367,27 @@ fn unwrap(t: &str, prefix: &str, wrong: InviteError, kind: u8) -> Result<Signed,
         .map_err(|_| InviteError::Damaged)?;
     let s: Signed = postcard::from_bytes(&raw).map_err(|_| InviteError::Damaged)?;
     if s.format != FORMAT_VERSION {
-        return Err(InviteError::Version(format!("text format {}", s.format)));
+        // Formats from 2 on start the body with the app version: name it if we can.
+        let theirs = (s.format >= 2)
+            .then(|| postcard::take_from_bytes::<String>(&s.body).ok())
+            .flatten()
+            .map(|(v, _)| v)
+            .filter(|v| v.len() <= 32 && !has_control(v));
+        return Err(version_error(theirs.as_deref()));
     }
     if s.kind != kind {
         return Err(InviteError::Damaged);
     }
     Ok(s)
+}
+
+/// "theirs: X, yours: Y" (or "an older or newer one" when theirs cannot be read).
+fn version_error(theirs: Option<&str>) -> InviteError {
+    let ours = app_version();
+    InviteError::Version(match theirs {
+        Some(t) => format!("theirs: {t}, yours: {ours}"),
+        None => format!("theirs: an older or newer one, yours: {ours}"),
+    })
 }
 
 fn has_control(s: &str) -> bool {
@@ -399,13 +442,15 @@ mod tests {
 
     fn invite(host: &IdentityKey) -> Invite {
         Invite {
+            app_version: "0.1.0".into(),
             protocol: syncwatch_protocol::PROTOCOL_VERSION,
             room_id: [7; 16],
             invite_id: [9; 16],
             host: host.public(),
             room_name: "Movie night".into(),
             password: false,
-            expires_unix: 2_000_000_000,
+            ttl_secs: 600,
+            relay_only: false,
             for_member: None,
             sdp: SDP_OFFER.into(),
             candidates: cands(6),
@@ -414,10 +459,12 @@ mod tests {
 
     fn reply(member: &IdentityKey) -> Reply {
         Reply {
+            app_version: "0.1.0".into(),
             protocol: syncwatch_protocol::PROTOCOL_VERSION,
             invite_id: [9; 16],
             member: member.public(),
             display_name: "Mo".into(),
+            relay_only: true,
             sdp: SDP_OFFER.replace("AA:BB", "11:22"),
             candidates: cands(4),
         }
@@ -431,10 +478,10 @@ mod tests {
         assert!(text.starts_with(INVITE_PREFIX));
         // A realistic invite stays small enough for any chat app.
         assert!(text.len() < 2_000, "{} chars", text.len());
-        assert_eq!(Invite::decode(&text, 1_900_000_000), Ok(inv.clone()));
+        assert_eq!(Invite::decode(&text), Ok(inv.clone()));
         // Chat apps add quotes, spaces and line breaks.
         let wrapped = format!("  \"{}\n{}\"  ", &text[..60], &text[60..]);
-        assert_eq!(Invite::decode(&wrapped, 1_900_000_000), Ok(inv));
+        assert_eq!(Invite::decode(&wrapped), Ok(inv));
         let m = key(2);
         let r = reply(&m);
         let rt = r.encode(&m);
@@ -443,33 +490,63 @@ mod tests {
     }
 
     #[test]
-    fn expiry_kind_and_version_are_checked() {
+    fn kind_and_version_are_checked_and_no_clock_is_involved() {
         let h = key(1);
         let text = invite(&h).encode(&h);
-        assert_eq!(
-            Invite::decode(&text, 2_000_000_001),
-            Err(InviteError::Expired)
-        );
+        // The member's clock plays no part: the host enforces expiry on its own clock.
+        assert!(Invite::decode(&text).is_ok());
         assert_eq!(Reply::decode(&text), Err(InviteError::InviteNotReply));
         let m = key(2);
         assert_eq!(
-            Invite::decode(&reply(&m).encode(&m), 0),
+            Invite::decode(&reply(&m).encode(&m)),
             Err(InviteError::ReplyNotInvite)
         );
         let mut old = invite(&h);
         old.protocol = syncwatch_protocol::PROTOCOL_VERSION - 1;
+        old.app_version = "0.0.9".into();
+        match Invite::decode(&old.encode(&h)) {
+            Err(InviteError::Version(v)) => assert!(v.contains("theirs: 0.0.9"), "{v}"),
+            other => panic!("{other:?}"),
+        }
+        // Another text format (an older or newer SyncWatch) names its version when it can.
+        let other_format = |format: u8, body: Vec<u8>| {
+            let signed = postcard::to_allocvec(&Signed {
+                format,
+                kind: KIND_INVITE,
+                body,
+                sig: vec![0; 64],
+            })
+            .unwrap();
+            let mut packed = miniz_oxide::deflate::compress_to_vec(&signed, 9);
+            let sum = blake3::hash(&packed);
+            packed.extend_from_slice(&sum.as_bytes()[..CHECKSUM_LEN]);
+            format!(
+                "{INVITE_PREFIX}{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(packed)
+            )
+        };
+        let newer = other_format(3, postcard::to_allocvec(&"0.3.0".to_owned()).unwrap());
+        match Invite::decode(&newer) {
+            Err(InviteError::Version(v)) => assert!(v.contains("theirs: 0.3.0"), "{v}"),
+            other => panic!("{other:?}"),
+        }
+        match Invite::decode(&other_format(1, vec![1, 2, 3])) {
+            Err(e @ InviteError::Version(_)) => {
+                assert!(
+                    e.to_string()
+                        .starts_with("The other side runs a different version of SyncWatch")
+                )
+            }
+            other => panic!("{other:?}"),
+        }
         assert!(matches!(
-            Invite::decode(&old.encode(&h), 0),
+            Invite::decode("SWINV9-abc"),
             Err(InviteError::Version(_))
         ));
-        assert!(matches!(
-            Invite::decode("SWINV9-abc", 0),
-            Err(InviteError::Version(_))
-        ));
-        assert_eq!(Invite::decode("hello", 0), Err(InviteError::NotAnInvite));
-        assert_eq!(Invite::decode("   ", 0), Err(InviteError::Empty));
+        assert_eq!(Invite::decode("hello"), Err(InviteError::NotAnInvite));
+        assert_eq!(Invite::decode("   "), Err(InviteError::Empty));
         assert_eq!(
-            Invite::decode(&"A".repeat(MAX_TEXT + 1), 0),
+            Invite::decode(&"A".repeat(MAX_TEXT + 1)),
             Err(InviteError::TooLong)
         );
     }
@@ -480,7 +557,7 @@ mod tests {
         let text = invite(&h).encode(&h);
         // Cut off: a paste error.
         assert_eq!(
-            Invite::decode(&text[..text.len() - 5], 0),
+            Invite::decode(&text[..text.len() - 5]),
             Err(InviteError::Damaged)
         );
         // One character changed: the checksum catches it.
@@ -488,12 +565,12 @@ mod tests {
         let i = b.len() / 2;
         b[i] = if b[i] == 'A' { 'B' } else { 'A' };
         let one: String = b.into_iter().collect();
-        assert_eq!(Invite::decode(&one, 0), Err(InviteError::Damaged));
+        assert_eq!(Invite::decode(&one), Err(InviteError::Damaged));
         // A careful forger re-encodes a changed body with a valid checksum: the signature fails.
         let mut inv = invite(&h);
         inv.room_name = "Changed".into();
         let forged = re_encode_with_foreign_signature(&inv, &h, &key(3));
-        assert_eq!(Invite::decode(&forged, 0), Err(InviteError::Tampered));
+        assert_eq!(Invite::decode(&forged), Err(InviteError::Tampered));
     }
 
     /// Signs `inv` (claiming host `claimed`) with someone else's key.
@@ -518,24 +595,24 @@ mod tests {
             "{INVITE_PREFIX}{}",
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(packed)
         );
-        assert_eq!(Invite::decode(&text, 0), Err(InviteError::Damaged));
+        assert_eq!(Invite::decode(&text), Err(InviteError::Damaged));
         // No DTLS fingerprint, too many candidates, a control character in the name.
         let mut a = invite(&h);
         a.sdp = "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n".into();
         assert_eq!(
-            Invite::decode(&a.encode(&h), 0),
+            Invite::decode(&a.encode(&h)),
             Err(InviteError::BadConnection)
         );
         let mut b = invite(&h);
         b.candidates = cands(MAX_CANDIDATES + 1);
         assert_eq!(
-            Invite::decode(&b.encode(&h), 0),
+            Invite::decode(&b.encode(&h)),
             Err(InviteError::BadConnection)
         );
         let mut c = invite(&h);
         c.room_name = "bad\u{7}name".into();
         assert_eq!(
-            Invite::decode(&c.encode(&h), 0),
+            Invite::decode(&c.encode(&h)),
             Err(InviteError::BadConnection)
         );
         let m = key(2);
@@ -575,14 +652,14 @@ mod tests {
                 }
             }
             let s = String::from_utf8_lossy(&b);
-            let _ = Invite::decode(&s, 0);
+            let _ = Invite::decode(&s);
             let _ = Reply::decode(&s);
         }
         for len in [0usize, 1, 7, 8, 100, 5000] {
             let junk: String = (0..len)
                 .map(|_| (b'A' + (next() % 26) as u8) as char)
                 .collect();
-            let _ = Invite::decode(&format!("{INVITE_PREFIX}{junk}"), 0);
+            let _ = Invite::decode(&format!("{INVITE_PREFIX}{junk}"));
             let _ = Reply::decode(&format!("{REPLY_PREFIX}{junk}"));
         }
     }

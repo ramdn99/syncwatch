@@ -58,6 +58,11 @@ struct World {
     /// Manual invites: offers and answers are real-looking SDP with an a=fingerprint line,
     /// followed by one candidate and end-of-candidates (as the bridge reports them).
     sdp_mode: bool,
+    /// No network path between the two sides: answers are applied but links never open.
+    no_path: bool,
+    /// The member's Open arrives late: after the host's first frames (the M9 relay race).
+    late_member_open: bool,
+    deferred: Vec<Ev>,
 }
 
 fn cfg(name: &str, seed: u8) -> SessionConfig {
@@ -84,6 +89,9 @@ impl World {
             next_room: 0,
             old_version: None,
             sdp_mode: false,
+            no_path: false,
+            late_member_open: false,
+            deferred: Vec::new(),
         }
     }
 
@@ -148,13 +156,20 @@ impl World {
     /// Delivers queued events until nothing is left.
     fn settle(&mut self) {
         let mut guard = 0;
-        while let Some(ev) = self.queue.pop_front() {
-            guard += 1;
-            assert!(guard < 100_000, "event storm");
-            match ev {
-                Ev::Sig(i, m) => self.input(i, Input::Signaling(m)),
-                Ev::Tr(i, e) => self.input(i, Input::Transport(e)),
+        loop {
+            while let Some(ev) = self.queue.pop_front() {
+                guard += 1;
+                assert!(guard < 100_000, "event storm");
+                match ev {
+                    Ev::Sig(i, m) => self.input(i, Input::Signaling(m)),
+                    Ev::Tr(i, e) => self.input(i, Input::Transport(e)),
+                }
             }
+            if self.deferred.is_empty() {
+                break;
+            }
+            let d = std::mem::take(&mut self.deferred);
+            self.queue.extend(d);
         }
     }
 
@@ -212,6 +227,7 @@ impl World {
                         ));
                         self.gathered(i, peer);
                     }
+                    SignalData::Answer { .. } if self.no_path => {}
                     SignalData::Answer { sdp } => {
                         let sdp = syncwatch_net::sdp::dtls_fingerprint(&sdp).unwrap_or(sdp);
                         // Pair with the answerer that owns this fingerprint.
@@ -240,7 +256,7 @@ impl World {
                                 },
                             },
                         ));
-                        self.queue.push_back(Ev::Tr(
+                        let member_open = Ev::Tr(
                             j,
                             TransportEvent::Open {
                                 peer: q,
@@ -250,7 +266,12 @@ impl World {
                                     relayed: false,
                                 },
                             },
-                        ));
+                        );
+                        if self.late_member_open {
+                            self.deferred.push(member_open);
+                        } else {
+                            self.queue.push_back(member_open);
+                        }
                     }
                     _ => {}
                 },
@@ -1417,10 +1438,6 @@ fn manual_cfg(name: &str, seed: u8) -> SessionConfig {
 }
 
 impl World {
-    fn now_unix(&self) -> u64 {
-        (self.clock().wall_ms / 1000) as u64
-    }
-
     fn host_manual(&mut self, name: &str, seed: u8, password: Option<&str>) -> usize {
         self.sdp_mode = true;
         let (s, outs) = RoomSession::create_manual(
@@ -1473,7 +1490,7 @@ impl World {
         text: &str,
         password: Option<&str>,
     ) -> (usize, String) {
-        let inv = Invite::decode(text, self.now_unix()).expect("a valid invite");
+        let inv = Invite::decode(text).expect("a valid invite");
         let (s, outs) = RoomSession::join_invite(
             manual_cfg(name, seed),
             inv,
@@ -1626,11 +1643,9 @@ fn reused_expired_tampered_and_unknown_replies_are_refused() {
         w.invite_errors(h).last().unwrap(),
         &InviteError::Expired.to_string()
     );
-    // The member side refuses an expired invite too.
-    assert_eq!(
-        Invite::decode(&text2, w.now_unix()),
-        Err(InviteError::Expired)
-    );
+    // The member never compares the host's clock with its own (Milestone 9 fix): the invite
+    // still decodes there, and only the host, on its own clock, refuses the late reply (above).
+    assert!(Invite::decode(&text2).is_ok());
     // A reply for an invite this host never made.
     let mut w2 = World::new();
     let other = w2.host_manual("Other", 9, None);
@@ -1657,7 +1672,7 @@ fn invites_and_replies_carry_no_relay_credentials() {
     let (s, outs) = RoomSession::create_manual(c, None, "Room", w.clock());
     let h = w.push(s, outs);
     let (_id, text) = w.make_invite(h, None);
-    let inv = Invite::decode(&text, w.now_unix()).unwrap();
+    let inv = Invite::decode(&text).unwrap();
     let all = format!("{text} {inv:?}");
     for secret in [
         "FAKE-TURN-USERNAME-1234",
@@ -1676,7 +1691,7 @@ fn password_rooms_with_invites_and_wrong_password_throttling() {
     let mut w = World::new();
     let h = w.host_manual("Hana", 1, Some("s3cret"));
     let (id, text) = w.make_invite(h, None);
-    assert!(Invite::decode(&text, w.now_unix()).unwrap().password);
+    assert!(Invite::decode(&text).unwrap().password);
     let (m, reply) = w.answer("Mo", 2, &text, Some("wrong"));
     w.admit_by_reply(h, &id, &reply);
     assert!(!w.in_room(m));
@@ -1765,4 +1780,151 @@ fn make_host_is_refused_in_invite_rooms() {
     );
     assert!(w.nodes[h].s.is_host());
     assert!(w.in_room(m));
+}
+
+// ---- Milestone 9 fixes: manual-invite connections that wait, time out and say why --------
+
+fn ice(w: &mut World, node: usize, peer: PeerId, state: &str) {
+    w.input(
+        node,
+        Input::Transport(TransportEvent::IceState {
+            peer,
+            ice: state.into(),
+        }),
+    );
+    w.settle();
+}
+
+fn ended(w: &World, i: usize) -> Option<EndReason> {
+    w.nodes[i].ended.clone()
+}
+
+#[test]
+fn the_member_survives_its_own_ice_failure_while_waiting_and_joins_once_admitted() {
+    let mut w = World::new();
+    let h = w.host_manual("Hana", 1, None);
+    let (id, text) = w.make_invite(h, None);
+    let (m, reply) = w.answer("Mo", 2, &text, None);
+    let link = w.host_link_of(m);
+    // The member's own checks fail: the host does not answer them before Admit.
+    ice(&mut w, m, link, "checking");
+    ice(&mut w, m, link, "failed");
+    w.run_for(5 * 60 * 1_000_000);
+    assert!(ended(&w, m).is_none(), "still waiting after 5 minutes");
+    // The host admits; its checks arrive; the link opens.
+    w.admit_by_reply(h, &id, &reply);
+    ice(&mut w, m, link, "checking");
+    w.run_for(2_000_000);
+    assert!(w.in_room(m), "joined after Admit");
+    w.run_for(60 * 1_000_000);
+    assert!(
+        ended(&w, m).is_none(),
+        "no connect deadline fires after the link opened"
+    );
+}
+
+#[test]
+fn the_host_gives_up_45_s_after_admit_with_a_reason() {
+    let mut w = World::new();
+    w.no_path = true;
+    let h = w.host_manual("Hana", 1, None);
+    let (id, text) = w.make_invite(h, None);
+    let (_m, reply) = w.answer("Mo", 2, &text, None);
+    w.admit_by_reply(h, &id, &reply);
+    w.run_for(30 * 1_000_000);
+    assert_eq!(w.invites(h)[0].status, "admitted", "still trying at 30 s");
+    w.run_for(20 * 1_000_000);
+    let v = w.invites(h);
+    assert_eq!(v[0].status, "failed");
+    let reason = v[0].reason.clone().expect("a reason");
+    // The test candidates are local network addresses only.
+    assert!(
+        reason.contains("did not open within 45 seconds"),
+        "{reason}"
+    );
+    assert!(reason.contains("no public or relay address"), "{reason}");
+    assert!(!reason.contains("192.0.2.1"), "no addresses in reasons");
+}
+
+#[test]
+fn the_member_says_why_when_the_host_could_not_connect() {
+    let mut w = World::new();
+    w.no_path = true;
+    let h = w.host_manual("Hana", 1, None);
+    let (id, text) = w.make_invite(h, None);
+    let (m, reply) = w.answer("Mo", 2, &text, None);
+    let link = w.host_link_of(m);
+    ice(&mut w, m, link, "checking");
+    ice(&mut w, m, link, "failed");
+    w.admit_by_reply(h, &id, &reply);
+    // The host's checks arrive (failed -> checking), but nothing opens.
+    ice(&mut w, m, link, "checking");
+    w.run_for(44 * 1_000_000);
+    assert!(ended(&w, m).is_none());
+    w.run_for(2 * 1_000_000);
+    match ended(&w, m) {
+        Some(EndReason::ConnectFailed { reason }) => {
+            assert!(reason.contains("45 seconds"), "{reason}");
+        }
+        other => panic!("expected ConnectFailed, got {other:?}"),
+    }
+    // A fresh ICE failure after the host started ends it at once.
+    let mut w = World::new();
+    w.no_path = true;
+    let h = w.host_manual("Hana", 1, None);
+    let (id, text) = w.make_invite(h, None);
+    let (m, reply) = w.answer("Mo", 2, &text, None);
+    let link = w.host_link_of(m);
+    ice(&mut w, m, link, "failed");
+    w.admit_by_reply(h, &id, &reply);
+    ice(&mut w, m, link, "checking");
+    ice(&mut w, m, link, "failed");
+    assert!(matches!(
+        ended(&w, m),
+        Some(EndReason::ConnectFailed { ref reason }) if reason.starts_with("every network check")
+    ));
+}
+
+#[test]
+fn the_member_clock_does_not_matter() {
+    let mut w = World::new();
+    let h = w.host_manual("Hana", 1, None);
+    let (id, text) = w.make_invite(h, None);
+    // The member's clock is a day ahead of the host's.
+    let inv = Invite::decode(&text).expect("decodes whatever the member's clock says");
+    let mut c = w.clock();
+    c.wall_ms += 24 * 3600 * 1000;
+    let (s, outs) = RoomSession::join_invite(manual_cfg("Mo", 2), inv, None, c);
+    let m = w.push(s, outs);
+    w.run_for(100_000);
+    let reply = w.nodes[m]
+        .ui
+        .iter()
+        .find_map(|u| match u {
+            RoomUi::Reply { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .expect("a reply");
+    w.run_for(60 * 1_000_000);
+    assert!(ended(&w, m).is_none(), "not treated as expired");
+    w.admit_by_reply(h, &id, &reply);
+    w.run_for(2_000_000);
+    assert!(w.in_room(m));
+}
+
+#[test]
+fn the_host_hello_before_the_member_sees_the_open_is_kept_and_answered() {
+    // Over a relay the member's bridge reports "open" after its stats call, so the host's first
+    // auth message can arrive first. It used to be dropped: both sides then waited 30 s and the
+    // member was not admitted (Milestone 9, two release instances, relay + password).
+    for password in [None, Some("zq-pw")] {
+        let mut w = World::new();
+        w.late_member_open = true;
+        let h = w.host_manual("Hana", 1, password);
+        let (id, text) = w.make_invite(h, None);
+        let (m, reply) = w.answer("Mo", 2, &text, password);
+        w.admit_by_reply(h, &id, &reply);
+        w.run_for(2_000_000);
+        assert!(w.in_room(m), "joined (password: {password:?})");
+    }
 }
