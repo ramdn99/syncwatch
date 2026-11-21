@@ -1,5 +1,5 @@
 // Manual invites UI (ADR 0014): the host's Invites panel and the member's Join steps.
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { InviteView } from '../lib/room';
 
@@ -11,6 +11,7 @@ const joinInvite = vi.fn();
 const roomStateNow = vi.fn();
 const leave = vi.fn().mockResolvedValue(undefined);
 const joinByCode = vi.fn();
+const submitPassword = vi.fn().mockResolvedValue(undefined);
 // The room-state listener the Join dialog registers while it waits (the test drives it).
 let pushState: ((s: import('../lib/room').RoomState) => void) | null = null;
 vi.mock('../lib/room', async (orig) => {
@@ -30,6 +31,7 @@ vi.mock('../lib/room', async (orig) => {
       state: () => roomStateNow(),
       leave: () => leave(),
       join: (...a: unknown[]) => joinByCode(...a),
+      password: (p: string) => submitPassword(p),
       handshake: () => Promise.resolve('manual'),
       invite: { create, reply, decide },
     },
@@ -50,6 +52,9 @@ const inv = (over: Partial<InviteView>): InviteView => ({
   words: null,
   forMember: null,
   reason: null,
+  wrongAttempts: 0,
+  maxAttempts: 6,
+  lastWrongUnix: null,
   ...over,
 });
 
@@ -173,5 +178,116 @@ describe('the invite Join dialog never falls back to room codes', () => {
     expect(joinByCode).not.toHaveBeenCalled();
     expect(document.body.textContent).not.toMatch(/room codes? (have|has) 8 characters/i);
     expect(screen.queryByText('Room code')).toBeNull();
+  });
+});
+
+describe('wrong password with an invite (manual-test fix)', () => {
+  const words: [string, string, string, string] = ['badge', 'pillow', 'orchid', 'wagon'];
+  const np = (over: Partial<NonNullable<import('../lib/room').RoomState['needPassword']>> = {}) => ({
+    wrong: true,
+    retryAfterMs: 2000,
+    attempts: 1,
+    throttled: false,
+    seq: 1,
+    ...over,
+  });
+
+  it('countdown, the button re-enables by itself, Enter submits, never stuck busy', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    try {
+      const onSubmit = vi.fn().mockResolvedValue(undefined);
+      const { PasswordRetry } = await import('./PasswordRetry');
+      const { rerender } = render(<PasswordRetry needPassword={np()} onSubmit={onSubmit} />);
+      expect(screen.getByTestId('password-status').textContent).toBe('Wrong password. Try again in 2 seconds.');
+      expect(screen.getByTestId('password-attempts').textContent).toContain('1 of 6');
+      const field = screen.getByLabelText('Room password') as HTMLInputElement;
+      expect(document.activeElement).toBe(field);
+      fireEvent.change(field, { target: { value: 'again' } });
+      const button = () => screen.getByRole('button') as HTMLButtonElement;
+      expect(button().disabled).toBe(true);
+      expect(button().textContent).toBe('Try again in 2 s');
+      // Enter while throttled does nothing.
+      fireEvent.submit(field.closest('form') as HTMLFormElement);
+      expect(onSubmit).not.toHaveBeenCalled();
+      await act(async () => {
+        vi.advanceTimersByTime(2100);
+      });
+      expect(button().disabled).toBe(false);
+      expect(button().textContent).toBe('Enter');
+      expect(screen.getByTestId('password-status').textContent).toBe('Wrong password. Try again.');
+      // Enter now works.
+      fireEvent.submit(field.closest('form') as HTMLFormElement);
+      expect(onSubmit).toHaveBeenCalledWith('again');
+      expect(button().textContent).toBe('Checking...');
+      // No answer yet: the button frees itself.
+      await act(async () => {
+        vi.advanceTimersByTime(1600);
+      });
+      expect(button().textContent).toBe('Enter');
+      // The host's next prompt (seq 2, 4 s) restarts the countdown and clears the field.
+      rerender(<PasswordRetry needPassword={np({ seq: 2, retryAfterMs: 4000, attempts: 2 })} onSubmit={onSubmit} />);
+      expect(screen.getByTestId('password-status').textContent).toBe('Wrong password. Try again in 4 seconds.');
+      expect(screen.getByTestId('password-attempts').textContent).toContain('2 of 6');
+      expect((screen.getByLabelText('Room password') as HTMLInputElement).value).toBe('');
+      // Too early: a throttle prompt says so.
+      rerender(<PasswordRetry needPassword={np({ seq: 3, retryAfterMs: 3000, attempts: 2, wrong: false, throttled: true })} onSubmit={onSubmit} />);
+      expect(screen.getByTestId('password-status').textContent).toBe('Too many tries in a short time. Try again in 3 seconds.');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  async function replyStep() {
+    const real = await vi.importActual<typeof import('../lib/room')>('../lib/room');
+    const base = { ...real.EMPTY_ROOM } as import('../lib/room').RoomState;
+    invitePreview.mockResolvedValueOnce({ roomName: 'Movie night', hostId: 'ab12cd', password: true, ttlMins: 10, hostVersion: '0.1.0', relayOnly: false, reinvite: false });
+    joinInvite.mockResolvedValueOnce({ status: 'reply', passwordIgnored: false, ended: null });
+    roomStateNow.mockResolvedValueOnce({ ...base, active: true, reply: { text: 'SWREP2-abc', words } });
+    const onCancel = vi.fn();
+    const { InviteJoin } = await import('./InviteJoin');
+    render(<InviteJoin name="Mo" onEntered={() => {}} onCancel={onCancel} onNameRequired={() => true} />);
+    fireEvent.change(screen.getByTestId('invite-input'), { target: { value: 'SWINV2-xyz' } });
+    await waitFor(() => expect(screen.getByLabelText('Room password')).toBeTruthy());
+    fireEvent.change(screen.getByLabelText('Room password'), { target: { value: 'wrong' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create my reply' }));
+    await waitFor(() => expect(screen.getByTestId('invite-reply-step')).toBeTruthy());
+    await waitFor(() => expect(pushState).not.toBeNull());
+    return { base, onCancel };
+  }
+
+  it('the Join dialog: wrong password, retry with Enter, then the room; Cancel works', async () => {
+    const { base, onCancel } = await replyStep();
+    pushState?.({ ...base, active: true, reply: { text: 'SWREP2-abc', words }, needPassword: np({ retryAfterMs: 0 }) });
+    await waitFor(() => expect(screen.getByTestId('password-retry')).toBeTruthy());
+    expect(screen.getByTestId('invite-reply-step').textContent).toContain('badge');
+    const field = screen.getByLabelText('Room password');
+    fireEvent.change(field, { target: { value: 's3cret' } });
+    fireEvent.submit(field.closest('form') as HTMLFormElement);
+    await waitFor(() => expect(submitPassword).toHaveBeenCalledWith('s3cret'));
+    expect(joinByCode).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(leave).toHaveBeenCalled();
+    expect(onCancel).toHaveBeenCalled();
+  });
+
+  it('after the ban the member reads what happened and what to do', async () => {
+    const { base } = await replyStep();
+    pushState?.({ ...base, active: false, reply: null, ended: { kind: 'authRejected', reason: 'TooManyAttempts' } });
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Too many wrong attempts'));
+    expect(screen.getByRole('alert').textContent).toContain('10 minutes');
+    expect(screen.getByRole('alert').textContent).toContain('fresh invite');
+  });
+
+  it('host: the admitted member shows the real state, then the ban with Re-issue', async () => {
+    const real = await vi.importActual<typeof import('../lib/room')>('../lib/room');
+    const { InvitesPanel } = await import('./InvitesPanel');
+    const base = { ...real.EMPTY_ROOM, active: true, isHost: true } as import('../lib/room').RoomState;
+    const { rerender } = render(<InvitesPanel rs={{ ...base, invites: [inv({ status: 'admitted', memberName: 'Mo', wrongAttempts: 2, lastWrongUnix: 1_800_000_000 })] }} />);
+    expect(screen.getByTestId('invite-wrong-password').textContent).toContain('wrong password (attempt 2 of 6)');
+    expect(screen.queryByText('Connecting...')).toBeNull();
+    rerender(<InvitesPanel rs={{ ...base, invites: [inv({ status: 'failed', memberName: 'Mo', wrongAttempts: 6, reason: 'Blocked after too many wrong passwords (6). They can try again in 10 minutes, with a new invite.' })] }} />);
+    expect(screen.getByTestId('invite-fail-reason').textContent).toContain('Blocked after too many wrong passwords');
+    expect(screen.getByRole('button', { name: 'Re-issue' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Remove this invite' })).toBeTruthy();
   });
 });

@@ -710,7 +710,7 @@ export function RoomView({ onLeave, onOpenSettings }: { onLeave: () => void; onO
           onDecline={() => act({ type: 'declineMagnet' })}
         />
       )}
-      {rs.active && rs.needPassword && <PasswordPrompt wrong={rs.needPassword.wrong} retryAfterMs={rs.needPassword.retryAfterMs} onLeave={leave} />}
+      {rs.active && rs.needPassword && <PasswordPrompt needPassword={rs.needPassword} onLeave={leave} />}
       {rs.ended && rs.ended.kind !== 'left' && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" role="alertdialog" aria-labelledby="ended-title">
           <div className="w-96 space-y-4 rounded-xl border border-border bg-elevated p-5">

@@ -80,7 +80,7 @@ export function InvitesPanel({ rs }: { rs: Pick<RoomState, 'invites' | 'inviteEr
           <li key={inv.id} className="space-y-2 rounded-md border border-border bg-surface p-2 text-xs" data-testid={`invite-${inv.status}`}>
             <div className="flex items-center gap-2">
               <span className={inv.status === 'replied' ? 'font-semibold text-accent' : inv.status === 'joined' ? 'text-success' : OPEN.includes(inv.status) ? 'text-text' : 'text-muted'}>
-                {INVITE_TEXT.status[inv.status]}
+                {inv.status === 'admitted' && inv.wrongAttempts > 0 ? 'Waiting for the password' : INVITE_TEXT.status[inv.status]}
               </span>
               {inv.forMember != null && <span className="text-muted">re-invite for {seatName(inv.forMember) ?? 'a member'}</span>}
               {(inv.status === 'waiting' || inv.status === 'replied') && (
@@ -96,6 +96,12 @@ export function InvitesPanel({ rs }: { rs: Pick<RoomState, 'invites' | 'inviteEr
                 <Icon name="close" size="xs" />
               </button>
             </div>
+            {inv.status === 'admitted' && inv.wrongAttempts > 0 && (
+              <p className="text-sm text-warning" data-testid="invite-wrong-password">
+                {inv.memberName ?? 'The member'}: wrong password (attempt {inv.wrongAttempts} of {inv.maxAttempts})
+                {inv.lastWrongUnix != null && <span className="tabular text-muted"> at {new Date(inv.lastWrongUnix * 1000).toLocaleTimeString()}</span>}. Waiting for them to try again.
+              </p>
+            )}
             {inv.status === 'waiting' && inv.text && <CopyBox label="Invite" text={inv.text} testId={`invite-text-${inv.id}`} />}
             {inv.status === 'replied' && inv.words && (
               <>
@@ -119,7 +125,9 @@ export function InvitesPanel({ rs }: { rs: Pick<RoomState, 'invites' | 'inviteEr
             )}
             {inv.status === 'failed' && inv.reason && (
               <p role="alert" className="text-sm text-danger" data-testid="invite-fail-reason">
-                Could not connect{inv.memberName ? ` to ${inv.memberName}` : ''}: {inv.reason}
+                {/^[a-z]/.test(inv.reason)
+                  ? `Could not connect${inv.memberName ? ` to ${inv.memberName}` : ''}: ${inv.reason}`
+                  : `${inv.memberName ? `${inv.memberName}: ` : ''}${inv.reason}`}
               </p>
             )}
             {(inv.status === 'expired' || inv.status === 'failed') && (

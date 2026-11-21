@@ -3,6 +3,7 @@ import { endText, friendlyError, loadName, PASSWORD_IGNORED_TEXT, room, saveName
 import { ERRORS, isNoServer } from '../strings/errors';
 import { INVITE_TEXT } from '../strings/invites';
 import { InviteJoin } from './InviteJoin';
+import { PasswordRetry, type NeedPassword } from './PasswordRetry';
 
 /** Create or join a room: display name, (code), optional password. */
 export function RoomEntryDialog(props: { mode: 'create' | 'join'; onClose: () => void; onEntered: () => void; onConnectionSettings?: () => void }) {
@@ -183,48 +184,20 @@ export function RoomEntryDialog(props: { mode: 'create' | 'join'; onClose: () =>
 }
 
 /** The room has a password: ask for it (again), honoring the host's retry delay. */
-export function PasswordPrompt(props: { wrong: boolean; retryAfterMs: number; onLeave: () => void }) {
-  const [password, setPassword] = useState('');
-  const [wait, setWait] = useState(Math.ceil(props.retryAfterMs / 1000));
-  useEffect(() => {
-    setWait(Math.ceil(props.retryAfterMs / 1000));
-    if (props.retryAfterMs <= 0) return;
-    const t = window.setInterval(() => setWait((w) => Math.max(0, w - 1)), 1000);
-    return () => window.clearInterval(t);
-  }, [props.retryAfterMs, props.wrong]);
+export function PasswordPrompt(props: { needPassword: NeedPassword; onLeave: () => void }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" role="dialog" aria-modal="true" aria-labelledby="pw-title">
-      <form
-        className="w-96 space-y-4 rounded-xl border border-border bg-elevated p-5 shadow-xl"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (wait > 0 || !password) return;
-          void room.password(password);
-          setPassword('');
-        }}
-      >
+      <div className="w-96 space-y-4 rounded-xl border border-border bg-elevated p-5 shadow-xl">
         <h2 id="pw-title" className="font-brand text-lg font-bold">
           This room has a password
         </h2>
-        {props.wrong && <p className="text-sm text-danger">That password was not right.</p>}
-        <input
-          type="password"
-          autoFocus
-          value={password}
-          aria-label="Room password"
-          onChange={(e) => setPassword(e.target.value)}
-          className="w-full rounded-md border border-border bg-surface px-3 py-2 text-text focus:border-accent focus:outline-none"
-        />
-        {wait > 0 && <p className="text-sm text-muted">You can try again in {wait} s.</p>}
-        <div className="flex justify-end gap-2">
+        <PasswordRetry needPassword={props.needPassword} onSubmit={(pw) => room.password(pw)} />
+        <div className="flex justify-end">
           <button type="button" className="rounded-md px-4 py-2 text-muted hover:text-text" onClick={props.onLeave}>
             Leave
           </button>
-          <button type="submit" disabled={wait > 0 || !password} className="rounded-md bg-accent px-4 py-2 font-semibold text-on-accent hover:bg-accent-hover disabled:opacity-50">
-            Join
-          </button>
         </div>
-      </form>
+      </div>
     </div>
   );
 }

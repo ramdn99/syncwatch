@@ -115,6 +115,10 @@ export interface InviteView {
   forMember: number | null;
   /** Failed: why, in plain words. */
   reason: string | null;
+  /** Password rooms: wrong passwords from this member so far (never how close they were). */
+  wrongAttempts: number;
+  maxAttempts: number;
+  lastWrongUnix: number | null;
 }
 
 /** What the Join dialog shows about a pasted invite. */
@@ -146,7 +150,7 @@ export interface RoomState {
   chatState: { enabled: boolean; slowModeSecs: number; muted: boolean };
   hostWords: [string, string, string, string] | null;
   hostLink: LinkState | null;
-  needPassword: { wrong: boolean; retryAfterMs: number } | null;
+  needPassword: { wrong: boolean; retryAfterMs: number; attempts: number; throttled: boolean; seq: number } | null;
   missingFile: { name: string; size: number; durationMs: number | null; seq: number; panelOpen: boolean } | null;
   fileStatus: 'verifying' | 'verified' | 'mismatch' | null;
   mediaTitle: string | null;
@@ -497,7 +501,7 @@ export function endText(r: EndReason | null): string | null {
       return r.banned ? 'The host removed you from the room and banned you for this session.' : 'The host removed you from the room.';
     case 'authRejected':
       return r.reason === 'TooManyAttempts'
-        ? 'Too many wrong passwords. Try again later.'
+        ? 'Too many wrong attempts. The host blocks new tries from you for 10 minutes. After that, ask the host for a fresh invite.'
         : 'The room did not accept you (the connection could not be verified).';
     case 'refused':
       return r.reason === 'locked'

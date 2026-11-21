@@ -302,6 +302,12 @@ pub struct DiagDto {
 pub struct NeedPasswordDto {
     wrong: bool,
     retry_after_ms: u32,
+    /// Wrong passwords so far on this join.
+    attempts: u32,
+    /// Refused as too early (or all attempts paused), not as wrong.
+    throttled: bool,
+    /// Changes with every prompt (the UI restarts its countdown on it).
+    seq: u32,
 }
 
 /// This window's chat state, exactly as the host last told it (the UI derives everything about
@@ -680,18 +686,31 @@ impl Mirror {
             RoomUi::NeedPassword {
                 wrong,
                 retry_after_ms,
+                attempts,
+                throttled,
             } => {
+                // Attempt events stay in the diagnostics; never the password or the proof.
                 self.event(if wrong {
                     format!(
-                        "wrong password (retry in {} s)",
+                        "wrong password: attempt {attempts} of {} (retry in {} s)",
+                        syncwatch_net::auth::BAN_AFTER_FAILURES,
+                        retry_after_ms.div_ceil(1000)
+                    )
+                } else if throttled {
+                    format!(
+                        "password attempt too early (retry in {} s)",
                         retry_after_ms.div_ceil(1000)
                     )
                 } else {
                     "the room needs a password".to_owned()
                 });
+                let seq = self.s.need_password.as_ref().map_or(1, |n| n.seq + 1);
                 self.s.need_password = Some(NeedPasswordDto {
                     wrong,
                     retry_after_ms,
+                    attempts,
+                    throttled,
+                    seq,
                 })
             }
             RoomUi::Verification { member, words } => match member {
@@ -3009,7 +3028,24 @@ pub fn dev_autoroom(app: &AppHandle) {
             tauri::async_runtime::spawn(dev_invite_host(app2, file2));
             r
         } else if manual {
-            dev_invite_join(&app, &file, name, password).await
+            // Test hook: SYNCWATCH_DEV_MEMBER_PASSWORDS="a;b;c" joins with "a" and, after each
+            // refusal, waits out the host's delay plus SYNCWATCH_DEV_RETRY_PAUSES ("40,3"
+            // seconds) and tries the next one on the same connection.
+            let tries: Vec<String> = std::env::var("SYNCWATCH_DEV_MEMBER_PASSWORDS")
+                .ok()
+                .map(|s| {
+                    s.split(';')
+                        .filter(|p| !p.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let first = tries.first().cloned().or(password);
+            let r = dev_invite_join(&app, &file, name, first).await;
+            if tries.len() > 1 {
+                tauri::async_runtime::spawn(dev_password_retries(app.clone(), tries[1..].to_vec()));
+            }
+            r
         } else if role == "host" {
             let r = room_create(app.clone(), name, password, None).await;
             // Publish the code once it exists.
@@ -3153,6 +3189,50 @@ async fn dev_invite_host(app: AppHandle, file: String) {
             }
             *done = true;
         }
+    }
+}
+
+/// Test hook (see dev_autoroom): password retries after refusals, on the same connection.
+async fn dev_password_retries(app: AppHandle, tries: Vec<String>) {
+    let pauses: Vec<u64> = std::env::var("SYNCWATCH_DEV_RETRY_PAUSES")
+        .ok()
+        .map(|s| s.split(',').filter_map(|p| p.trim().parse().ok()).collect())
+        .unwrap_or_default();
+    let mut seen = 0u32;
+    for (n, pw) in tries.into_iter().enumerate() {
+        // Wait for the next prompt from the host (or the end of the attempt).
+        let mut wait_ms = None;
+        for _ in 0..3000 {
+            let s = app
+                .state::<RoomManager>()
+                .state
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            if s.phase == Some(Phase::InRoom) || s.ended.is_some() {
+                return;
+            }
+            if let Some(np) = &s.need_password
+                && np.seq > seen
+            {
+                seen = np.seq;
+                wait_ms = Some(u64::from(np.retry_after_ms));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let Some(ms) = wait_ms else { return };
+        let pause = pauses.get(n).copied().unwrap_or(0);
+        tracing::info!(
+            retry = n + 1,
+            wait_ms = ms,
+            pause_s = pause,
+            "dev: password retry scheduled"
+        );
+        tokio::time::sleep(Duration::from_millis(ms + 200) + Duration::from_secs(pause)).await;
+        let _ = app
+            .state::<RoomManager>()
+            .send(Cmd::Action(Action::SubmitPassword(pw)));
     }
 }
 

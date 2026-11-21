@@ -1,6 +1,7 @@
 // Join with a manual invite (ADR 0014): paste the host's invite, see what it is, then send
 // the reply back and wait to be admitted.
 import { useEffect, useState } from 'react';
+import { PasswordRetry } from './PasswordRetry';
 import { endText, friendlyError, onRoomState, room, type InvitePreview, type RoomState } from '../lib/room';
 import { Icon } from '../ui/icons';
 import { INVITE_TEXT } from '../strings/invites';
@@ -141,27 +142,7 @@ export function InviteJoin(props: {
             {ended}
           </p>
         ) : rs?.needPassword ? (
-          <form
-            className="space-y-2"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void room.password(password).catch((err) => setError(friendlyError(err).text));
-            }}
-          >
-            <p className="text-sm text-warning">{rs.needPassword.wrong ? 'Wrong password. Try again.' : INVITE_TEXT.passwordAfterAdmit}</p>
-            <input
-              type="password"
-              maxLength={256}
-              value={password}
-              autoComplete="off"
-              aria-label="Room password"
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-md border border-border bg-surface px-3 py-2 text-text focus:border-accent focus:outline-none"
-            />
-            <button type="submit" className="rounded-md bg-accent px-3 py-1.5 text-sm font-semibold text-on-accent" disabled={rs.needPassword.retryAfterMs > 0 && !password}>
-              Enter
-            </button>
-          </form>
+          <PasswordRetry needPassword={rs.needPassword} onSubmit={(pw) => room.password(pw).catch((err) => setError(friendlyError(err).text))} />
         ) : (
           <p className="flex items-center gap-2 text-sm text-muted" role="status">
             <Icon name="buffering" size="sm" />
