@@ -12,11 +12,26 @@ export type Report = (line: string) => void;
 let latest: RoomState | null = null;
 
 export async function current(): Promise<RoomState> {
-  latest = await room.state();
-  return latest;
+  // Release-mode test builds load the page before the app's setup has registered every
+  // state: retry for a few seconds instead of failing the whole scenario.
+  for (let i = 0; ; i++) {
+    try {
+      latest = await room.state();
+      return latest;
+    } catch (e) {
+      if (i >= 50) throw e;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
 }
 
-export async function waitFor(label: string, pred: (s: RoomState) => boolean, timeoutMs = 20_000): Promise<RoomState> {
+// Joining waits longer: with a real relay the host gathers relay candidates (up to ~20 s) before
+// the invite exists, then the member answers and the host admits (release-mode labs, M9).
+export async function waitFor(
+  label: string,
+  pred: (s: RoomState) => boolean,
+  timeoutMs = /^(member joined|in the room)$/.test(label) ? 120_000 : 20_000,
+): Promise<RoomState> {
   const end = Date.now() + timeoutMs;
   for (;;) {
     const s = await current();
@@ -359,7 +374,9 @@ export async function maybeRunScenario() {
     else if (cfg.role === 'late') await lateChat(report);
     else await member(report);
     report('DONE');
-  } catch {
+  } catch (e) {
+    // Never hide why a scenario stopped (Milestone 9: a swallowed error looked like success).
+    report(`FAIL scenario error: ${String(e).slice(0, 300)}`);
     report('DONE');
   }
 }

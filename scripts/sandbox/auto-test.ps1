@@ -229,6 +229,15 @@ Copy-Item (Join-Path $data 'logs') (Join-Path $out 'app-logs') -Recurse -ErrorAc
 $credsBefore = Get-Creds
 Dump 'after reinstall'
 
+# 4b. two-instance room test with the installed program (portable copies, no relay) ---------------
+Log ''
+Log '--- 4b. room between two instances (invite, password, admit, play, seek, tracks, external files)'
+$rt = powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$src\room-test.ps1" -Install $install -MediaDir "$src\media" -Out $out 2>&1 | Out-String
+$m = [regex]::Match($rt, 'ROOMTEST pass=(\d+) fail=(\d+)')
+$rp = if ($m.Success) { [int]$m.Groups[1].Value } else { 0 }
+$rf = if ($m.Success) { [int]$m.Groups[2].Value } else { 1 }
+Check ($m.Success -and $rf -eq 0 -and $rp -ge 30) "room test: $rp checks passed, $rf failed (scenario files and logs in the results folder)"
+
 # 5. uninstall WITH REMOVEUSERDATA=1 ---------------------------------------------------------------------
 Log ''
 Log '--- 5. uninstall with REMOVEUSERDATA=1'

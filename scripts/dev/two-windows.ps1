@@ -53,7 +53,14 @@ param(
     [string]$LogLevel = '',
     # debug (default) or measure: optimized like release but with the dev automation
     # (Cargo profile "measure"); used by scripts/dev/idle-measure.ps1.
-    [ValidateSet('debug', 'measure')][string]$BuildProfile = 'debug'
+    [ValidateSet('debug', 'measure')][string]$BuildProfile = 'debug',
+    # Release-mode lab (Milestone 9): run the scenario in the two portable TEST builds that
+    # scripts/dev/release-pair.ps1 -Setup -TestBuild prepared (real Metered fetch, embedded UI,
+    # manual invites; no dev servers). The value is the pair's folder; windows a and b only.
+    [string]$ReleasePair = '',
+    # With -ReleasePair: no ICE servers and no connection setup (test builds only; for the
+    # Windows Sandbox, which has no relay setup). Without it the real Metered setup is used.
+    [switch]$NoRelayServers
 )
 
 if ($PSVersionTable.PSVersion.Major -lt 7) { Write-Host 'Run with PowerShell 7: pwsh -NoProfile -File scripts/dev/two-windows.ps1'; exit 2 }
@@ -74,7 +81,17 @@ function Port-Owner([int]$port) {
     if ($conn) { Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue }
 }
 
-foreach ($port in 1420, 8787) {
+if ($ReleasePair) {
+    $Handshake = 'manual'
+    foreach ($w in 'a', 'b') {
+        if (-not (Test-Path (Join-Path $ReleasePair "$w\SyncWatch\syncwatch.exe"))) { Write-Host "No release pair in $ReleasePair (run scripts/dev/release-pair.ps1 -Setup -TestBuild)." -ForegroundColor Red; exit 1 }
+    }
+}
+function Data-Logs([string]$who) {
+    if ($ReleasePair) { Join-Path $ReleasePair "$who\SyncWatch\data\logs" } else { "$env:LOCALAPPDATA\SyncWatch-dev-$who\logs" }
+}
+
+foreach ($port in $(if ($ReleasePair) { @() } else { @(1420, 8787) })) {
     if (-not (Port-Busy $port)) { continue }
     $owner = Port-Owner $port
     $desc = if ($owner) { "$($owner.ProcessName) (PID $($owner.Id))" } else { 'an unknown process' }
@@ -110,9 +127,11 @@ foreach ($n in $(if ($Scenario -in 'torrent', 'torrentfile', 'torrentgate', 'tor
     if ($n -and -not (Test-Path $n)) { Write-Host "Missing test file $n. Run: pwsh -NoProfile -File scripts/dev/make-test-media.ps1" -ForegroundColor Red; exit 1 }
 }
 
+if (-not $ReleasePair) {
 Write-Host 'Building...'
 cargo build -q -p syncwatch-desktop $(if (-not $Docker) { '-p'; 'syncwatch-signaling' }) $(if ($BuildProfile -ne 'debug') { '--profile'; $BuildProfile })
 if ($LASTEXITCODE) { exit 1 }
+}
 
 $work = Join-Path ([IO.Path]::GetTempPath()) "syncwatch-two-windows-$PID"
 New-Item -ItemType Directory -Force $work | Out-Null
@@ -124,7 +143,9 @@ $killed = $false
 $started = @()
 $compose = @()
 try {
-    if ($Docker) {
+    if ($ReleasePair) {
+        # No dev servers: the test builds have their UI inside and join with invites.
+    } elseif ($Docker) {
         docker compose -f deploy/compose.dev.yml up -d --build signaling | Out-Null
         if ($LASTEXITCODE) { throw 'Could not start the signaling container (is Docker Desktop running?)' }
         $compose += 'signaling'
@@ -137,6 +158,7 @@ try {
         if ($LASTEXITCODE) { throw 'Could not start coturn (is Docker Desktop running?)' }
         $compose += 'coturn'
     }
+    if (-not $ReleasePair) {
     $pnpm = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue)?.Source ?? "$env:APPDATA\npm\pnpm.cmd"
     $started += Start-Process $pnpm -ArgumentList '--dir', 'apps/desktop', 'dev' -PassThru -WindowStyle Hidden -RedirectStandardOutput "$work\vite.log" -RedirectStandardError "$work\vite.err"
     $deadline = (Get-Date).AddMinutes(2)
@@ -144,10 +166,15 @@ try {
         if ((Get-Date) -gt $deadline) { throw 'The dev UI server or the signaling server did not start.' }
         Start-Sleep -Milliseconds 300
     }
+    }
 
     $env:SYNCWATCH_SIGNALING_URL = 'ws://127.0.0.1:8787/ws'
     $env:SYNCWATCH_DEV_BYPASS_CONNECTION = '1'
     $env:SYNCWATCH_DEV_ICE = $(if ($Ice -eq 'metered') { '' } else { $Ice })
+    if ($ReleasePair -and -not $NoRelayServers) {
+        # Release-mode lab: the real Metered setup of each instance (test builds would obey these).
+        Remove-Item Env:SYNCWATCH_DEV_BYPASS_CONNECTION, Env:SYNCWATCH_DEV_ICE -ErrorAction SilentlyContinue
+    }
     $env:SYNCWATCH_HANDSHAKE = $(if ($Handshake -eq 'manual') { 'manual' } else { '' })
     # -Ice metered: relay-only through your Metered account (keep such runs short: quota).
     $env:SYNCWATCH_DEV_FORCE_RELAY = $(if ($Ice -eq 'metered') { '1' } else { '' })
@@ -173,10 +200,11 @@ try {
         $env:SYNCWATCH_DEV_SOAK_FILE = $(if ($Soak -gt 0) { Join-Path $work "soak-$who.json" } else { '' })
         $env:SYNCWATCH_DEV_MINIMIZE = $(if ($Soak -gt 0 -and $who -eq 'b') { '1' } else { '' })
         $env:SYNCWATCH_DEV_SCENARIO_FILE = $(if ($Scenario) { Join-Path $work "scenario-$who.txt" } else { '' })
-        $p = Start-Process target\$BuildProfile\syncwatch.exe -PassThru
+        $exe = if ($ReleasePair) { Join-Path $ReleasePair "$who\SyncWatch\syncwatch.exe" } else { "target\$BuildProfile\syncwatch.exe" }
+        $p = Start-Process $exe -PassThru
         $started += $p
         $apps += $p
-        Write-Host "Window $who started (PID $($p.Id), data folder %LOCALAPPDATA%\SyncWatch-dev-$who)."
+        Write-Host "Window $who started (PID $($p.Id), logs $(Data-Logs $who))."
         Start-Sleep -Seconds 3
     }
 
@@ -254,7 +282,7 @@ function Show-Analysis($windows, $all) {
 function Test-Logs($windows) {
     # No chat content (every scenario chat text carries the marker "zqx") and no credential
     # values in any log of these windows. Values are compared, never printed.
-    $logs = @(foreach ($who in $windows) { Get-ChildItem "$env:LOCALAPPDATA\SyncWatch-dev-$who\logs" -File -ErrorAction SilentlyContinue })
+    $logs = @(foreach ($who in $windows) { Get-ChildItem (Data-Logs $who) -File -ErrorAction SilentlyContinue })
     $text = ($logs | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
     $chatHits = ([regex]::Matches($text, 'zqx')).Count
     $vals = @()

@@ -11,8 +11,12 @@
     update\latest.json(.sig)       signed manifest pointing to http://127.0.0.1:8765/
     test-updater.key.pub           the throwaway PUBLIC key (the private key is deleted)
     serve-update.ps1, auto-test.ps1
-    release\SyncWatch-<v>-x64.msi  (with -IncludeRelease) the latest release build from
-                                   dist\release, for the hands-on checklist
+    room-test.ps1, media\         the two-instance room test (auto-test.ps1 step 4b) and its
+                                   generated media (scripts/dev/make-test-media.ps1; never
+                                   D:\media\test.mkv)
+    release\SyncWatch-<v>-x64.msi  (with -IncludeRelease) the newest MSI from dist\test-release
+                                   (testing builds of HEAD) or else dist\release, for the
+                                   hands-on checklist. Kept when this script runs again.
   and creates dist\sandbox-results (mapped writable as C:\SyncWatchResults).
 
   The two test builds take about 5 minutes each. The test MSIs accept a local update server
@@ -32,7 +36,8 @@ $pnpm = if (Get-Command pnpm.cmd -ErrorAction SilentlyContinue) { 'pnpm.cmd' } e
 $box = Join-Path $root 'dist\sandbox'
 $results = Join-Path $root 'dist\sandbox-results'
 New-Item -ItemType Directory -Force $results | Out-Null
-if (Test-Path $box) { Get-ChildItem $box -Force | Remove-Item -Recurse -Force }
+# Keep release\ (the hands-on MSI) across re-runs; everything else is rebuilt.
+if (Test-Path $box) { Get-ChildItem $box -Force | Where-Object Name -NE 'release' | Remove-Item -Recurse -Force }
 New-Item -ItemType Directory -Force (Join-Path $box 'update') | Out-Null
 
 $keyDir = Join-Path ([IO.Path]::GetTempPath()) "sw-sandbox-key-$PID"
@@ -75,13 +80,20 @@ try {
     Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $keyDir -ErrorAction SilentlyContinue
 }
-Copy-Item scripts\sandbox\serve-update.ps1, scripts\sandbox\auto-test.ps1 $box
+Copy-Item scripts\sandbox\serve-update.ps1, scripts\sandbox\auto-test.ps1, scripts\sandbox\room-test.ps1 $box
+$media = Join-Path ([IO.Path]::GetTempPath()) 'syncwatch-media'
+if (-not (Test-Path (Join-Path $media 'long.mkv'))) { pwsh -NoProfile -File scripts/dev/make-test-media.ps1 | Out-Host }
+New-Item -ItemType Directory -Force (Join-Path $box 'media') | Out-Null
+Copy-Item (Join-Path $media 'long.mkv'), (Join-Path $media 'extra-cp1252.srt'), (Join-Path $media 'extra-audio.mka') (Join-Path $box 'media')
 if ($IncludeRelease) {
-    $rel = Get-ChildItem dist\release -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    $m = if ($rel) { Get-ChildItem $rel.FullName -Filter 'SyncWatch-*-x64.msi' | Select-Object -First 1 }
+    $m = @('dist\test-release', 'dist\release') | Where-Object { Test-Path $_ } |
+        ForEach-Object { Get-ChildItem $_ -Recurse -Filter 'SyncWatch-*-x64.msi' } |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($m) {
-        New-Item -ItemType Directory -Force (Join-Path $box 'release') | Out-Null
-        Copy-Item $m.FullName (Join-Path $box 'release')
+        $rdir = Join-Path $box 'release'
+        New-Item -ItemType Directory -Force $rdir | Out-Null
+        Get-ChildItem $rdir -Filter '*.msi' | Remove-Item -Force
+        Copy-Item $m.FullName $rdir
         Write-Host "Release MSI for the hands-on checklist: $($m.Name)"
     } else {
         Write-Host 'No release build in dist\release (run scripts/build-release.ps1 first).' -ForegroundColor Yellow

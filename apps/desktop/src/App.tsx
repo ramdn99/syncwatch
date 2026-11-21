@@ -34,7 +34,8 @@ export function App() {
 
   // Debug builds: optional scripted two-window scenario (scripts/dev/two-windows.ps1 -Scenario).
   useEffect(() => {
-    if (import.meta.env.DEV) void import('./dev/scenario').then((m) => m.maybeRunScenario());
+    // Test builds (build-release.ps1 -TestBuild) include the scenarios too: release-mode labs.
+    if (import.meta.env.DEV || import.meta.env.VITE_SYNCWATCH_TEST_BUILD === '1') void import('./dev/scenario').then((m) => m.maybeRunScenario());
   }, []);
 
   // Already in a room (window reload, dev auto-room): show it.

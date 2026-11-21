@@ -111,11 +111,12 @@ $signing = $UpdaterKey -ne ''
 if ($signing -and -not (Test-Path $UpdaterKey)) { Write-Host "Updater key not found: $UpdaterKey" -ForegroundColor Red; exit 1 }
 $overlayPath = Join-Path $stage 'tauri.release.json'
 $overlay | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 $overlayPath
-if ($TestBuild) { $env:SYNCWATCH_TEST_BUILD = '1' } else { Remove-Item Env:SYNCWATCH_TEST_BUILD -ErrorAction SilentlyContinue }
+# Test builds also bundle the dev scenarios into the UI (VITE_SYNCWATCH_TEST_BUILD).
+if ($TestBuild) { $env:SYNCWATCH_TEST_BUILD = '1'; $env:VITE_SYNCWATCH_TEST_BUILD = '1' } else { Remove-Item Env:SYNCWATCH_TEST_BUILD, Env:VITE_SYNCWATCH_TEST_BUILD -ErrorAction SilentlyContinue }
 try {
     Step 'tauri-build' { & $pnpm --dir apps/desktop tauri build --bundles msi --config $overlayPath }
 } finally {
-    Remove-Item Env:SYNCWATCH_TEST_BUILD -ErrorAction SilentlyContinue
+    Remove-Item Env:SYNCWATCH_TEST_BUILD, Env:VITE_SYNCWATCH_TEST_BUILD -ErrorAction SilentlyContinue
 }
 
 $msiDir = Join-Path $repo 'target\release\bundle\msi'
