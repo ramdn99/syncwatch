@@ -184,8 +184,15 @@ pub enum RoomUi {
     },
     Phase(Phase),
     NeedPassword {
+        /// The last attempt was a wrong password.
         wrong: bool,
+        /// Wait this long before the next attempt (0 = now).
         retry_after_ms: u32,
+        /// Wrong passwords so far on this join (the host bans after 6).
+        attempts: u32,
+        /// The host refused the attempt because it came too early or all password attempts
+        /// are paused (not a wrong password).
+        throttled: bool,
     },
     /// Verification words (rooms without a password). `member`: None = my link to the host.
     Verification {
@@ -237,6 +244,11 @@ pub struct InviteView {
     pub for_member: Option<u32>,
     /// Failed: why, in plain words.
     pub reason: Option<String>,
+    /// Admitted, password rooms: wrong passwords so far, out of `max_attempts`, and when the
+    /// last one came (unix seconds, host clock). Never how close it was.
+    pub wrong_attempts: u32,
+    pub max_attempts: u32,
+    pub last_wrong_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,6 +294,9 @@ struct PendingInvite {
     sent: Option<(String, Vec<Candidate>)>,
     /// The lifetime written into the invite (the host enforces `expires_unix` on its clock).
     ttl_secs: u32,
+    /// Wrong passwords from this invite's member, and when the last one came (host clock).
+    wrong_attempts: u32,
+    last_wrong_unix: Option<u64>,
 }
 
 /// Local offer or answer collected until candidate gathering ends (manual invites).
@@ -421,6 +436,10 @@ pub struct RoomSession {
     my_invite: Option<Invite>,
     /// Member, manual invites: the reply we made (for the "could not connect" reason).
     my_reply: Option<Reply>,
+    /// Member: wrong passwords on this join (shown to the user; the host keeps its own count).
+    wrong_attempts: u32,
+    /// Member: the host asked for a password (or refused one) on this join.
+    password_stage: bool,
     /// Member, manual invites: end if the host has not admitted us by then.
     admit_deadline: Option<i64>,
 }
@@ -600,6 +619,8 @@ impl RoomSession {
             my_invite: None,
             admit_deadline: None,
             my_reply: None,
+            wrong_attempts: 0,
+            password_stage: false,
         }
     }
 
@@ -1637,17 +1658,49 @@ impl RoomSession {
                 }
             }
             HostStep::Reject { send, close } => {
+                let mut wrong = false;
+                let mut banned = false;
                 for m in &send {
                     self.send_auth(peer, m, out);
-                    if let AuthMsg::Rejected { reason, .. } = m {
+                    if let AuthMsg::Rejected {
+                        reason,
+                        retry_after_ms,
+                    } = m
+                    {
+                        wrong |= *reason == AuthReject::BadPassword;
+                        banned |= *reason == AuthReject::TooManyAttempts && *retry_after_ms == 0;
                         out.push(Output::Ui(RoomUi::Rejected {
                             member: None,
                             what: format!("join attempt refused (link {peer}): {reason:?}"),
                         }));
                     }
                 }
-                if close && let Some(l) = self.links.get_mut(&peer) {
-                    l.close_at.get_or_insert(now + FLUSH_US);
+                if let Some(l) = self.links.get_mut(&peer) {
+                    if close {
+                        l.close_at.get_or_insert(now + FLUSH_US);
+                    } else {
+                        // The member retries on this connection: give it the password time.
+                        l.need_password = true;
+                        l.auth_started = Some(now);
+                    }
+                }
+                let t = unix(clock);
+                if let Some(id) = self.links.get(&peer).and_then(|l| l.invite_id)
+                    && let Some(p) = self.invites.get_mut(&id)
+                {
+                    if wrong {
+                        p.wrong_attempts += 1;
+                        p.last_wrong_unix = Some(t);
+                    }
+                    if banned {
+                        p.state = InvState::Failed;
+                        p.reason = Some(format!(
+                            "Blocked after too many wrong passwords ({}). They can try again in {} minutes, with a new invite.",
+                            crate::auth::BAN_AFTER_FAILURES,
+                            crate::auth::BAN_US / 60_000_000
+                        ));
+                    }
+                    self.publish_invites(out);
                 }
             }
             HostStep::Authenticated {
@@ -1720,6 +1773,11 @@ impl RoomSession {
             MemberStep::Wait => {}
             MemberStep::Send(v) => {
                 if let Some(l) = self.links.get_mut(&peer) {
+                    // A new password attempt gets a fresh auth window: it may come minutes
+                    // after the prompt (the old clock closed the link right after the submit).
+                    if l.need_password {
+                        l.auth_started = Some(now);
+                    }
                     l.need_password = false;
                 }
                 for m in &v {
@@ -1727,12 +1785,15 @@ impl RoomSession {
                 }
             }
             MemberStep::NeedPassword => {
+                self.password_stage = true;
                 if let Some(l) = self.links.get_mut(&peer) {
                     l.need_password = true;
                 }
                 out.push(Output::Ui(RoomUi::NeedPassword {
                     wrong: false,
                     retry_after_ms: 0,
+                    attempts: self.wrong_attempts,
+                    throttled: false,
                 }));
             }
             MemberStep::Authenticated {
@@ -1777,15 +1838,28 @@ impl RoomSession {
                 reason,
                 retry_after_ms,
             } => {
+                if reason == AuthReject::BadPassword {
+                    self.wrong_attempts += 1;
+                }
                 if retry_after_ms > 0 {
+                    // The connection stays open: the member tries again on it.
                     if let Some(l) = self.links.get_mut(&peer) {
                         l.need_password = true;
                         l.auth_started = Some(now);
                     }
                     self.password = None;
+                    self.password_stage = true;
+                    tracing::info!(
+                        attempts = self.wrong_attempts,
+                        retry_ms = retry_after_ms,
+                        ?reason,
+                        "password refused; waiting for a retry"
+                    );
                     out.push(Output::Ui(RoomUi::NeedPassword {
                         wrong: reason == AuthReject::BadPassword,
                         retry_after_ms,
+                        attempts: self.wrong_attempts,
+                        throttled: reason == AuthReject::TooManyAttempts,
                     }));
                 } else {
                     self.end_now(
@@ -1895,6 +1969,18 @@ impl RoomSession {
             .collect();
         for id in due {
             let was_host_link = Some(id) == self.host_link;
+            if !was_host_link {
+                let pw = self.links.get(&id).is_some_and(|l| l.need_password);
+                self.fail_invite_of(
+                    id,
+                    if pw {
+                        "The member did not enter the right password in time."
+                    } else {
+                        "The member did not finish joining in time."
+                    },
+                    out,
+                );
+            }
             self.close_link_now(id, out);
             if was_host_link && self.ending.is_none() && !self.peer.is_host() {
                 self.end_now(
@@ -2118,6 +2204,9 @@ impl RoomSession {
             .iter()
             .map(|(id, p)| InviteView {
                 reason: p.reason.clone(),
+                wrong_attempts: p.wrong_attempts,
+                max_attempts: crate::auth::BAN_AFTER_FAILURES,
+                last_wrong_unix: p.last_wrong_unix,
                 id: invite::hex16(id),
                 status: p.state.text(),
                 text: p
@@ -2197,6 +2286,8 @@ impl RoomSession {
                 reason: None,
                 sent: None,
                 ttl_secs: u32::try_from(ttl).unwrap_or(u32::MAX),
+                wrong_attempts: 0,
+                last_wrong_unix: None,
             },
         );
         out.push(Output::CreatePeer {
@@ -2331,7 +2422,27 @@ impl RoomSession {
                 InvState::Admitted | InvState::Waiting | InvState::Preparing
             )
         {
+            if p.state == InvState::Admitted && p.reason.is_none() {
+                p.reason = Some(
+                    "The member left before joining (they cancelled, or closed SyncWatch).".into(),
+                );
+            }
             p.state = InvState::Failed;
+            self.publish_invites(out);
+        }
+    }
+
+    /// Host: the invite of this link fails with a reason (if it is still pending).
+    fn fail_invite_of(&mut self, peer: PeerId, reason: &str, out: &mut Vec<Output>) {
+        let Some(id) = self.links.get(&peer).and_then(|l| l.invite_id) else {
+            return;
+        };
+        if let Some(p) = self.invites.get_mut(&id)
+            && matches!(p.state, InvState::Admitted | InvState::Replied)
+        {
+            tracing::info!(link = peer, %reason, "invite failed");
+            p.state = InvState::Failed;
+            p.reason.get_or_insert_with(|| reason.to_owned());
             self.publish_invites(out);
         }
     }
@@ -2488,6 +2599,13 @@ impl RoomSession {
         };
         if self.joined_once {
             self.end_now(EndReason::ConnectionLost { seat_keep_secs }, out);
+        } else if self.password_stage {
+            self.end_now(
+                EndReason::ConnectFailed {
+                    reason: "the host closed the connection before the password was accepted (the host cancelled, or the time to enter it ran out). Ask the host for a fresh invite.".into(),
+                },
+                out,
+            );
         } else {
             self.end_now(EndReason::NotAdmitted, out);
         }

@@ -581,6 +581,7 @@ impl World {
                 RoomUi::NeedPassword {
                     wrong,
                     retry_after_ms,
+                    ..
                 } => Some((*wrong, *retry_after_ms)),
                 _ => None,
             })
@@ -1927,4 +1928,199 @@ fn the_host_hello_before_the_member_sees_the_open_is_kept_and_answered() {
         w.run_for(2_000_000);
         assert!(w.in_room(m), "joined (password: {password:?})");
     }
+}
+
+// ---- Wrong passwords with invites (Milestone 9 manual-test fix) ------------------------------
+
+/// The member's last password prompt: (wrong, retry_after_ms, attempts, throttled).
+fn last_prompt(w: &World, m: usize) -> Option<(bool, u32, u32, bool)> {
+    w.nodes[m].ui.iter().rev().find_map(|u| match u {
+        RoomUi::NeedPassword {
+            wrong,
+            retry_after_ms,
+            attempts,
+            throttled,
+        } => Some((*wrong, *retry_after_ms, *attempts, *throttled)),
+        _ => None,
+    })
+}
+
+/// Host, member and the invite id, with the member admitted and its first (wrong) password
+/// refused.
+fn wrong_first(pw: &str) -> (World, usize, usize, String) {
+    let mut w = World::new();
+    let h = w.host_manual("Hana", 1, Some("s3cret"));
+    let (id, text) = w.make_invite(h, None);
+    let (m, reply) = w.answer("Mo", 2, &text, Some(pw));
+    w.admit_by_reply(h, &id, &reply);
+    (w, h, m, id)
+}
+
+#[test]
+fn a_wrong_password_keeps_the_link_and_a_retry_a_minute_later_gets_in() {
+    let (mut w, h, m, id) = wrong_first("wrong");
+    assert_eq!(last_prompt(&w, m), Some((true, 1000, 1, false)));
+    let inv = w.invites(h).into_iter().find(|i| i.id == id).unwrap();
+    assert_eq!(
+        (inv.status, inv.wrong_attempts, inv.max_attempts),
+        ("admitted", 1, 6)
+    );
+    assert!(inv.last_wrong_unix.is_some());
+    // The member takes its time (the old host timeout closed the link after 30 s).
+    w.run_for(70 * 1_000_000);
+    assert!(w.nodes[m].ended.is_none(), "still waiting for the password");
+    assert_eq!(w.connected(h), 1, "the host kept the connection");
+    w.act(m, Action::SubmitPassword("s3cret".into()));
+    w.run_for(1_000_000);
+    assert!(w.in_room(m), "{:?}", w.phases(m));
+    assert_eq!(
+        w.invites(h)
+            .into_iter()
+            .find(|i| i.id == id)
+            .unwrap()
+            .status,
+        "joined"
+    );
+}
+
+#[test]
+fn a_retry_while_throttled_is_refused_with_a_countdown_and_does_not_count() {
+    let (mut w, h, m, id) = wrong_first("wrong");
+    // At once (the host asked for 1 s): refused as too early, the link stays.
+    w.act(m, Action::SubmitPassword("wrong2".into()));
+    w.run_for(100_000);
+    let (wrong, retry, attempts, throttled) = last_prompt(&w, m).unwrap();
+    assert!(
+        !wrong && throttled && retry > 0 && retry <= 1000 && attempts == 1,
+        "{:?}",
+        last_prompt(&w, m)
+    );
+    assert_eq!(
+        w.invites(h)
+            .into_iter()
+            .find(|i| i.id == id)
+            .unwrap()
+            .wrong_attempts,
+        1
+    );
+    // Second wrong one after the delay: 2 s next time.
+    w.run_for(1_000_000);
+    w.act(m, Action::SubmitPassword("wrong2".into()));
+    w.run_for(100_000);
+    assert_eq!(last_prompt(&w, m), Some((true, 2000, 2, false)));
+    w.run_for(2_100_000);
+    w.act(m, Action::SubmitPassword("s3cret".into()));
+    w.run_for(1_000_000);
+    assert!(w.in_room(m));
+}
+
+#[test]
+fn six_wrong_passwords_ban_the_member_and_a_new_invite_does_not_reset_it() {
+    let (mut w, h, m, id) = wrong_first("w1");
+    for (n, wait) in [
+        (2u32, 1_100_000i64),
+        (3, 2_100_000),
+        (4, 4_100_000),
+        (5, 8_100_000),
+    ] {
+        w.run_for(wait);
+        w.act(m, Action::SubmitPassword(format!("w{n}")));
+        w.run_for(100_000);
+        assert_eq!(last_prompt(&w, m).map(|p| p.2), Some(n));
+    }
+    w.run_for(8_100_000);
+    w.act(m, Action::SubmitPassword("w6".into()));
+    w.run_for(1_000_000);
+    match &w.nodes[m].ended {
+        Some(EndReason::AuthRejected { reason }) => assert_eq!(reason, "TooManyAttempts"),
+        other => panic!("{other:?}"),
+    }
+    let inv = w.invites(h).into_iter().find(|i| i.id == id).unwrap();
+    assert_eq!(inv.status, "failed");
+    assert!(
+        inv.reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("Blocked after too many wrong passwords"),
+        "{inv:?}"
+    );
+    // The same member with a fresh invite and the RIGHT password is still banned (per identity).
+    let (id2, text2) = w.make_invite(h, None);
+    let (m2, reply2) = w.answer("Mo", 2, &text2, Some("s3cret"));
+    w.admit_by_reply(h, &id2, &reply2);
+    w.run_for(1_000_000);
+    assert!(!w.in_room(m2), "the ban holds across invites");
+    assert!(
+        matches!(&w.nodes[m2].ended, Some(EndReason::AuthRejected { reason }) if reason == "TooManyAttempts")
+    );
+}
+
+#[test]
+fn the_host_ends_a_pending_password_with_a_reason_when_the_member_never_retries() {
+    let (mut w, h, m, id) = wrong_first("wrong");
+    w.run_for(170 * 1_000_000);
+    assert_eq!(
+        w.invites(h)
+            .into_iter()
+            .find(|i| i.id == id)
+            .unwrap()
+            .status,
+        "admitted"
+    );
+    w.run_for(15 * 1_000_000);
+    let inv = w.invites(h).into_iter().find(|i| i.id == id).unwrap();
+    assert_eq!(inv.status, "failed");
+    assert!(
+        inv.reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("did not enter the right password in time"),
+        "{inv:?}"
+    );
+    assert!(w.nodes[m].ended.is_some(), "the member is told too");
+}
+
+#[test]
+fn cancel_while_the_password_is_asked_releases_both_sides() {
+    // The member cancels: the host's invite fails with a reason.
+    let (mut w, h, m, id) = wrong_first("wrong");
+    w.act(m, Action::Leave);
+    w.run_for(2_000_000);
+    assert!(w.nodes[m].ended.is_some());
+    let inv = w.invites(h).into_iter().find(|i| i.id == id).unwrap();
+    assert_eq!(inv.status, "failed");
+    assert!(
+        inv.reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("left before joining"),
+        "{inv:?}"
+    );
+    assert_eq!(w.connected(h), 0);
+    // The host removes the pending invite: the member is told why.
+    let (mut w, h, m, id) = wrong_first("wrong");
+    w.act(h, Action::RemoveInvite(id));
+    w.run_for(2_000_000);
+    match &w.nodes[m].ended {
+        Some(EndReason::ConnectFailed { reason }) => assert!(
+            reason.contains("before the password was accepted"),
+            "{reason}"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_late_retry_is_not_cut_off_by_the_members_own_auth_timeout() {
+    // The member retries 60 s after the wrong password; over a relay its own tick comes before
+    // the host's answer. The submit used to clear "waiting for a password" without restarting
+    // the auth clock, so that tick saw an auth older than 30 s and closed the link at once.
+    let (mut w, h, m, _id) = wrong_first("wrong");
+    w.run_for(60 * 1_000_000);
+    w.input(m, Input::Action(Action::SubmitPassword("s3cret".into())));
+    w.input(m, Input::Tick);
+    w.settle();
+    w.run_for(1_000_000);
+    assert!(w.in_room(m), "{:?} {:?}", w.phases(m), w.nodes[m].ended);
+    assert_eq!(w.connected(h), 1);
 }

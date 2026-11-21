@@ -1028,4 +1028,98 @@ mod tests {
         assert!(!verify(&Identity([5; 32]), b"hello", &sig));
         assert!(!verify(&key.public(), b"hello", &sig[..10]));
     }
+
+    /// A wrong password, then the right one on the SAME connection: each attempt restarts the
+    /// SPAKE2 exchange with a fresh member nonce and message; the host accepts the second.
+    #[test]
+    fn a_retry_on_the_same_connection_restarts_spake_cleanly() {
+        let cfg = host_cfg(Some("s3cret"));
+        let mut th = AuthThrottle::default();
+        let (mut h, hello) = HostAuth::start(&cfg, fps(), random_nonce());
+        let mut m = MemberAuth::new(
+            IdentityKey::from_secret([2; 32]),
+            "Mia",
+            &cfg.room,
+            Some("wrong".into()),
+            fps(),
+            None,
+        );
+        // Drives member messages to the host and back until neither side sends.
+        let pump = |h: &mut HostAuth,
+                    m: &mut MemberAuth,
+                    th: &mut AuthThrottle,
+                    mut to_host: Vec<AuthMsg>,
+                    now: i64| {
+            let mut last = None;
+            for _ in 0..4 {
+                let mut to_member = Vec::new();
+                for msg in to_host.drain(..) {
+                    match h.on_msg(&cfg, th, now, msg) {
+                        HostStep::Send(v) => to_member.extend(v),
+                        HostStep::Authenticated { send, .. } => {
+                            to_member.extend(send);
+                        }
+                        HostStep::Reject { send, close } => {
+                            assert!(!close, "a wrong password does not close the link");
+                            to_member.extend(send);
+                        }
+                        HostStep::Wait => {}
+                    }
+                }
+                for msg in to_member {
+                    let s = m.on_msg(msg);
+                    if let MemberStep::Send(v) = &s {
+                        to_host.extend(v.clone());
+                    }
+                    last = Some(s);
+                }
+                if to_host.is_empty() {
+                    break;
+                }
+            }
+            last
+        };
+        let first = match m.on_msg(hello) {
+            MemberStep::Send(v) => v,
+            other => panic!("{other:?}"),
+        };
+        let first_hello = first[0].clone();
+        let r = pump(&mut h, &mut m, &mut th, first, 0);
+        assert!(
+            matches!(
+                r,
+                Some(MemberStep::Rejected {
+                    reason: AuthReject::BadPassword,
+                    retry_after_ms: 1000
+                })
+            ),
+            "{r:?}"
+        );
+        // Retry after the delay with the right password: a new hello, new nonce, new SPAKE.
+        let again = match m.submit_password("s3cret".into()) {
+            MemberStep::Send(v) => v,
+            other => panic!("{other:?}"),
+        };
+        match (&first_hello, &again[0]) {
+            (
+                AuthMsg::MemberHello {
+                    nonce: n1,
+                    spake: Some(a1),
+                    ..
+                },
+                AuthMsg::MemberHello {
+                    nonce: n2,
+                    spake: Some(a2),
+                    ..
+                },
+            ) => {
+                assert_ne!(n1, n2, "fresh nonce");
+                assert_ne!(a1, a2, "fresh SPAKE2 message");
+            }
+            other => panic!("{other:?}"),
+        }
+        let r = pump(&mut h, &mut m, &mut th, again, 1_100_000);
+        assert!(matches!(r, Some(MemberStep::Authenticated { .. })), "{r:?}");
+        assert!(h.is_done() && m.is_done());
+    }
 }
