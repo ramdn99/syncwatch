@@ -77,6 +77,8 @@ pub struct HostMachine {
     /// The succession state last sent, and to whom (sent again only when either changes).
     successor_sent: Option<(MemberId, SuccessionState)>,
     closed: bool,
+    /// The Host-controls settings last shown to the UI (sent again only when they change).
+    settings_shown: Option<HostSettings>,
 }
 
 impl HostMachine {
@@ -110,6 +112,7 @@ impl HostMachine {
             handover: None,
             successor_sent: None,
             closed: false,
+            settings_shown: None,
         }
     }
 
@@ -146,8 +149,10 @@ impl HostMachine {
         }
         let muted: Vec<Identity> = h.muted.clone();
         let next_member_id = h.members.iter().map(|m| m.id.0).max().unwrap_or(0) + 1;
+        let mut gate = Gate::new(cfg.gate_timeout_us);
+        gate.wait_for_everyone = h.wait_for_everyone;
         let mut host = Self {
-            gate: Gate::new(cfg.gate_timeout_us),
+            gate,
             cfg,
             me,
             local,
@@ -167,6 +172,7 @@ impl HostMachine {
             handover: None,
             successor_sent: None,
             closed: false,
+            settings_shown: None,
         };
         host.local.room = h.playback;
         host
@@ -189,6 +195,8 @@ impl HostMachine {
         self.broadcast_cmd(Command::Tracks(self.tracks.clone()), &mut out);
         out.ui(UiEvent::BecameHost);
         self.broadcast_members_if_changed(&mut out);
+        self.settings_shown = None;
+        self.emit_settings(&mut out);
         out.into_vec()
     }
 
@@ -329,6 +337,7 @@ impl HostMachine {
         }
         self.broadcast_members_if_changed(&mut out);
         self.update_successor(&mut out);
+        self.emit_settings(&mut out);
         out.into_vec()
     }
 
@@ -361,6 +370,37 @@ impl HostMachine {
             muted,
             bans: self.bans.clone(),
             locked: self.locked,
+            wait_for_everyone: self.gate.wait_for_everyone,
+        }
+    }
+
+    /// What the Host controls show, from this host's state.
+    pub fn host_settings(&self) -> HostSettings {
+        let preset = if self.default_perms
+            == Permissions::for_preset(Preset::EveryoneControls, self.default_perms)
+        {
+            Preset::EveryoneControls
+        } else if self.default_perms == Permissions::for_preset(Preset::OnlyMe, self.default_perms)
+        {
+            Preset::OnlyMe
+        } else {
+            Preset::Custom
+        };
+        HostSettings {
+            default_permissions: self.default_perms,
+            preset,
+            wait_for_everyone: self.gate.wait_for_everyone,
+            sub_delay_ms: self.tracks.sub_delay_ms,
+            audio_delay_ms: self.tracks.audio_delay_ms,
+            locked: self.locked,
+        }
+    }
+
+    fn emit_settings(&mut self, out: &mut Out) {
+        let s = self.host_settings();
+        if self.settings_shown != Some(s) {
+            self.settings_shown = Some(s);
+            out.ui(UiEvent::HostSettings(s));
         }
     }
 
@@ -1309,6 +1349,7 @@ impl HostMachine {
             bans: self.bans.clone(),
             locked: self.locked,
             next_external_id: self.next_external_id,
+            wait_for_everyone: self.gate.wait_for_everyone,
         };
         self.broadcast_cmd(Command::HostTransfer(Box::new(h.clone())), out);
         out.ui(UiEvent::HostChanged { new_host: m });

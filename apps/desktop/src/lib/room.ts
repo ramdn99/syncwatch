@@ -159,6 +159,8 @@ export interface RoomState {
   passwordIgnored: boolean;
   /** Fresh relay servers could not be fetched; the saved ones are tried. */
   relayWarning: string | null;
+  /** Host only: what the Host controls show, from the host's own room state. */
+  hostSettings: HostSettings | null;
   diag: RoomDiag;
   mediaEpoch: number;
   mediaDurationMs: number | null;
@@ -195,6 +197,14 @@ export interface AddExternalOutcome {
   relayedMembers: string[];
   size: number;
   convertedFrom: string | null;
+}
+
+export interface HostSettings {
+  preset: 'everyone' | 'onlyMe' | 'custom';
+  waitForEveryone: boolean;
+  subDelayMs: number;
+  audioDelayMs: number;
+  locked: boolean;
 }
 
 export interface RoomDiag {
@@ -241,6 +251,7 @@ export const EMPTY_ROOM: RoomState = {
   ended: null,
   passwordIgnored: false,
   relayWarning: null,
+  hostSettings: null,
   diag: { relayOnly: false, iceServers: 0, signalingHost: '', signalingConnected: false, signalingReconnects: 0, events: [], rejected: [] },
   mediaEpoch: 0,
   mediaDurationMs: null,

@@ -283,6 +283,33 @@ pub struct RejectRow {
     count: u32,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostSettingsDto {
+    /// "everyone", "onlyMe" or "custom".
+    preset: &'static str,
+    wait_for_everyone: bool,
+    sub_delay_ms: i32,
+    audio_delay_ms: i32,
+    locked: bool,
+}
+
+impl From<syncwatch_sync_core::HostSettings> for HostSettingsDto {
+    fn from(s: syncwatch_sync_core::HostSettings) -> Self {
+        Self {
+            preset: match s.preset {
+                syncwatch_protocol::Preset::EveryoneControls => "everyone",
+                syncwatch_protocol::Preset::OnlyMe => "onlyMe",
+                syncwatch_protocol::Preset::Custom => "custom",
+            },
+            wait_for_everyone: s.wait_for_everyone,
+            sub_delay_ms: s.sub_delay_ms,
+            audio_delay_ms: s.audio_delay_ms,
+            locked: s.locked,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagDto {
@@ -369,6 +396,8 @@ pub struct RoomStateDto {
     password_ignored: bool,
     /// The relay servers could not be refreshed from Metered; the saved ones are tried.
     relay_warning: Option<String>,
+    /// Host only: what the Host controls show, always from the host's own state (sync-core).
+    host_settings: Option<HostSettingsDto>,
     diag: DiagDto,
     /// The room's current media epoch (chat chips of older epochs are not seekable).
     media_epoch: u64,
@@ -792,6 +821,7 @@ impl Mirror {
                     wait: wait.map(WaitDto::from),
                 };
             }
+            UiEvent::HostSettings(s) => self.s.host_settings = Some(s.into()),
             UiEvent::Gate(g) => {
                 if g.active != self.s.gate.active {
                     self.event(if g.active {
@@ -1008,6 +1038,7 @@ impl Mirror {
                 self.toast("You are the host now.")
             }
             UiEvent::HostChanged { .. } => {
+                self.s.host_settings = None;
                 self.event("the host role moved");
                 self.toast("The host role moved to another member.")
             }

@@ -132,6 +132,7 @@ impl MemberMachine {
             bans: rules.bans,
             locked: rules.locked,
             next_external_id,
+            wait_for_everyone: rules.wait_for_everyone,
         })
     }
 

@@ -309,6 +309,8 @@ pub struct HostHandover {
     pub bans: Vec<Identity>,
     pub locked: bool,
     pub next_external_id: u32,
+    /// "Wait for everyone before playing" (protocol 4).
+    pub wait_for_everyone: bool,
 }
 
 /// The room switches to new media (or to none). Everyone stops the old source completely.
@@ -356,6 +358,8 @@ pub struct SuccessionState {
     pub muted: Vec<Identity>,
     pub bans: Vec<Identity>,
     pub locked: bool,
+    /// "Wait for everyone before playing" (protocol 4).
+    pub wait_for_everyone: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

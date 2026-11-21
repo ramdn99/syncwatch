@@ -219,9 +219,23 @@ pub struct TorrentMetaStore {
     pub host_port: u16,
 }
 
+/// Host only: the room settings the Host controls show, from the host's own state (so the UI
+/// never keeps its own copy). Emitted when any of them changes, and after becoming host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostSettings {
+    pub default_permissions: Permissions,
+    /// EveryoneControls / OnlyMe when the defaults match a preset, otherwise Custom.
+    pub preset: Preset,
+    pub wait_for_everyone: bool,
+    pub sub_delay_ms: i32,
+    pub audio_delay_ms: i32,
+    pub locked: bool,
+}
+
 /// UI notifications.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiEvent {
+    HostSettings(HostSettings),
     Joining,
     Joined {
         me: MemberId,

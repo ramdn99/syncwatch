@@ -7,7 +7,7 @@ type Preset = 'everyone' | 'onlyMe';
 
 export interface HostControlsProps {
   isHost: boolean;
-  room: Pick<RoomState, 'locked' | 'chatState' | 'myPermissions' | 'isHost' | 'externals' | 'declined' | 'active'>;
+  room: Pick<RoomState, 'locked' | 'chatState' | 'myPermissions' | 'isHost' | 'externals' | 'declined' | 'active' | 'hostSettings'>;
   /** Host: send external files above the 1 GB audio / 20 MB subtitle ceilings. */
   noLimit?: boolean;
   onNoLimit?: (on: boolean) => void;
@@ -21,10 +21,16 @@ export interface HostControlsProps {
   onAction: (a: RoomAction) => void;
 }
 
+// Every value shown here comes from the host's room state (room.hostSettings, chatState, locked,
+// members' permissions): nothing is kept in this component, so collapsing the section,
+// re-opening it or any re-render shows exactly what the room uses (Milestone 9 finding: the
+// preset, "Wait for everyone" and the delays used to reset to defaults on re-open).
 export function HostControls(p: HostControlsProps) {
   const { isHost, room } = p;
-  const [preset, setPreset] = useState<Preset | null>(null);
-  const [waitForEveryone, setWaitForEveryone] = useState(false);
+  const hs = room.hostSettings;
+  const preset: Preset | null = hs?.preset === 'everyone' ? 'everyone' : hs?.preset === 'onlyMe' ? 'onlyMe' : null;
+  const waitForEveryone = hs?.waitForEveryone ?? false;
+  const locked = hs?.locked ?? room.locked;
   const cc = { enabled: room.chatState.enabled, slowModeSecs: room.chatState.slowModeSecs };
   const canChangeSource = isHost || room.myPermissions.canChangeMedia;
   return (
@@ -45,16 +51,15 @@ export function HostControls(p: HostControlsProps) {
                 role="radio"
                 aria-checked={preset === v}
                 className={`px-2 py-1.5 ${preset === v ? 'bg-accent font-semibold text-on-accent' : 'bg-elevated text-muted hover:text-text'}`}
-                onClick={() => {
-                  setPreset(v);
-                  p.onAction({ type: 'preset', preset: v });
-                }}
+                onClick={() => p.onAction({ type: 'preset', preset: v })}
               >
                 {label}
               </button>
             ))}
           </div>
-          <p className="mt-1 text-[11px] text-muted">Custom: use Permissions... in a member's menu.</p>
+          <p className="mt-1 text-[11px] text-muted" data-testid="preset-note">
+            {hs?.preset === 'custom' ? 'Custom default permissions. ' : ''}Custom: use Permissions... in a member's menu.
+          </p>
         </fieldset>
       )}
       {canChangeSource && (
@@ -78,15 +83,12 @@ export function HostControls(p: HostControlsProps) {
             <input
               type="checkbox"
               checked={waitForEveryone}
-              onChange={(e) => {
-                setWaitForEveryone(e.target.checked);
-                p.onAction({ type: 'waitForEveryone', on: e.target.checked });
-              }}
+              onChange={(e) => p.onAction({ type: 'waitForEveryone', on: e.target.checked })}
               className="accent-[#E8A33D]"
             />
             Wait for everyone before playing
           </label>
-          {room.active && <Delays onAction={p.onAction} />}
+          {room.active && <Delays subMs={hs?.subDelayMs ?? 0} audioMs={hs?.audioDelayMs ?? 0} onAction={p.onAction} />}
           {room.active && (
             <label className="flex items-center gap-2" title="Allow audio files over 1 GB and subtitles over 20 MB">
               <input type="checkbox" checked={p.noLimit ?? false} onChange={(e) => p.onNoLimit?.(e.target.checked)} className="accent-[#E8A33D]" />
@@ -94,7 +96,7 @@ export function HostControls(p: HostControlsProps) {
             </label>
           )}
           <label className="flex items-center gap-2">
-            <input type="checkbox" checked={room.locked} onChange={(e) => p.onAction({ type: 'lock', locked: e.target.checked })} className="accent-[#E8A33D]" />
+            <input type="checkbox" checked={locked} onChange={(e) => p.onAction({ type: 'lock', locked: e.target.checked })} className="accent-[#E8A33D]" />
             Lock the room (no new people)
           </label>
           <fieldset className="space-y-1.5 border-t border-border pt-2">
@@ -200,33 +202,42 @@ export function Externals({ room, isHost, onAction }: { room: Pick<RoomState, 'e
   );
 }
 
-/** Host: subtitle and audio delay, applied on every member immediately. */
-function Delays({ onAction }: { onAction: (a: RoomAction) => void }) {
-  const [sub, setSub] = useState(0);
-  const [audio, setAudio] = useState(0);
-  const row = (label: string, v: number, set: (n: number) => void, kind: 'sub' | 'audio') => (
-    <label className="flex items-center gap-2">
-      <span className="w-24">{label}</span>
-      <input
-        type="number"
-        step={100}
-        value={v}
-        aria-label={`${label} in milliseconds`}
-        className="tabular w-20 rounded border border-border bg-surface px-1 py-0.5 text-text"
-        onChange={(e) => set(Number(e.target.value) || 0)}
-        onBlur={() => onAction({ type: 'setDelay', kind, ms: v })}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') onAction({ type: 'setDelay', kind, ms: v });
-        }}
-      />
-      ms
-    </label>
-  );
+/** Host: subtitle and audio delay, applied on every member immediately. The shown value is the
+ * room's (subMs / audioMs); a draft exists only while the field is being edited. */
+function Delays({ subMs, audioMs, onAction }: { subMs: number; audioMs: number; onAction: (a: RoomAction) => void }) {
+  const [draft, setDraft] = useState<{ kind: 'sub' | 'audio'; text: string } | null>(null);
+  const row = (label: string, stored: number, kind: 'sub' | 'audio') => {
+    const commit = () => {
+      if (draft?.kind !== kind) return;
+      const ms = Number(draft.text) || 0;
+      setDraft(null);
+      if (ms !== stored) onAction({ type: 'setDelay', kind, ms });
+    };
+    return (
+      <label className="flex items-center gap-2">
+        <span className="w-24">{label}</span>
+        <input
+          type="number"
+          step={100}
+          value={draft?.kind === kind ? draft.text : String(stored)}
+          aria-label={`${label} in milliseconds`}
+          className="tabular w-20 rounded border border-border bg-surface px-1 py-0.5 text-text"
+          onFocus={() => setDraft({ kind, text: String(stored) })}
+          onChange={(e) => setDraft({ kind, text: e.target.value })}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') commit();
+          }}
+        />
+        ms
+      </label>
+    );
+  };
   return (
     <fieldset className="space-y-1">
       <legend className="text-muted">Delays (for everyone)</legend>
-      {row('Subtitle delay', sub, setSub, 'sub')}
-      {row('Audio delay', audio, setAudio, 'audio')}
+      {row('Subtitle delay', subMs, 'sub')}
+      {row('Audio delay', audioMs, 'audio')}
     </fieldset>
   );
 }
