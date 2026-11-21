@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { endText, friendlyError, loadName, PASSWORD_IGNORED_TEXT, room, saveName } from '../lib/room';
 import { ERRORS, isNoServer } from '../strings/errors';
 import { INVITE_TEXT } from '../strings/invites';
@@ -54,14 +54,24 @@ export function RoomEntryDialog(props: { mode: 'create' | 'join'; onClose: () =>
     }
   };
 
+  // Joining with an invite: the invite step has its own forms (the room password retry), and
+  // a <form> must never sit inside another <form>. In a real browser the nested form's submit
+  // handler never ran, so the password retry (Enter key and button) did nothing (Milestone 9,
+  // two-machine test; reproduced in Edge with real events, PasswordFlow.browser.test.tsx).
+  const Shell = !create && manual ? 'div' : 'form';
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" role="dialog" aria-modal="true" aria-labelledby="room-dialog-title">
-      <form
+      <Shell
         className="w-[26rem] space-y-4 rounded-xl border border-border bg-elevated p-5 shadow-xl"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void submit();
-        }}
+        data-testid="room-entry"
+        onSubmit={
+          Shell === 'form'
+            ? (e: FormEvent) => {
+                e.preventDefault();
+                void submit();
+              }
+            : undefined
+        }
       >
         <h2 id="room-dialog-title" className="font-brand text-lg font-bold">
           {create ? 'Create a room' : 'Join a room'}
@@ -178,7 +188,7 @@ export function RoomEntryDialog(props: { mode: 'create' | 'join'; onClose: () =>
             {busy ? 'Connecting...' : create ? 'Create room' : 'Join room'}
           </button>
         </div>
-      </form>
+      </Shell>
     </div>
   );
 }

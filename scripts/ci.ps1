@@ -30,6 +30,8 @@ Step 'imports' { pwsh -NoProfile -File scripts/verify-imports.ps1 }
 Step 'secret scan' { pwsh -NoProfile -File scripts/secret-scan.ps1 -Mode All }
 Step 'frontend lint' { pnpm.cmd --dir apps/desktop lint }
 Step 'frontend test' { pnpm.cmd --dir apps/desktop test }
+# Real-DOM tests in the installed Microsoft Edge (real keys, clicks and form submission).
+Step 'frontend browser test' { pnpm.cmd --dir apps/desktop test:browser }
 Step 'frontend build' { pnpm.cmd --dir apps/desktop build }
 Step 'emoji scan' { node apps/desktop/scripts/emoji-scan.mjs }
 Write-Host 'PASS  ci'

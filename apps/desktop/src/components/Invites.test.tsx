@@ -173,7 +173,10 @@ describe('the invite Join dialog never falls back to room codes', () => {
     render(<RoomEntryDialog mode="join" onClose={() => {}} onEntered={() => {}} />);
     const nameBox = screen.getByLabelText('Your name');
     fireEvent.change(nameBox, { target: { value: 'Mo' } });
-    fireEvent.submit(nameBox.closest('form') as HTMLFormElement);
+    // No <form> wraps the invite Join dialog (a nested form swallowed the password retry), so
+    // Enter in the name field cannot submit anything.
+    expect(nameBox.closest('form')).toBeNull();
+    fireEvent.keyDown(nameBox, { key: 'Enter' });
     await new Promise((r) => setTimeout(r, 20));
     expect(joinByCode).not.toHaveBeenCalled();
     expect(document.body.textContent).not.toMatch(/room codes? (have|has) 8 characters/i);
@@ -261,6 +264,8 @@ describe('wrong password with an invite (manual-test fix)', () => {
     await waitFor(() => expect(screen.getByTestId('password-retry')).toBeTruthy());
     expect(screen.getByTestId('invite-reply-step').textContent).toContain('badge');
     const field = screen.getByLabelText('Room password');
+    // The prompt clears and focuses the field when it appears: type after that, as a user would.
+    await waitFor(() => expect(document.activeElement).toBe(field));
     fireEvent.change(field, { target: { value: 's3cret' } });
     fireEvent.submit(field.closest('form') as HTMLFormElement);
     await waitFor(() => expect(submitPassword).toHaveBeenCalledWith('s3cret'));

@@ -406,6 +406,12 @@ impl HostAuth {
                     None => (Vec::new(), Vec::new(), Vec::new()),
                     Some(pw) => {
                         if let Err((reason, retry)) = throttle.check(&identity, now) {
+                            tracing::info!(
+                                member = %short_id(&identity),
+                                ?reason,
+                                retry_ms = retry,
+                                "password attempt refused before checking (too early, paused or banned)"
+                            );
                             return HostStep::Reject {
                                 send: vec![AuthMsg::Rejected {
                                     reason,
@@ -505,6 +511,9 @@ impl HostAuth {
                     return self.fail(AuthReject::Failed);
                 }
                 throttle.record_success(&c.identity);
+                if cfg.password.is_some() {
+                    tracing::info!(member = %short_id(&c.identity), "room password accepted");
+                }
                 self.state = HostState::Done;
                 HostStep::Authenticated {
                     identity: c.identity,

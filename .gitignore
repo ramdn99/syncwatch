@@ -52,3 +52,6 @@ graphify-out/
 
 # Updater private keys (never in the repository; see docs/release-guide.md)
 *.key
+
+# Vitest browser-mode attachments (real-DOM tests)
+apps/desktop/.vitest/

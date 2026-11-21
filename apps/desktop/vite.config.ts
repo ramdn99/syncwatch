@@ -24,5 +24,7 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     include: ['src/**/*.test.{ts,tsx}'],
+    // Real-browser tests run with vitest.browser.config.ts (test:browser).
+    exclude: ['src/**/*.browser.test.{ts,tsx}', 'node_modules/**'],
   },
 });

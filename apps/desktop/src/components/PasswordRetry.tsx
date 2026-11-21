@@ -83,6 +83,7 @@ export function PasswordRetry(props: { needPassword: NeedPassword; onSubmit: (pa
       {error && <p className="text-xs text-danger">{error}</p>}
       <button
         type="submit"
+        data-testid="password-submit"
         disabled={blocked || busy || !password}
         className="rounded-md bg-accent px-3 py-1.5 text-sm font-semibold text-on-accent disabled:opacity-50"
       >

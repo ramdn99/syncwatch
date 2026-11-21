@@ -1883,13 +1883,38 @@ impl RoomSession {
         let now = clock.mono_us;
         match a {
             Action::SubmitPassword(p) => {
+                // Every attempt leaves a trace (never the password): sent, or why it could not be.
                 self.password = Some(p.clone()).filter(|p| !p.is_empty());
+                let attempt = self.wrong_attempts + 1;
+                let why = match self
+                    .host_link
+                    .and_then(|h| self.links.get(&h).map(|l| (h, l)))
+                {
+                    None => Some("there is no connection to the host"),
+                    Some((_, l)) if !l.open => Some("the connection to the host is not open"),
+                    Some((_, l)) if !matches!(l.auth, LinkAuth::Member(_)) => {
+                        Some("the host is not waiting for a password")
+                    }
+                    _ => None,
+                };
+                if let Some(why) = why {
+                    tracing::warn!(attempt, why, "password attempt not sent");
+                    out.push(Output::Ui(RoomUi::Error(format!(
+                        "The password could not be sent: {why}. Ask the host for a fresh invite."
+                    ))));
+                    return;
+                }
                 let Some(h) = self.host_link else { return };
                 let Some(l) = self.links.get_mut(&h) else {
                     return;
                 };
                 if let LinkAuth::Member(m) = &mut l.auth {
                     let step = m.submit_password(p);
+                    let sent = matches!(step, MemberStep::Send(_));
+                    tracing::info!(attempt, sent, "password attempt");
+                    out.push(Output::Ui(RoomUi::Info(format!(
+                        "password attempt {attempt} sent to the host"
+                    ))));
                     self.on_member_step(now, h, step, out);
                 }
             }
