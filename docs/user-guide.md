@@ -9,7 +9,9 @@ and known limits.
 
 1. Download `SyncWatch-<version>-x64.msi` from the latest release on
    https://github.com/ramdn99/syncwatch/releases.
-2. Run it. It installs for your Windows user only, into
+2. Run it. It takes a few seconds (in Windows Sandbox it took about 5 minutes, because the
+   sandbox checks the unsigned 337 MB package slowly; a normal PC does not). It installs for
+   your Windows user only, into
    `%LOCALAPPDATA%\Programs\SyncWatch`, and asks for no administrator rights. Everything
    SyncWatch needs is inside, including the player and, if Windows lacks it, the WebView2
    runtime.
@@ -116,10 +118,31 @@ SyncWatch tells you what to fix when a pasted text cannot be used:
 - **A reply was pasted where an invite belongs (or the other way round):** paste it on the
   other computer.
 - **The invite expired or was already used:** ask the host for a new one.
-- **The text was made by another SyncWatch version:** both of you need the same version
-  (see Updates).
+- **"The other side runs a different version of SyncWatch (theirs: X, yours: Y)":** both of
+  you need the same version (see Updates). Whoever pastes the other's text sees this, so tell
+  the other person.
 - **The connection did not match the invite:** something changed the texts on the way. Make
   a new invite and compare the words carefully.
+
+**While the member waits.** After making the reply, the member sees the reply, the four words
+and "Waiting for the host to let you in...", with **Cancel**. This step stays until the host
+admits, refuses or the invite runs out, or until the member cancels. Take your time copying
+the texts back and forth: the connection waits for the host.
+
+**When the connection cannot be made**, both sides say why instead of a generic error:
+- the host sees "Could not connect to <name>: <reason>" next to the invite, with
+  **Re-issue**;
+- the member sees "The host could not connect: <reason>".
+
+The reason names the side whose text had no public or relay address (for example when its
+relay setup is not working), or says that every network check failed even through the relay
+(a firewall). Make a new invite after fixing what it names. If it keeps failing, turn on
+**Always use relay** on both computers and test the connection in Settings, Connection.
+
+**"Could not refresh the relay servers from Metered; the saved ones may have expired"** at the
+top of a room means Metered did not answer in time when the room was made. SyncWatch then
+tries the relay servers it saved last time. They often still work, but Metered can expire
+them, so if nobody can connect, check Settings, Connection and make the room again.
 
 ### When someone drops out
 

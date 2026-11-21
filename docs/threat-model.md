@@ -56,6 +56,17 @@ test signaling server.
 | Resource abuse by a flood of invites | At most 12 open invites at a time; each pending invite holds one peer connection until it is used, refused, removed or expires. | None known. |
 | A dropped member rejoining | Coming back needs a re-invite from the host, bound to that member's identity (anyone else's reply is refused as "for someone else"). The seat is kept for 5 minutes (configurable). | None known. |
 
+### Waiting, timeouts and early messages (Milestone 9 revision, ADR 0014)
+
+| Threat | What we do | Residual risk |
+|---|---|---|
+| A member link that never opens is kept alive while it waits for Admit | It stays only until the invite's lifetime plus 2 minutes (member), or 45 s after Admit (host); Cancel ends it at once. No room data flows before authentication. | A waiting member holds one TURN allocation for up to that time. |
+| Auth messages that arrive before the open | At most 8 per link are kept and replayed at the open, through the normal auth state machine (same checks as before). Room messages before authentication are still dropped. | None known. |
+| "Could not connect" reasons | Built from candidate TYPES only (host, srflx, relay); never addresses (test). | They tell the other side whether your text had public or relay addresses. |
+| Clock tricks with invites | The member never compares the host's clock with its own: the invite carries a lifetime, and only the host, on its own clock, enforces expiry. | A member with a wrong clock cannot break or extend anything. |
+| Saved relay servers used for a new room | Only when the fresh fetch fails, and always with a visible warning in the room and a diagnostics entry; Metered credentials may have a hard expiry. | The saved copy may simply not work; the room says so. |
+| Copy diagnostics after a room ended | Keeps the end reason and the connection diagnostics (link and ICE states, events) only: no chat, no media names, no addresses (test). | None known. |
+
 ## Malicious member
 
 | Threat | What we do | Residual risk |

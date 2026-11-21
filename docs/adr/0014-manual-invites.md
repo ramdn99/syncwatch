@@ -138,3 +138,67 @@ default.
   - re-invite to a kept seat, and the wrong person refused;
   - Make host refused.
 - **Window tests:** see the user guide walkthrough and `two-windows.ps1 -Scenario invite`.
+
+## Revision: two-machine failures found in the Sandbox (Milestone 9, 2026-11-21)
+
+In the hands-on test with two machines, every invite failed: the host showed "Connecting",
+then "Error connecting", and the member's dialog silently went back to the paste step.
+Reproduced on one PC with two release-mode instances using the real Metered fetch
+(`scripts/dev/release-pair.ps1`). Earlier labs had missed it: they used debug builds with no
+relay or a local coturn, and direct links on one PC. Causes and fixes:
+
+1. **The member's attempt died before the host could answer.**
+   - The member's ICE starts checking as soon as it has the invite, but the host applies the
+     answer only after Admit, often minutes later.
+   - Between machines (or relay-only) nothing answers those checks, and ICE reaches `failed`
+     after about 17 s. The bridge then closed the peer and the session ended (`NotAdmitted`).
+   - On one PC this stayed hidden: the host answers the checks on the local network even
+     before it has the answer.
+   - **Fix:**
+     - A link that never opened is no longer closed on `failed` (`bridge.ts`).
+     - The session gets ICE state changes (`TransportEvent::IceState`). WebRTC recovers once
+       the host starts its own checks: proven after 26 s and after 4 minutes in `failed`.
+2. **No time limit and no reason.**
+   - Host: once it admits, the link must open within 45 s, and an ICE `failed` after Admit
+     ends it at once. The invite turns "failed" with a reason built from what each text
+     carried (types only, never addresses).
+   - Member: the same rule starts when the host's checks arrive (`failed` back to `checking`).
+     The attempt ends with `ConnectFailed { reason }`, shown as "The host could not connect:
+     <reason>".
+   - Otherwise the member waits until the invite's lifetime (plus 2 minutes) has passed.
+3. **Auth messages before the open were dropped.**
+   - The bridge reports "open" only after all three channels are open and its stats call has
+     returned. So the host's first auth message can arrive before the member's session has
+     seen the open, which is likely over a relay.
+   - That message was silently dropped. Both sides then waited 30 s, and the member was never
+     admitted (seen with relay + password).
+   - **Fix:** up to 8 early auth messages per link are kept and replayed at the open. The test
+     `the_host_hello_before_the_member_sees_the_open_is_kept_and_answered` fails without the
+     replay.
+4. **The member's dialog reset itself.** It showed the waiting step only while the latest
+   room state contained the reply. It now keeps the reply, the words and the end reason
+   (UI tests).
+5. **Text format 2:**
+   - Both texts start with the app version, so a different SyncWatch is named even when its
+     format differs: "The other side runs a different version of SyncWatch (theirs: X,
+     yours: Y)".
+   - The invite carries its **lifetime** (`ttl_secs`) instead of a deadline on the host's
+     clock. The member never compares clocks: the host alone enforces expiry, on its own
+     clock, when the reply arrives.
+   - Both texts say whether "Always use relay" is on, and the logs and diagnostics show it.
+   - 0.1.0 texts are refused as "a different version" (0.1.0 was never published).
+6. **The Metered fetch timed out.** See ADR 0004, revision.
+
+The in-process session tests cover each point with no network:
+- the member surviving its own ICE failure;
+- the host's 45 s limit with a reason;
+- the member's reason after the host's checks;
+- a member clock a day ahead;
+- the early hello.
+
+The release-mode lab (`two-windows.ps1 -ReleasePair`) runs the `sync` scenario between two
+release-optimized test builds with the real Metered setup. Results:
+- relay-only with a password: 36/36;
+- direct with a password: 36/36;
+- relay-only without a password: 36/36;
+- with no relay servers, as in the Sandbox: 36/36.

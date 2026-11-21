@@ -91,3 +91,36 @@ labels, OK/FAIL and latency, and was secret-scanned before display.
 - `TODO-VERIFY`: Metered's quota-exhausted response, and whether the free plan is enough.
 - "Copy diagnostics" (credentials redacted, IPs redacted by default) is Milestone 8.
 - Relay-only is stored now and enforced by the WebRTC bridge in Milestone 4.
+
+## Revision: the credentials fetch at room creation (Milestone 9, 2026-11-21)
+
+- **Symptom:**
+  - On two fresh installs, every room creation logged "using the last good relay servers
+    (Metered unreachable)", while Settings, Test connection passed.
+  - The same failure appeared on this PC's release-mode instances at startup: 3 of 4 checks
+    failed within a minute.
+  - The fetch error was swallowed (`Err(_)`), so the logs had no reason.
+- **Cause:**
+  - Metered's credentials API answered in 5.1 s during the test, and its answer time varies.
+  - The fetch gave up after 8 s in total (connect 5 s), so a slow answer became "unreachable".
+  - Settings, Test connection passed because, at that moment, the answer was fast.
+  - Metered documents no response time or rate limit for that endpoint.
+- **Fix:**
+  - The timeouts are now 20 s per attempt (connect 10 s).
+  - A timeout or network error is retried once.
+  - Each fetch logs its duration and error class (never the URL, app name or key):
+    `Metered credentials fetched ms=...` or `... failed error=Timeout`.
+  - A room that has to use the saved servers says so in the room: "Could not refresh the relay
+    servers from Metered; the saved ones may have expired. SyncWatch tries them anyway". The
+    same text goes in the room's events and diagnostics, so the outcome is visible.
+- **Saved servers can expire.**
+  - Metered's docs (read 2026-11-21) give the GET credentials endpoint no expiry field.
+  - Credentials created with `expiryInSeconds` stop working at that time: "a hard cutoff,
+    including for calls that are still in progress".
+  - The docs recommend fetching fresh ones at every start.
+  - So a cached copy cannot be trusted for a new room. It is still tried, because it often
+    works, but never silently.
+  - Sources:
+    - `https://www.metered.ca/docs/turn-rest-api/get-credential`;
+    - `.../post-create-credential/`;
+    - `.../turnserver-guides/expiring-turn-credentials/`.

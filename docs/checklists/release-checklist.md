@@ -20,6 +20,12 @@ Before every release (the release script checks the items marked with "script").
 - [ ] `CHANGELOG.md` has a `## X.Y.Z - date` section in plain words (script).
 - [ ] The clean-machine test passed for this build, or at least its quick part
       (`docs/clean-machine-test.md`).
+- [ ] Release-mode room test passes on this PC (real Metered setup, relay-only, password):
+      `pwsh -NoProfile -File scripts/dev/release-pair.ps1 -Build -TestBuild -Setup -RelayOnly`,
+      then `pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario sync -ReleasePair $env:TEMP\sw-release-pair -Password test`
+      (36/36), then `pwsh -NoProfile -File scripts/dev/release-pair.ps1 -Stop`.
+- [ ] The automated Sandbox test passes, including step 4b (the room test).
+- [ ] An invite between two real machines works (Sandbox and PC, or two PCs), both directions.
 - [ ] Dry run passes:
       `pwsh -NoProfile -File scripts/release.ps1 -Version X.Y.Z -UpdaterKey D:\keys\syncwatch-updater.key -DryRun`.
 - [ ] Real run: `pwsh -NoProfile -File scripts/release.ps1 -Version X.Y.Z -UpdaterKey D:\keys\syncwatch-updater.key`.

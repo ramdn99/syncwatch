@@ -143,6 +143,51 @@ opens. That includes the fresh install, the reinstall and the in-app upgrade. Th
 itself then takes about 1 s. The time on a normal PC is not measured. Code signing or a
 smaller MSI (the WebView2 bootstrapper instead of the offline installer, ADR 0015) are the
 ways to shorten it. What the user sees on screen during that wait has not been checked.
+**Measured by the maintainer (2026-11-20):**
+- the release MSI took about 5 minutes to install in the Sandbox;
+- the same MSI took a few seconds on the real PC.
+
+The long wait is a Sandbox effect, and the installer stays unchanged.
+
+### Hands-on results (2026-11-20) and what followed
+
+**Passed:**
+- install of the 0.1.0 MSI (no UAC prompt);
+- first launch;
+- Metered setup;
+- the bundled Vulkan loader (`vulkan=Bundled`; the default run logs `vulkan=System`);
+- non-Latin subtitles.
+
+**Failed:** invites between the Sandbox and the real PC, in both directions, with and without
+Always use relay.
+- The host showed "Connecting", then "Error connecting".
+- The member's dialog went back to the paste step.
+- Every room creation logged "using the last good relay servers (Metered unreachable)".
+
+Reproduced and fixed with two release-mode instances on one PC (ADR 0014 and ADR 0004
+revisions):
+- the member's attempt ended at its first ICE timeout, before the host could answer;
+- early auth messages were dropped;
+- the dialog reset itself;
+- the Metered fetch gave up after 8 s.
+
+The automated test now has a **room step (4b)**:
+- two copies of the installed test build, a password room, invite, reply, Admit;
+- then play, pause, seek, speed, tracks and external files;
+- no relay servers inside the Sandbox, which has no relay setup.
+
+The relay-only version of the same test runs on the developer's PC with the real Metered
+setup:
+
+```
+pwsh -NoProfile -File scripts/dev/release-pair.ps1 -Build -TestBuild -Setup -RelayOnly
+pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario sync -ReleasePair $env:TEMP\sw-release-pair -Password test
+pwsh -NoProfile -File scripts/dev/release-pair.ps1 -Stop
+```
+
+Automated Sandbox run with these fixes (2026-11-21, `distsandbox-resultsauto-20261121-114752`):
+**ALL PASSED**. This includes the room step, with 35/35 scenario checks between two installed
+copies, and the relaunch after the update (127 s, mostly the Sandbox's package check).
 
 ## Part 2: hands-on checklist (about 45 minutes)
 

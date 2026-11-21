@@ -100,12 +100,14 @@ pwsh -NoProfile -File scripts/secret-scan.ps1 -Mode All
 ```
 `scripts/build-release.ps1` (M9) is the only supported release build path (per-user MSI, ADR 0015):
 ```
-pwsh -NoProfile -File scripts/build-release.ps1   (distelease<version>: MSI, portable zip, SHA256SUMS, logs)
-pwsh -NoProfile -File scripts/verify-package.ps1 -Dir distelease<version>
+pwsh -NoProfile -File scripts/build-release.ps1   (dist\release\<version>: MSI, portable zip, SHA256SUMS, logs)
+pwsh -NoProfile -File scripts/verify-package.ps1 -Dir dist\release\<version>
 pwsh -NoProfile -File scripts/dev/build-repeat.ps1 -Count 10   (clean-build stability; keeps the full log of any failure)
 pwsh -NoProfile -File scripts/release.ps1 -Version x.y.z -DryRun   (USER runs real releases; docs/release-guide.md)
 pwsh -NoProfile -File scripts/bump-version.ps1 -Version x.y.z
 pwsh -NoProfile -File scripts/sandbox-prepare.ps1 -IncludeRelease   (test MSIs 0.0.1/0.0.2 + signed local update; then the USER double-clicks scripts/sandbox-auto.wsb or sandbox-test.wsb; docs/clean-machine-test.md; NEVER install SyncWatch on this PC)
+pwsh -NoProfile -File scripts/dev/release-pair.ps1 -Build -TestBuild -Setup -RelayOnly   (2-3 release-mode instances, real Metered setup seeded from .env.local, never %LOCALAPPDATA%\SyncWatch; -Stop afterwards)
+pwsh -NoProfile -File scripts/dev/two-windows.ps1 -Scenario sync -ReleasePair $env:TEMP\sw-release-pair -Password test   (release-mode room test; -NoRelayServers = the Sandbox setup)
 pwsh -NoProfile -File scripts/dev/idle-measure.ps1 -Part room   (also -Part torrent; docs/measurements.md)
 cargo test -p syncwatch-protocol --test fuzz   (also net, ice-config, torrent; SYNCWATCH_FUZZ_ITERS for longer runs; docs/security-review.md)
 ```
