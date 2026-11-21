@@ -252,3 +252,31 @@ The session around them was not:
 - UI tests for the exact flow.
 - Release-mode end-to-end runs: wrong, wrong 41 s later, then right: 36/36 direct and 36/36
   relay-only.
+
+### Second finding: the retry form was nested (two-machine test, 2026-11-21)
+
+**Symptom.** Even with the session fixed, the member's retry did nothing between two machines.
+- The countdown and "attempt n of 6" appeared.
+- Then neither the Enter key nor the button sent anything, and neither side logged a thing.
+
+**Cause.** The password form was nested inside the Join dialog's own `<form>`, which is
+invalid HTML:
+- In a real browser engine, Enter and a click dispatched the submit on the inner form, but
+  its React submit handler never ran.
+- Without the fix, Edge even performs the native, unhandled submission.
+- The jsdom tests had passed because they fired a synthetic submit straight at the inner form.
+
+**Proof:**
+- The real window (release builds), and a real-DOM test in the installed Edge
+  (`PasswordFlow.browser.test.tsx`, Vitest browser mode with Playwright).
+- The same component outside a form, the in-room prompt, worked.
+
+**Fix:**
+- The invite Join dialog no longer wraps its content in a `<form>`.
+- Every attempt is logged on both sides (number, sent or why not, refused or accepted; never
+  the password or proof) and kept in Copy diagnostics.
+- The real-DOM tests run in `scripts/ci.ps1`.
+
+**Verified with the real controls:**
+- **Direct:** wrong, Enter retry wrong, right by click, in the room.
+- **Relay-only:** wrong, Enter retry 59 s later, right by click, in the room.

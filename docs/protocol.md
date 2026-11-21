@@ -11,7 +11,7 @@ named in each section; the code is the reference.
 | (dev and tests) | WebSocket signaling server, JSON messages | `crates/protocol/src/signaling.rs`, `crates/signaling-server` | 0005 |
 | Transport | WebRTC data channels in a hidden WebView2 window; binary IPC frames between it and Rust | `crates/net/src/frame.rs`, `apps/desktop/src/bridge/bridge.ts` | 0005 |
 | Authentication | SPAKE2 (room password, or an empty one) plus ed25519 identities, per-session MACs | `crates/net/src/auth.rs` | 0006 |
-| Room messages | postcard-encoded `Envelope { version, message }`, version 3 | `crates/protocol` | 0003 |
+| Room messages | postcard-encoded `Envelope { version, message }`, version 4 | `crates/protocol` | 0003 |
 | Room logic | The host's pure state machine decides; members follow | `crates/sync-core`, `crates/net/src/session.rs` | 0003, 0006, 0007 |
 
 Topology: a star. Every member has one link to the host; the host relays chat and state.
@@ -56,7 +56,7 @@ and a BLAKE3 sample hash) or the same torrent.
 
 Every frame is checked in this order:
 1. size (64 KiB at most);
-2. version (`PROTOCOL_VERSION` = 3; a different version is refused);
+2. version (`PROTOCOL_VERSION` = 4; a different version is refused; 4 added "wait for everyone" to the host handover and the successor state);
 3. validation (string, list and chunk limits, `crates/protocol/src/limits.rs`).
 
 Fuzz-style tests: `crates/protocol/tests/fuzz.rs`.

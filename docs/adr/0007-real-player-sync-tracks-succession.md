@@ -205,3 +205,35 @@ was not the cause here, but it is the correct reading.
   `LoadTorrentStream`) and adds its state to the room reset.
 - Closed in M7 Part B: the stalled download for skipped relayed members (`FileWithheld`), and
   succession losing bans, the lock, custom permissions and mutes (`SuccessionState`).
+
+## Revision: Host controls come from the host's state (Milestone 9, 2026-11-21)
+
+**Finding.** After collapsing and re-opening the Host controls section, three values showed
+defaults, because they were kept only in the component while the room kept the real values:
+- the playback preset;
+- "Wait for everyone before playing";
+- the subtitle and audio delays.
+
+**Fix:**
+- The host reports `HostSettings` (preset derived from the default permissions, wait for
+  everyone, delays, lock) as a UI event whenever they change and after becoming host. The
+  Host controls render only from it.
+- "Wait for everyone" now moves with the host role (`HostHandover`, `SuccessionState`;
+  protocol 4).
+
+**Where each control lives:**
+
+| Control | Stored in | Members and late joiners | Moves with the host role |
+|---|---|---|---|
+| Preset / default permissions | host `default_perms` | each member's permissions in the snapshot | handover and successor state |
+| Per-member permissions | host member entries | that member's permissions | handover and successor seats |
+| Wait for everyone | host gate | not needed by members | handover and successor state (protocol 4) |
+| Subtitle and audio delay | track state | snapshot and `Tracks` commands | handover (tracks) |
+| Lock | host `locked` | not needed by members | handover and successor state |
+| Chat on, slow mode | chat config | chat state in the snapshot | handover (chat config) |
+| No size limit for added files | the host window (its own uploads); default from Settings | not needed by members | stays with that window |
+
+**Tests:**
+- `crates/sync-core/tests/host_settings.rs`;
+- `HostControls.test.tsx` (collapse and re-open);
+- the real window (Only me, wait, 250 ms and lock survive collapse and re-open).
